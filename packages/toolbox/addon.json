@@ -1,0 +1,65 @@
+{
+    "addonId": "konjugate.robotics.toolbox",
+    "name": "Robotics Toolbox",
+    "version": "0.0.0",
+    "apiVersion": 1,
+    "kind": "launcher",
+    "entry": "index.html",
+    "copyright": "Copyright © 2026 Zenin Easa Panthakkalakath",
+    "permissions": [
+        "data.import",
+        "files.store",
+        "model.open",
+        "network.fetch",
+        "project.data"
+    ],
+    "requires": [
+        "projectSession",
+        "keepSession",
+        "binaryInputs",
+        "multipleBinaryInputs",
+        "storedFiles",
+        "nodeProviderInputs"
+    ],
+    "contributes": {
+        "toolstrip": [
+            {
+                "commandId": "openRoboticsToolbox",
+                "label": "Robotics",
+                "tooltip": "Open the Robotics Toolbox",
+                "symbol": "⚙",
+                "when": "always",
+                "contexts": []
+            }
+        ],
+        "importers": [
+            {
+                "importerId": "robot",
+                "name": "Robot",
+                "entry": "importers/robot.mjs",
+                "files": [
+                    {
+                        "role": "model",
+                        "binary": true,
+                        "multiple": true,
+                        "label": "Robot model",
+                        "accept": [
+                            "xml",
+                            "stl",
+                            "obj",
+                            "msh",
+                            "png"
+                        ],
+                        "description": "A robot's MuJoCo model (its MJCF and the meshes and textures it reads), as fetched from MuJoCo Menagerie and kept on this computer: each file named for its path in the model's folder, with / written as ^."
+                    }
+                ]
+            }
+        ]
+    },
+    "network": {
+        "hosts": [
+            "api.github.com",
+            "raw.githubusercontent.com"
+        ]
+    }
+}

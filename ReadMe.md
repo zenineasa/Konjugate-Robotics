@@ -1,0 +1,43 @@
+# Konjugate Robotics Toolbox
+
+A robotics extension for [Konjugate](https://github.com/zenineasa/Konjugate), the open-source, graph-native simulation engine. A robot's mechanism runs in [MuJoCo](https://mujoco.org), embedded in a Konjugate model, so the same model can hold the motors that drive it, the battery that feeds them, the heat in their windings and anything else Konjugate models, and be driven, forked, fitted and optimised like any other.
+
+## Status
+
+Early development. Where it is going and why: [docs/direction.md](docs/direction.md). What exists today:
+
+- **Mechanisms in MuJoCo, inside Konjugate.** A Python computational-node provider (`packages/engine/providers/mechanism.py`) runs a MuJoCo model as one node of a Konjugate model, a co-simulation step per engine step. Each joint is driven by a torque, by the model's own servo to a setpoint, or left free; torques and setpoints come from shared parameters (live sliders) or from other nodes, such as a motor's. A body's mass and a joint's damping, friction and armature follow shared parameters, so a slider, a schedule, a fork or a fit reaches the physics. Runs match MuJoCo run on its own.
+- **A component library plugin**, `konjugate.robotics.engine`: a **joint motor** (a DC motor and gearbox: current, torque at the joint, winding temperature) and a **joint drive** bundle wiring it to a battery and its joint's speed. A motor faster than the step runs in substeps of its own.
+- **The Robotics Toolbox** add-on, `konjugate.robotics.toolbox`: a window that lists robots from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie), shows a robot's licence before anything is downloaded, keeps the download on this computer, reads its joints and servos, and builds a mechanism from them into the canvas. The project carries the robot with its licence and where it came from. No robot is shipped with the toolbox.
+
+What it does not do yet: show the robot moving in 3D (the bodies are not nodes of their own until Konjugate has group providers); servo currents for the battery and heat; every action with a key and an undo, as the other toolboxes have. See [docs/direction.md](docs/direction.md), "Where milestone A stands".
+
+## Running a robot
+
+Konjugate runs the mechanism provider with the Python it is given for providers, which needs MuJoCo:
+
+```
+pip install mujoco
+```
+
+Then choose that Python under **Provider Toolchains** (⚒ in the titlebar). Open the Robotics Toolbox from the toolstrip, choose a robot, read its licence, download it, set each joint's mode and build it into the canvas. Its servos' setpoints are live sliders there.
+
+## Building from source
+
+This repository builds against a sibling checkout of Konjugate, cloned side by side (`KONJUGATE_DIR` overrides that), whose engine is built:
+
+```
+npm run setup:python     # .venv with MuJoCo, for the tests (needs uv)
+npm run build            # out/konjugate.robotics.engine-<version>.kjp and out/konjugate.robotics.toolbox-<version>.kja
+npm run install:dev      # builds and installs both into your local Konjugate
+npm run fetch:model trs_so_arm100 -- --commit 62ab00f2bc44f6f20c1c9b7a13f3fb1dd41a4e35   # a robot, for the tests
+npm test                 # unit tests
+npm run test:engine      # mechanisms through Konjugate's engine, against MuJoCo alone
+npm run test:interaction # the window in the real app, offline
+```
+
+The tests use the robots fetched to `out/models/` (the SO-ARM100, UR5e, Panda and Go2 at the commit above); a test whose robot is not there is skipped and says so.
+
+## Licence
+
+Not yet decided (see [docs/direction.md](docs/direction.md), "Open questions"). The robots the toolbox fetches carry their own licences, shown before download and kept with every project built from them.

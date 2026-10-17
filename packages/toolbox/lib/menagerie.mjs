@@ -23,17 +23,21 @@ export async function latestCommit(fetchJson, branch = 'main') {
     return commit.sha;
 }
 
-// The files of one model's folder at `commit` (paths relative to the folder), its pictures left out.
+// The files of one model's folder at `commit` (paths relative to the folder), its pictures left out. Listed folder by
+// folder through GitHub's contents API: the whole repository's file list is over the megabyte a window may fetch.
 export async function modelFiles(fetchJson, commit, folder) {
     if (!/^[A-Za-z0-9_.-]+$/.test(folder)) throw new Error(`"${folder}" is not a Menagerie model folder name.`);
-    const tree = await fetchJson(`https://api.github.com/repos/${repository.owner}/${repository.name}/git/trees/${commit}?recursive=1`);
-    if (tree?.truncated) throw new Error('Menagerie\'s file list came back incomplete.');
-    const files = (tree?.tree ?? [])
-        .filter((entry) => entry.type === 'blob' && entry.path.startsWith(`${folder}/`))
-        .map((entry) => ({ path: entry.path.slice(folder.length + 1), size: entry.size, url: rawUrl(commit, entry.path) }))
-        .filter(({ path }) => !pictures.test(path));
-    if (!files.length) throw new Error(`Menagerie has no model folder "${folder}" at commit ${commit}.`);
-    return files;
+    const files = [];
+    const list = async (path) => {
+        const entries = await fetchJson(`https://api.github.com/repos/${repository.owner}/${repository.name}/contents/${path.split('/').map(encodeURIComponent).join('/')}?ref=${commit}`);
+        if (!Array.isArray(entries)) throw new Error(`Menagerie has no model folder "${folder}" at commit ${commit}.`);
+        for (const entry of entries) {
+            if (entry.type === 'dir') await list(entry.path);
+            else if (entry.type === 'file') files.push({ path: entry.path.slice(folder.length + 1), size: entry.size, url: rawUrl(commit, entry.path) });
+        }
+    };
+    await list(folder);
+    return files.filter(({ path }) => !pictures.test(path));
 }
 
 export function rawUrl(commit, path) {

@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+    <title>Robotics Toolbox</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <main class="panel">
+        <section class="step" id="stepRobot">
+            <h2><span class="stepNumber">1</span> Robot</h2>
+            <p class="muted">Robots from MuJoCo Menagerie (github.com/google-deepmind/mujoco_menagerie), fetched when you ask for one and kept on this computer. Nothing is downloaded until you have seen its licence.</p>
+            <ul class="robots" id="robots"></ul>
+            <div id="robotStatus"></div>
+        </section>
+
+        <section class="step" id="stepJoints" hidden>
+            <h2><span class="stepNumber">2</span> Joints</h2>
+            <p class="muted" id="jointsIntro"></p>
+            <table class="joints">
+                <thead><tr><th>Joint</th><th>Range</th><th>Mode</th><th>Setpoint or torque</th></tr></thead>
+                <tbody id="joints"></tbody>
+            </table>
+            <p class="muted small">Servo: the model's own servo holds the joint at its setpoint, a live slider in the canvas. Torque: a constant torque, in N·m. Free: nothing drives it.</p>
+        </section>
+
+        <section class="step" id="stepBuild" hidden>
+            <h2><span class="stepNumber">3</span> Build</h2>
+            <div class="row">
+                <label>Name <input id="modelName" type="text" autocomplete="off"></label>
+            </div>
+            <div class="row">
+                <label>Step <input id="timeStep" type="number" min="0.0005" step="0.0005" value="0.01"> s</label>
+                <label>Run <input id="runTime" type="number" min="0.1" step="0.1" value="10"> s</label>
+            </div>
+            <div class="row"><button type="button" id="buildButton" class="primary">Build into the canvas</button></div>
+            <div id="buildStatus"></div>
+            <p class="muted small">Running it needs Python with MuJoCo (<code>pip install mujoco</code>) chosen as the Python for providers, under Provider Toolchains in the titlebar.</p>
+        </section>
+    </main>
+    <script type="module" src="toolbox.mjs"></script>
+</body>
+</html>

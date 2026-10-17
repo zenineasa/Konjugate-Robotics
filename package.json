@@ -1,13 +1,18 @@
 {
   "name": "konjugate-robotics",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "minimumKonjugateVersion": "1.1.16",
   "private": true,
   "type": "module",
   "description": "Robotics toolbox for Konjugate.",
   "copyright": "Copyright © 2026 Zenin Easa Panthakkalakath",
   "scripts": {
+    "build": "node scripts/build.mjs",
+    "install:dev": "node scripts/build.mjs && node scripts/installDev.mjs",
     "setup:python": "uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python mujoco",
+    "fetch:model": "node scripts/fetchMenagerieModel.mjs",
+    "test": "node --test tests/unit/*.test.mjs",
     "test:engine": "node --test tests/engine/*.test.mjs",
-    "fetch:model": "node scripts/fetchMenagerieModel.mjs"
+    "test:interaction": "node scripts/build.mjs && node tests/interaction/robotWindow.mjs"
   }
 }
