@@ -48,8 +48,8 @@ function downwardCrossings(times, values) {
 }
 
 const directory = await mkdtemp(join(tmpdir(), 'robotics-pendulum-'));
-const build = (joint, targetTime = 10) => buildMechanismDocument(
-    { name: 'Pendulum', mjcf, joints: [{ name: 'swing', ...joint }] },
+const build = (joint, targetTime = 10, parameters = []) => buildMechanismDocument(
+    { name: 'Pendulum', mjcf, joints: [{ name: 'swing', ...joint }], parameters },
     { template: providerTemplate, helpers, globalTimeStep: 0.01, targetTime }
 );
 
@@ -111,4 +111,38 @@ test('a run resumed from a checkpoint carries on exactly as the run that never s
     const positions = resumed.series('Pendulum.swingPosition');
     assert.ok(resumed.times.at(-1) > 1.99 && resumed.times[0] >= 1 - 1e-9, `The resumed run covers ${resumed.times[0]} to ${resumed.times.at(-1)} s.`);
     resumed.times.forEach((time, index) => assert.equal(positions[index], original.get(time.toFixed(6)), `At ${time} s.`));
+});
+
+// A node has no parameters of its own; the mechanism reads shared ones, each setting a quantity of MuJoCo's model.
+test('a damping parameter reaches the joint: the pendulum swings as one with that damping in its MJCF', async () => {
+    const damping = 0.3;
+    const run = await runDocument(directory, 'damped', build({ initialPosition: 0.8 }, 3, [{ name: 'swing damping', kind: 'jointDamping', target: 'swing', value: damping }]));
+    const dampedMjcf = mjcf.replace('<joint name="swing" type="hinge" axis="0 1 0"/>', `<joint name="swing" type="hinge" axis="0 1 0" damping="${damping}"/>`);
+    assert.notEqual(dampedMjcf, mjcf);
+    const reference = await runReference(directory, { mjcf: dampedMjcf, joints: [{ name: 'swing', initialPosition: 0.8 }], times: run.times });
+    const positions = run.series('Pendulum.swingPosition');
+    const largest = Math.max(...positions.map((value, index) => Math.abs(value - reference.swing[index])));
+    assert.ok(largest < 1e-9, `Konjugate and MuJoCo alone differ by up to ${largest} rad.`);
+    assert.ok(Math.abs(positions.at(-1)) < 0.5, 'The damped swing should have died down.');
+});
+
+// A stored schedule on the shared parameter changes the mass mid-run, as a fork's intervention or a slider would.
+test('a payload mass scheduled to double reaches the body: held level by m g L, the pendulum then falls as a heavier one does', async () => {
+    const level = Math.PI / 2;
+    const document = build({ initialPosition: level, torque: { value: mass * gravity * length } }, 2, [
+        { name: 'bob mass', kind: 'bodyMass', target: 'bob', value: mass, schedule: { interpolation: 'hold', samples: [[0, mass], [0.995, 2 * mass]] } }
+    ]);
+    const run = await runDocument(directory, 'payload', document);
+    const positions = run.series('Pendulum.swingPosition');
+    const change = run.times.findIndex((time) => time > 0.995);
+    const before = Math.max(...positions.slice(0, change + 1).map((value) => Math.abs(value - level)));
+    assert.ok(before < 1e-9, `Before the change it moved ${before} rad from level.`);
+    // From the change on, as a pendulum of twice the mass under the same torque, from rest at level.
+    const heavier = mjcf.replace(`mass="${mass}"`, `mass="${2 * mass}"`);
+    assert.notEqual(heavier, mjcf);
+    const after = run.times.slice(change).map((time) => time - run.times[change]);
+    const reference = await runReference(directory, { mjcf: heavier, joints: [{ name: 'swing', initialPosition: level }], forces: { swing: mass * gravity * length }, times: after });
+    const largest = Math.max(...positions.slice(change).map((value, index) => Math.abs(value - reference.swing[index])));
+    assert.ok(largest < 1e-9, `After the change Konjugate and MuJoCo alone differ by up to ${largest} rad.`);
+    assert.ok(positions.at(-1) < level - 0.5, 'The heavier pendulum should have fallen.');
 });

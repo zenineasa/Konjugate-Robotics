@@ -32,13 +32,19 @@ export function providerSource(template, configuration) {
     return template.replace(marker, () => `CONFIGURATION = json.loads(r'''${json}''')`);
 }
 
+// The unit of each quantity of MuJoCo's model a parameter may set, for a hinge (a slide's damping is N·s/m).
+const parameterUnits = { bodyMass: 'kg', jointDamping: 'N·m·s/rad', jointFrictionloss: 'N·m', jointArmature: 'kg·m²' };
+
 const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m' }, slide: { position: 'm', speed: 'm/s', effort: 'N' } };
 
 // Places one mechanism's node (and the shared parameters its joints' torques come from) into `document`, taking ids
 // from `id()`. `mechanism` is { name, mjcf, joints: [{ name, kind: 'hinge' | 'slide', initialPosition, initialSpeed,
 // torque, torqueFrom }] }, where `torque` is { value, control?: { minimum, maximum, step } } and `torqueFrom` is
-// { nodeId, stateId }. `template` is mechanism.py's text; `helpers` are Konjugate's equation helpers
-// (validateEquationLatex is used). Returns the node and, by joint name, its position, speed and effort states.
+// { nodeId, stateId }. `mechanism.parameters` are quantities of MuJoCo's model the run may change:
+// [{ name, kind: 'bodyMass' | 'jointDamping' | 'jointFrictionloss' | 'jointArmature', target (the body or joint), value,
+// unit?, control?, schedule? }], each a shared parameter the provider reads (or `sharedParameterId`, one already in the
+// document). `template` is mechanism.py's text; `helpers` are Konjugate's equation helpers (validateEquationLatex is
+// used). Returns the node, by joint name its position, speed and effort states, and by name its shared parameters.
 export function placeMechanism(document, id, mechanism, { template, helpers }) {
     if (!helpers?.validateEquationLatex) throw new Error('The mechanism builder needs Konjugate\'s equation helpers.');
     const keys = new Set();
@@ -79,10 +85,11 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
     }
     const configuration = {
         providerId: 'konjugate.robotics.mechanism', name: node.name, mjcf: mechanism.mjcf,
-        joints: joints.map(({ name, key, initialPosition = 0, initialSpeed = 0, effort, torqueFrom }) => ({ name, key, initialPosition, initialSpeed, driven: Boolean(effort || torqueFrom) }))
+        joints: joints.map(({ name, key, initialPosition = 0, initialSpeed = 0, effort, torqueFrom }) => ({ name, key, initialPosition, initialSpeed, driven: Boolean(effort || torqueFrom) })),
+        parameters: []
     };
     node.implementation = {
-        kind: 'python', providerApiVersion: 1, source: providerSource(template, configuration),
+        kind: 'python', providerApiVersion: 1, source: '', // written once the parameters are in the configuration, below
         bindings: joints.filter(({ effort, torqueFrom }) => effort || torqueFrom).map((joint) => (joint.effort
             ? { key: `${joint.key}Effort`, kind: 'state', nodeId: node.id, stateId: joint.effort.id }
             : { key: `${joint.key}Effort`, kind: 'state', nodeId: joint.torqueFrom.nodeId, stateId: joint.torqueFrom.stateId })),
@@ -91,8 +98,29 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
             { key: `${joint.key}Speed`, stateId: joint.speed.id, setsValue: true }
         ])
     };
+    const parameters = new Map();
+    for (const parameter of mechanism.parameters ?? []) {
+        if (!parameterUnits[parameter.kind]) throw new Error(`Parameter ${parameter.name} sets ${parameter.kind}, which the mechanism does not know.`);
+        const key = jointKey(parameter.name, keys);
+        let shared = parameter.sharedParameterId === undefined ? null : sharedParameters.find(({ id: candidate }) => candidate === parameter.sharedParameterId);
+        if (parameter.sharedParameterId !== undefined && !shared) throw new Error(`Parameter ${parameter.name} links to a shared parameter that does not exist.`);
+        if (!shared) {
+            let symbol = key;
+            for (let suffix = 2; sharedParameters.some((candidate) => candidate.symbol === symbol); suffix += 1) symbol = `${key}${suffix}`;
+            const mode = parameter.control ? 'live' : 'constant';
+            shared = {
+                id: id(), name: parameter.name, symbol, value: parameter.value, unit: parameter.unit ?? parameterUnits[parameter.kind], mode,
+                ...(parameter.control ? { control: { ...parameter.control } } : {}), ...(parameter.schedule ? { schedule: structuredClone(parameter.schedule) } : {})
+            };
+            sharedParameters.push(shared);
+        }
+        node.implementation.bindings.push({ key, kind: 'parameter', sharedParameterId: shared.id });
+        configuration.parameters.push({ key, kind: parameter.kind, target: parameter.target });
+        parameters.set(parameter.name, shared);
+    }
+    node.implementation.source = providerSource(template, configuration);
     (document.nodes ??= []).push(node);
-    return { node, joints: new Map(joints.map(({ name, position, speed, effort }) => [name, { position, speed, effort }])) };
+    return { node, parameters, joints: new Map(joints.map(({ name, position, speed, effort }) => [name, { position, speed, effort }])) };
 }
 
 // A run configuration for `document`, made its active one. Time is in seconds.

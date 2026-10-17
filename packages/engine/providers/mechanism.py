@@ -6,6 +6,11 @@ The mechanism node holds, for each joint, its position and speed, which this pro
 Each joint may read a torque (or, for a slide, a force) from a state: one of the mechanism node's own, or another
 node's, such as a motor's, which the engine reads from the step's synchronization snapshot.
 
+The mechanism may also read shared parameters, each setting one quantity of MuJoCo's model: a body's mass (its inertia
+scaled with it, as for a body of the same shape and density), or a joint's damping, friction loss or armature. Each is
+applied before a step whenever its value has changed, so a live slider, a stored schedule, a fork's intervention and
+fitting all reach the physics; MuJoCo's derived quantities are recomputed after a change of mass or armature.
+
 Each call is a co-simulation step, as an imported FMU's is: called at a substep's start time t with its step h, the
 provider advances MuJoCo over [t, t + h] with each joint's torque held at the value read at t, and reports the joints
 at t + h. The engine writes those values after the substep's other contributions have read the ones from t, and
@@ -64,15 +69,61 @@ class MechanismNode(NodeProvider):
             })
             self._data.qpos[self._joints[-1]["qpos"]] = float(joint.get("initialPosition", 0.0))
             self._data.qvel[self._joints[-1]["dof"]] = float(joint.get("initialSpeed", 0.0))
+        self._parameters = [self._parameter(parameter) for parameter in self._configuration.get("parameters", [])]
         mujoco.mj_forward(self._model, self._data)
         # The time MuJoCo has reached; None until the first call.
         self._time = None
+
+    # A parameter's place in MuJoCo's model: the array it sets and the index in it.
+    def _parameter(self, parameter):
+        kind, target = parameter["kind"], parameter["target"]
+        if kind == "bodyMass":
+            index = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, target)
+            if index < 0:
+                raise ValueError(f"The mechanism has no body named {target}.")
+            if not self._model.body_mass[index] > 0:
+                raise ValueError(f"Body {target} has no mass to scale its inertia from; give it one in the MJCF.")
+            return {"key": parameter["key"], "kind": kind, "index": index}
+        if kind in ("jointDamping", "jointFrictionloss", "jointArmature"):
+            index = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_JOINT, target)
+            if index < 0:
+                raise ValueError(f"The mechanism has no joint named {target}.")
+            return {"key": parameter["key"], "kind": kind, "index": int(self._model.jnt_dofadr[index])}
+        raise ValueError(f"Parameter {parameter['key']} sets {kind}, which the mechanism does not know.")
+
+    # Sets each parameter's quantity in MuJoCo's model to its value, where it differs; True if a mass or armature changed.
+    def _apply_parameters(self, inputs, start):
+        changed_constants = False
+        for parameter in self._parameters:
+            value = inputs[parameter["key"]]
+            if not math.isfinite(value) or (parameter["kind"] == "bodyMass" and not value > 0):
+                raise RuntimeError(f"Parameter {parameter['key']} was given {value} at {start} s.")
+            index = parameter["index"]
+            if parameter["kind"] == "bodyMass":
+                if self._model.body_mass[index] != value:
+                    self._model.body_inertia[index] *= value / self._model.body_mass[index]
+                    self._model.body_mass[index] = value
+                    changed_constants = True
+            else:
+                array = {"jointDamping": self._model.dof_damping, "jointFrictionloss": self._model.dof_frictionloss, "jointArmature": self._model.dof_armature}[parameter["kind"]]
+                if array[index] != value:
+                    array[index] = value
+                    changed_constants = changed_constants or parameter["kind"] == "jointArmature"
+        if changed_constants:
+            # mj_setConst computes at the model's initial pose, using the data as scratch: keep the state around it.
+            spec = mujoco.mjtState.mjSTATE_INTEGRATION
+            state = numpy.zeros(mujoco.mj_stateSize(self._model, spec))
+            mujoco.mj_getState(self._model, self._data, state, spec)
+            mujoco.mj_setConst(self._model, self._data)
+            mujoco.mj_setState(self._model, self._data, state, spec)
+            mujoco.mj_forward(self._model, self._data)
 
     def describe(self):
         return NodeProviderDescription(
             self._configuration.get("providerId", "konjugate.robotics.mechanism"),
             self._configuration.get("name", "Mechanism"),
-            [ScalarPort(f"{joint['key']}Effort", "Torque or force applied", "") for joint in self._joints if joint["driven"]],
+            [ScalarPort(f"{joint['key']}Effort", "Torque or force applied", "") for joint in self._joints if joint["driven"]]
+            + [ScalarPort(parameter["key"], parameter["kind"], "") for parameter in self._parameters],
             [port for joint in self._joints for port in (
                 ScalarPort(f"{joint['key']}Position", "Position", ""),
                 ScalarPort(f"{joint['key']}Speed", "Speed", ""),
@@ -86,6 +137,7 @@ class MechanismNode(NodeProvider):
             self._data.time = start
         elif abs(start - self._time) > _SAME_TIME * max(1.0, abs(start)):
             raise RuntimeError(f"Asked to advance from {start} with the mechanism at {self._time}; each step must start where the last ended.")
+        self._apply_parameters(inputs, start)
         self._data.qfrc_applied[:] = 0.0
         for joint in self._joints:
             if joint["driven"]:
