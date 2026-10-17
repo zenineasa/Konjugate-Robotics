@@ -3,8 +3,14 @@
 """One mechanism, solved by MuJoCo, as a Konjugate computational-node provider.
 
 The mechanism node holds, for each joint, its position and speed, which this provider sets (as algebraic values).
-Each joint may read a torque (or, for a slide, a force) from a state: one of the mechanism node's own, or another
-node's, such as a motor's, which the engine reads from the step's synchronization snapshot.
+Each joint is in one of three modes:
+- torque: it reads a torque (or, for a slide, a force) from a state, one of the mechanism node's own or another node's,
+  such as a motor's, which the engine reads from the step's synchronization snapshot;
+- servo: it reads a setpoint the same way, and the model's own position actuator on the joint (a servo's inner loop,
+  run by MuJoCo at every one of its steps) drives it there; the torque the servo applies is a state too;
+- free: nothing drives it.
+An actuator the model has on a joint in torque or free mode is switched off, so nothing drives a joint that the
+mechanism does not say drives it.
 
 The mechanism may also read shared parameters, each setting one quantity of MuJoCo's model: a body's mass (its inertia
 scaled with it, as for a body of the same shape and density), or a joint's damping, friction loss or armature. Each is
@@ -51,7 +57,11 @@ mujoco.set_mju_user_warning(_warnings.append)
 class MechanismNode(NodeProvider):
     def __init__(self):
         self._configuration = CONFIGURATION
-        self._model = mujoco.MjModel.from_xml_string(self._configuration["mjcf"])
+        if "modelPath" in self._configuration:
+            # A model file on this computer, its meshes beside it (one fetched from Menagerie, say).
+            self._model = mujoco.MjModel.from_xml_path(self._configuration["modelPath"])
+        else:
+            self._model = mujoco.MjModel.from_xml_string(self._configuration["mjcf"])
         self._data = mujoco.MjData(self._model)
         self._timestep = self._model.opt.timestep
         self._joints = []
@@ -61,9 +71,20 @@ class MechanismNode(NodeProvider):
                 raise ValueError(f"The mechanism has no joint named {joint['name']}.")
             if int(self._model.jnt_type[index]) not in (int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)):
                 raise ValueError(f"Joint {joint['name']} is neither a hinge nor a slide; only those are supported yet.")
+            mode = joint.get("mode", "torque" if joint.get("driven") else "free")
+            actuators = [actuator for actuator in range(self._model.nu)
+                         if int(self._model.actuator_trntype[actuator]) == int(mujoco.mjtTrn.mjTRN_JOINT) and int(self._model.actuator_trnid[actuator][0]) == index]
+            if mode == "servo":
+                if len(actuators) != 1:
+                    raise ValueError(f"Joint {joint['name']} in servo mode needs one actuator of the model on it; it has {len(actuators)}.")
+            else:
+                for actuator in actuators:
+                    self._model.actuator_gainprm[actuator][:] = 0.0
+                    self._model.actuator_biasprm[actuator][:] = 0.0
             self._joints.append({
                 "key": joint["key"],
-                "driven": bool(joint.get("driven")),
+                "mode": mode,
+                "actuator": actuators[0] if mode == "servo" else None,
                 "qpos": int(self._model.jnt_qposadr[index]),
                 "dof": int(self._model.jnt_dofadr[index]),
             })
@@ -122,12 +143,13 @@ class MechanismNode(NodeProvider):
         return NodeProviderDescription(
             self._configuration.get("providerId", "konjugate.robotics.mechanism"),
             self._configuration.get("name", "Mechanism"),
-            [ScalarPort(f"{joint['key']}Effort", "Torque or force applied", "") for joint in self._joints if joint["driven"]]
+            [ScalarPort(f"{joint['key']}Effort", "Torque or force applied", "") for joint in self._joints if joint["mode"] == "torque"]
+            + [ScalarPort(f"{joint['key']}Setpoint", "Servo setpoint", "") for joint in self._joints if joint["mode"] == "servo"]
             + [ScalarPort(parameter["key"], parameter["kind"], "") for parameter in self._parameters],
             [port for joint in self._joints for port in (
                 ScalarPort(f"{joint['key']}Position", "Position", ""),
                 ScalarPort(f"{joint['key']}Speed", "Speed", ""),
-            )],
+            ) + ((ScalarPort(f"{joint['key']}ServoTorque", "Torque the servo applies", ""),) if joint["mode"] == "servo" else ())],
         )
 
     def evaluate(self, context, inputs, outputs):
@@ -140,11 +162,16 @@ class MechanismNode(NodeProvider):
         self._apply_parameters(inputs, start)
         self._data.qfrc_applied[:] = 0.0
         for joint in self._joints:
-            if joint["driven"]:
+            if joint["mode"] == "torque":
                 effort = inputs[f"{joint['key']}Effort"]
                 if not math.isfinite(effort):
                     raise RuntimeError(f"Joint {joint['key']} was given a torque of {effort} at {start} s.")
                 self._data.qfrc_applied[joint["dof"]] = effort
+            elif joint["mode"] == "servo":
+                setpoint = inputs[f"{joint['key']}Setpoint"]
+                if not math.isfinite(setpoint):
+                    raise RuntimeError(f"Joint {joint['key']} was given a setpoint of {setpoint} at {start} s.")
+                self._data.ctrl[joint["actuator"]] = setpoint
         warnings = {index: self._data.warning[index].number for index in _INSTABILITY_WARNINGS}
         # Whole MuJoCo steps no longer than its own timestep, shortened evenly to land on the step's end.
         count = max(1, math.ceil(step / self._timestep - 1e-9))
@@ -166,6 +193,8 @@ class MechanismNode(NodeProvider):
         for joint in self._joints:
             outputs.add_gradient(f"{joint['key']}Position", float(self._data.qpos[joint["qpos"]]))
             outputs.add_gradient(f"{joint['key']}Speed", float(self._data.qvel[joint["dof"]]))
+            if joint["mode"] == "servo":
+                outputs.add_gradient(f"{joint['key']}ServoTorque", float(self._data.actuator_force[joint["actuator"]]))
 
     # A checkpoint holds the time reached and MuJoCo's whole integration state.
     def checkpoint(self):

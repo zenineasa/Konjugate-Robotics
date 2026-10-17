@@ -4,9 +4,16 @@
 // (packages/engine/providers/mechanism.py) holds the MuJoCo model. For each joint the node has its position and speed,
 // set by the provider at the end of each substep (algebraic, `setsValue`), in radians or metres per the joint.
 //
-// A joint may be driven, by a torque (a force, for a slide) the provider reads at the start of each substep:
-// - `torque: { value, control? }`, a state of the mechanism's own set from a shared parameter (live with a slider);
-// - `torqueFrom: { nodeId, stateId }`, another node's state, such as a motor's, read from the step's snapshot.
+// A joint is in one of three modes, by what it is given:
+// - torque: driven by a torque (a force, for a slide), `torque: { value, control? }` (a state of the mechanism's own set
+//   from a shared parameter, live with a slider) or `torqueFrom: { nodeId, stateId }` (another node's state, such as a
+//   motor's, read from the step's snapshot);
+// - servo: driven by the model's own position actuator on the joint (a servo's inner loop, run by MuJoCo at its own
+//   timestep) to a setpoint, `setpoint` or `setpointFrom` in the same two ways; the node also gets the torque the servo
+//   applies, as a state;
+// - free: neither, and any actuator the model has on the joint is switched off, so nothing drives it that the model
+//   does not say.
+// The provider reads a torque or setpoint at the start of each substep.
 //
 // One node, not a subsystem of joint and solid nodes, because a computational-node provider writes only its own node's
 // states (see docs/direction.md, "Needs from core"). It has no dependencies of its own: the equation helpers come from
@@ -35,16 +42,19 @@ export function providerSource(template, configuration) {
 // The unit of each quantity of MuJoCo's model a parameter may set, for a hinge (a slide's damping is N·s/m).
 const parameterUnits = { bodyMass: 'kg', jointDamping: 'N·m·s/rad', jointFrictionloss: 'N·m', jointArmature: 'kg·m²' };
 
-const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m' }, slide: { position: 'm', speed: 'm/s', effort: 'N' } };
+const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m', setpoint: 'rad', servoTorque: 'N·m' }, slide: { position: 'm', speed: 'm/s', effort: 'N', setpoint: 'm', servoTorque: 'N' } };
 
 // Places one mechanism's node (and the shared parameters its joints' torques come from) into `document`, taking ids
-// from `id()`. `mechanism` is { name, mjcf, joints: [{ name, kind: 'hinge' | 'slide', initialPosition, initialSpeed,
-// torque, torqueFrom }] }, where `torque` is { value, control?: { minimum, maximum, step } } and `torqueFrom` is
-// { nodeId, stateId }. `mechanism.parameters` are quantities of MuJoCo's model the run may change:
+// from `id()`. `mechanism` is { name, mjcf or modelPath, joints: [{ name, kind: 'hinge' | 'slide', initialPosition,
+// initialSpeed, torque or torqueFrom or setpoint or setpointFrom }] }, where `torque` and `setpoint` are
+// { value, control?: { minimum, maximum, step } } and `torqueFrom` and `setpointFrom` are { nodeId, stateId }. A model
+// is given as MJCF text, or as the path of its file on this computer (one fetched from Menagerie, say, whose meshes sit
+// beside it). `mechanism.parameters` are quantities of MuJoCo's model the run may change:
 // [{ name, kind: 'bodyMass' | 'jointDamping' | 'jointFrictionloss' | 'jointArmature', target (the body or joint), value,
 // unit?, control?, schedule? }], each a shared parameter the provider reads (or `sharedParameterId`, one already in the
 // document). `template` is mechanism.py's text; `helpers` are Konjugate's equation helpers (validateEquationLatex is
-// used). Returns the node, by joint name its position, speed and effort states, and by name its shared parameters.
+// used). Returns the node, by joint name its mode and its position, speed, input and servo torque states, and by
+// name its shared parameters.
 export function placeMechanism(document, id, mechanism, { template, helpers }) {
     if (!helpers?.validateEquationLatex) throw new Error('The mechanism builder needs Konjugate\'s equation helpers.');
     const keys = new Set();
@@ -63,39 +73,52 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
         position.initialValue = joint.initialPosition ?? 0;
         const speed = state('speed', 'speed');
         speed.initialValue = joint.initialSpeed ?? 0;
-        if (joint.torque && joint.torqueFrom) throw new Error(`Joint ${joint.name} is given both a torque and a state to read one from.`);
-        const effort = joint.torque ? state('effort', joint.kind === 'slide' ? 'force' : 'torque') : null;
-        return { ...joint, kind, key, position, speed, effort };
+        const given = ['torque', 'torqueFrom', 'setpoint', 'setpointFrom'].filter((field) => joint[field] !== undefined);
+        if (given.length > 1) throw new Error(`Joint ${joint.name} is given ${given.join(' and ')}; it takes one.`);
+        const mode = joint.torque || joint.torqueFrom ? 'torque' : joint.setpoint || joint.setpointFrom ? 'servo' : 'free';
+        // The input the provider reads, as a state of the mechanism's own when it comes from a shared parameter.
+        const role = mode === 'servo' ? 'setpoint' : 'effort';
+        const own = joint.torque ?? joint.setpoint;
+        const input = own ? state(role, mode === 'servo' ? 'setpoint' : kind === 'slide' ? 'force' : 'torque') : null;
+        const servoTorque = mode === 'servo' ? state('servoTorque', kind === 'slide' ? 'servo force' : 'servo torque') : null;
+        return { ...joint, kind, key, mode, role, own, input, from: joint.torqueFrom ?? joint.setpointFrom, position, speed, servoTorque };
     });
-    for (const joint of joints.filter(({ torque }) => torque)) {
-        const symbol = `${joint.key}${joint.kind === 'slide' ? 'Force' : 'Torque'}`;
-        const live = Boolean(joint.torque.control);
-        const shared = { id: id(), name: `${joint.name} ${joint.kind === 'slide' ? 'force' : 'torque'}`, symbol, value: joint.torque.value ?? 0, unit: units[joint.kind].effort, mode: live ? 'live' : 'constant', ...(live ? { control: { ...joint.torque.control } } : {}) };
+    for (const joint of joints.filter(({ own }) => own)) {
+        const symbol = `${joint.key}${joint.mode === 'servo' ? 'Setpoint' : joint.kind === 'slide' ? 'Force' : 'Torque'}`;
+        const live = Boolean(joint.own.control);
+        const shared = {
+            id: id(), name: `${joint.name} ${joint.mode === 'servo' ? 'setpoint' : joint.kind === 'slide' ? 'force' : 'torque'}`, symbol, value: joint.own.value ?? 0,
+            unit: units[joint.kind][joint.mode === 'servo' ? 'setpoint' : 'effort'], mode: live ? 'live' : 'constant', ...(live ? { control: { ...joint.own.control } } : {})
+        };
         sharedParameters.push(shared);
         const parameter = { id: id(), name: shared.name, symbol, value: shared.value, unit: shared.unit, mode: shared.mode, ...(live ? { control: { ...shared.control } } : {}), sharedParameterId: shared.id };
         const latex = `\\mathrm{${symbol}}`;
-        joint.effort.initialValue = shared.value;
+        joint.input.initialValue = shared.value;
         const bindings = [{ kind: 'parameter', parameterId: parameter.id, symbol }];
         const validation = helpers.validateEquationLatex(latex, bindings);
-        if (!validation.valid) throw new Error(`${joint.name} torque: ${validation.errors.join(' ')}`);
+        if (!validation.valid) throw new Error(`${joint.name} ${joint.role}: ${validation.errors.join(' ')}`);
         node.sourceTerms.push({
-            id: id(), state: joint.effort.symbol, expression: latex, parameters: [parameter], setsValue: true,
-            expressionModel: { latex, bindings, output: { stateId: joint.effort.id }, mathJson: validation.mathJson }
+            id: id(), state: joint.input.symbol, expression: latex, parameters: [parameter], setsValue: true,
+            expressionModel: { latex, bindings, output: { stateId: joint.input.id }, mathJson: validation.mathJson }
         });
     }
+    if ((mechanism.mjcf === undefined) === (mechanism.modelPath === undefined)) throw new Error('A mechanism is given as MJCF text or as a model file\'s path, one of the two.');
     const configuration = {
-        providerId: 'konjugate.robotics.mechanism', name: node.name, mjcf: mechanism.mjcf,
-        joints: joints.map(({ name, key, initialPosition = 0, initialSpeed = 0, effort, torqueFrom }) => ({ name, key, initialPosition, initialSpeed, driven: Boolean(effort || torqueFrom) })),
+        providerId: 'konjugate.robotics.mechanism', name: node.name,
+        ...(mechanism.mjcf !== undefined ? { mjcf: mechanism.mjcf } : { modelPath: mechanism.modelPath }),
+        joints: joints.map(({ name, key, initialPosition = 0, initialSpeed = 0, mode }) => ({ name, key, initialPosition, initialSpeed, mode })),
         parameters: []
     };
+    const inputKey = (joint) => `${joint.key}${joint.mode === 'servo' ? 'Setpoint' : 'Effort'}`;
     node.implementation = {
         kind: 'python', providerApiVersion: 1, source: '', // written once the parameters are in the configuration, below
-        bindings: joints.filter(({ effort, torqueFrom }) => effort || torqueFrom).map((joint) => (joint.effort
-            ? { key: `${joint.key}Effort`, kind: 'state', nodeId: node.id, stateId: joint.effort.id }
-            : { key: `${joint.key}Effort`, kind: 'state', nodeId: joint.torqueFrom.nodeId, stateId: joint.torqueFrom.stateId })),
+        bindings: joints.filter(({ input, from }) => input || from).map((joint) => (joint.input
+            ? { key: inputKey(joint), kind: 'state', nodeId: node.id, stateId: joint.input.id }
+            : { key: inputKey(joint), kind: 'state', nodeId: joint.from.nodeId, stateId: joint.from.stateId })),
         outputs: joints.flatMap((joint) => [
             { key: `${joint.key}Position`, stateId: joint.position.id, setsValue: true },
-            { key: `${joint.key}Speed`, stateId: joint.speed.id, setsValue: true }
+            { key: `${joint.key}Speed`, stateId: joint.speed.id, setsValue: true },
+            ...(joint.servoTorque ? [{ key: `${joint.key}ServoTorque`, stateId: joint.servoTorque.id, setsValue: true }] : [])
         ])
     };
     const parameters = new Map();
@@ -120,7 +143,7 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
     }
     node.implementation.source = providerSource(template, configuration);
     (document.nodes ??= []).push(node);
-    return { node, parameters, joints: new Map(joints.map(({ name, position, speed, effort }) => [name, { position, speed, effort }])) };
+    return { node, parameters, joints: new Map(joints.map(({ name, mode, position, speed, input, servoTorque }) => [name, { mode, position, speed, input, servoTorque }])) };
 }
 
 // A run configuration for `document`, made its active one. Time is in seconds.

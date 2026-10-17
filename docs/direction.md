@@ -23,7 +23,7 @@ The first question it answers is the one everyone building a robot has: **will t
 
 As in logistics: everything that can be made from public robot descriptions and public data goes in before we approach anyone. Many real robots are already described in MJCF or URDF (MuJoCo Menagerie, the `robot_descriptions` collection, the SO-100 and Koch arms of LeRobot), and LeRobot publishes recorded joint data from real arms. A user should see a robot they know moving, wired to real motors, within the first minute.
 
-Licences vary: Menagerie's differ by model (some meshes come from manufacturers) and each LeRobot dataset carries its own. The toolbox bundles only what allows redistribution, says where each robot and dataset came from and under what licence, and fetches the rest on request, as logistics fetches from public map servers.
+The toolbox ships no robot and no dataset of anyone else's. Each is fetched when a user asks for it and kept on that user's device (see [Robots and data from public sources](#robots-and-data-from-public-sources)), so the toolbox redistributes nothing and its licence is unaffected by theirs. Licences vary: Menagerie's differ by model (some meshes come from manufacturers) and each LeRobot dataset carries its own; in October 2026 every Menagerie model is under Apache-2.0, BSD or MIT, the SO-ARM100 under Apache-2.0, the UR5e under BSD-3-Clause, and LeRobot's SO-100 datasets under Apache-2.0.
 
 ## What Konjugate already has
 
@@ -40,7 +40,7 @@ Found while reading the core repository (October 2026):
 
 ## What a user does
 
-1. **Start.** From a known robot (MJCF or URDF, from a file or a bundled set drawn from Menagerie), from an example, from a blank skeleton, or from parts (STEP, STL or the catalog).
+1. **Start.** From a known robot (MJCF or URDF, from a file or fetched from Menagerie on request), from an example, from a blank skeleton, or from parts (STEP, STL or the catalog).
 2. **Solids.** Primitives (box, cylinder, sphere, extrusion, revolve) and booleans, parametric robot templates (link between two joints, bracket, motor mount, servo horn, wheel, gripper finger, gear) and imported parts. Each solid carries its material, mass and inertia, computed from the geometry or entered.
 3. **Joints, at frames chosen explicitly.** Fixed, revolute, prismatic, spherical and later planar and helical. A joint is a point and an axis on a frame of each solid, with limits on range, speed and effort. Frames snap to features (a face centre, a hole axis, an edge midpoint) but belong to the solid, so a joint survives when the geometry around it changes.
 4. **Drive it.** Motors and gearboxes from the component library (or the catalog) wired to each actuated joint's port, with supplies and controllers in the canvas. Joint setpoints, gripper state and payload are live parameters: sliders while it runs, and keyframed poses saved as schedules for a pick-and-place cycle.
@@ -96,12 +96,25 @@ Each engine step, the provider:
 
 The engine's explicit Euler needs a step well below the fastest time constant it integrates. A real small motor's electrical time constant L/R is around 1 ms (the core templates default to 0.5 H and 2 ohm, 250 ms, which hides this), and a real servo loop runs at around 1 kHz. A stiff PD controller held for 10 ms behaves differently from one running at 1 kHz, or goes unstable. So nothing fast is left to the engine step:
 
-- **Servo mode** (the default for hobby and smart servos, such as the SO-100's Feetech STS3215, which close their own position loop). The servo's inner position loop runs inside the provider at MuJoCo's substep, with gains, current limit and speed limit as parameters. Konjugate sends setpoints at the engine step, as the real servo's bus does, and reads back the current it draws, which feeds the battery and the thermal model. The motor is still modelled once: its loop and mechanics in the provider, its losses and heat in Konjugate.
+- **Servo mode** (the default for hobby and smart servos, such as the SO-100's Feetech STS3215, which close their own position loop). The servo's inner position loop runs inside the provider at MuJoCo's substep: built as the model's own position actuator on the joint (Menagerie's SO-ARM100 has one per joint, a gain of 50 N·m/rad limited to 3.5 N·m), which MuJoCo runs at every one of its steps, so its gain and torque limit are the model's for now; making them parameters, and a speed and current limit, come later. Konjugate sends setpoints at the engine step, as the real servo's bus does, and reads back the current it draws, which feeds the battery and the thermal model. The motor is still modelled once: its loop and mechanics in the provider, its losses and heat in Konjugate.
 - **Torque mode** (for a motor driven by a controller the user builds in the canvas). A joint motor (`packages/engine/components/jointMotor.json`, wired by the joint drive bundle) computes the torque from its current, and the mechanism reads it. The motor keeps its inductance and runs in substeps of its own, a tenth of its electrical time constant each (24 of a 1 ms step for a winding of 0.42 ms), while the mechanism and the rest of the model keep the engine step: core runs each node at its own rate. Tried and measured (`tests/engine/arm.test.mjs`): with one substep, a winding of 1 ms on a 1 ms step overstates the peak current by a third, and one of 0.42 ms diverges. A quasi-static current (i = (V - k_e w) / R) would need a source term reading the joint's speed on another node, which core does not allow, and drops the inductance; it stays an option if substeps prove too slow. A controller in the canvas runs at the engine step, so the window suggests that step from the controller's gains.
 
 The engine step is a choice the window makes from these (around 5 to 10 ms in servo mode), and the run report states it.
 
 Why MuJoCo rather than Pinocchio: MuJoCo brings contact (grippers, wheels, feet), closed loops through equality constraints (the four-bar comes with the first milestone, not a later one) and MJCF natively, and much of the robotics community already uses it. Pinocchio's advantage, analytic derivatives, goes unused while design optimisation runs a whole simulation per evaluation with finite-difference gradients. Pinocchio can come later as a second provider if gradient-based optimisation through the dynamics is ever needed.
+
+### Robots and data from public sources
+
+Fetched on request, one model or dataset at a time, and kept on the user's device, as logistics fetches and keeps map extracts:
+
+- **Licence before download.** The import lists each model with its licence and source, and shows them before fetching; one that is not freely usable (none in Menagerie today) is marked as such.
+- **Pinned.** A download is of one commit of Menagerie (or one revision of a dataset), recorded, so a project runs the same after an upstream edit.
+- **Kept on the device, not in the project.** The files go to Konjugate's store of downloaded files (core's `storedFiles`, with where each came from), fetched once and used by every project that needs them, and working offline after. A project records what it uses: the model, the commit, the licence and its attribution. Opened on a device without them, the toolbox offers to fetch the same commit, showing the licence first. So sharing a project shares a reference, not the model.
+- **Our own material is our responsibility.** An example, showcase project, thumbnail or video built from someone's robot is distributed by us: it fetches its robot when opened, or uses a model we are content to ship with its notices.
+- **Names, not logos.** A model is named as its maker names it, to identify it; no logos or others' images, and previews are drawn by the toolbox.
+- **Hosts.** `raw.githubusercontent.com` and `api.github.com` for Menagerie, `huggingface.co` for datasets, listed in the add-on's network hosts.
+
+This needs from core a way for a provider to read files from the store at run time (MuJoCo loads a model's meshes as it compiles it), since a window never sees a stored file's path and an importer reads only a file's contents: the host resolving a stored file named in a node's `implementation` to the provider when a run starts, from the app and from the command line alike, and failing clearly when the file is missing. Until then, a robot's MJCF and meshes would have to be written into the project, which is what keeping them on the device avoids.
 
 ### Rules
 
@@ -142,6 +155,7 @@ Written up as a core proposal: [Toolbox mechanisms, model merging and design opt
 1. A toolbox rebuild that updates only what it made, leaving what the user added by hand (a controller, a battery) in place. With a mechanism as one subsystem, this is mostly replacing the subsystem's inside while keeping, by their stable keys, the joint and frame nodes the user's edges end on. Later, reading the canvas model and hearing its changes, for editing from the canvas back to the window.
 2. A provider that owns a group of nodes and edges (a mechanism subsystem) and is packaged in a plugin, with MuJoCo linked in.
 3. Optimisation towards a design objective with constraints, not only fitting to data.
+4. Stored files a provider can read at run time, resolved by the host, so a robot fetched to the device is used in place rather than copied into each project (see [Robots and data from public sources](#robots-and-data-from-public-sources)).
 
 Each toolbox release needs a Konjugate release with what it requires, so core goes first.
 
@@ -153,7 +167,9 @@ Joint motors drive it: a two-link arm with two motors on one battery runs as MuJ
 
 Shared parameters reach MuJoCo too (core lets a node provider read them, added for this): a body's mass (its inertia scaled with it) and a joint's damping, friction loss and armature, applied before a step whenever they change, so a live slider, a stored schedule, a fork's intervention and fitting reach the physics. The canvas, which used to drop a node's provider when it saved or ran a model, now keeps it and lists its parameters with the shared ones.
 
-Still missing, and what a group provider would add: a node provider writes only its own node's states (so joints and solids are not nodes of their own, and Pose Visualizer has no solids to show), and is inline only, not packaged in a plugin. A run needs the Python with MuJoCo as the providers' interpreter, and core's Python SDK path. `npm run test:engine` runs the provider through Konjugate's engine and checks it against MuJoCo alone, the exact pendulum period, both ways of applying a torque, resuming from a checkpoint, the motor-driven arm, and a damping and a scheduled payload mass reaching the physics.
+A real robot runs too: Menagerie's SO-ARM100, fetched at a pinned commit with its licence (Apache-2.0) and where it came from, into a folder on this computer standing in for Konjugate's store (`npm run fetch:model trs_so_arm100`), and described by MuJoCo itself (`packages/engine/tools/describeMechanism.py`: its joints, ranges and servos, defaults and includes resolved). Driven by its own servos to setpoints from shared parameters, it runs as MuJoCo alone runs the same model file, positions and servo torques alike; each servo meets its 3.5 N·m limit at the start of a move, and the shoulder holds the arm 0.017 rad short of its setpoint at 0.85 N·m, as a gain of 50 says. A joint left free has its servo switched off. The provider reads the model from its file's path, which works for scripts and tests; the window will need core's stored files (item 4 above), and a way to describe a model without running Python of its own.
+
+Still missing, and what a group provider would add: a node provider writes only its own node's states (so joints and solids are not nodes of their own, and Pose Visualizer has no solids to show), and is inline only, not packaged in a plugin. A run needs the Python with MuJoCo as the providers' interpreter, and core's Python SDK path. `npm run test:engine` runs the provider through Konjugate's engine and checks it against MuJoCo alone, the exact pendulum period, both ways of applying a torque, resuming from a checkpoint, the motor-driven arm, a damping and a scheduled payload mass reaching the physics, and the SO-ARM100 on its servos (fetched when not already on this computer, and skipped, saying so, when it cannot be).
 
 ## Needs from Pose Visualizer
 

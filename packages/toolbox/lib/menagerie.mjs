@@ -1,0 +1,70 @@
+/* Copyright © 2026 Zenin Easa Panthakkalakath */
+
+// Robots from MuJoCo Menagerie (github.com/google-deepmind/mujoco_menagerie), fetched when a user asks for one and kept
+// on their device, never shipped with the toolbox (docs/direction.md, "Robots and data from public sources").
+//
+// A fetch is of one model's folder at one commit, recorded with the model's licence and where it came from, so a
+// project that uses it runs the same after an upstream edit and says whose it is. Images (Menagerie's own pictures of
+// its robots) are left out: the toolbox draws its own.
+//
+// No dependencies and no I/O of its own: `fetchJson(url)` and `fetchBytes(url)` come from the caller (the window's
+// network bridge, or Node's fetch in scripts and tests), as does `write(path, bytes)`.
+
+export const repository = { owner: 'google-deepmind', name: 'mujoco_menagerie', url: 'https://github.com/google-deepmind/mujoco_menagerie' };
+export const hosts = ['api.github.com', 'raw.githubusercontent.com'];
+
+const images = /\.(png|jpe?g|gif|webp|svg)$/i;
+
+// The commit `branch` points at now: a fetch pins to it.
+export async function latestCommit(fetchJson, branch = 'main') {
+    const commit = await fetchJson(`https://api.github.com/repos/${repository.owner}/${repository.name}/commits/${branch}`);
+    if (!/^[0-9a-f]{40}$/.test(commit?.sha ?? '')) throw new Error('Menagerie did not say which commit its main branch is at.');
+    return commit.sha;
+}
+
+// The files of one model's folder at `commit` (paths relative to the folder), images left out.
+export async function modelFiles(fetchJson, commit, folder) {
+    if (!/^[A-Za-z0-9_.-]+$/.test(folder)) throw new Error(`"${folder}" is not a Menagerie model folder name.`);
+    const tree = await fetchJson(`https://api.github.com/repos/${repository.owner}/${repository.name}/git/trees/${commit}?recursive=1`);
+    if (tree?.truncated) throw new Error('Menagerie\'s file list came back incomplete.');
+    const files = (tree?.tree ?? [])
+        .filter((entry) => entry.type === 'blob' && entry.path.startsWith(`${folder}/`) && !images.test(entry.path))
+        .map((entry) => ({ path: entry.path.slice(folder.length + 1), size: entry.size, url: rawUrl(commit, entry.path) }));
+    if (!files.length) throw new Error(`Menagerie has no model folder "${folder}" at commit ${commit}.`);
+    return files;
+}
+
+export function rawUrl(commit, path) {
+    return `https://raw.githubusercontent.com/${repository.owner}/${repository.name}/${commit}/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+// The licence a LICENSE file's text is, by its opening words; null when it is none of these, so it is shown as found.
+export function licenceName(text) {
+    const start = String(text).slice(0, 2000);
+    if (/Apache License[\s\S]*Version 2\.0/i.test(start)) return 'Apache-2.0';
+    if (/BSD 3-Clause Clear/i.test(start) || /The Clear BSD License/i.test(start)) return 'BSD-3-Clause-Clear';
+    if (/Redistribution and use in source and binary forms/i.test(start)) {
+        return /Neither the name/i.test(start) ? 'BSD-3-Clause' : 'BSD-2-Clause';
+    }
+    if (/Permission is hereby granted, free of charge/i.test(start)) return 'MIT';
+    return null;
+}
+
+// Fetches one model's folder at `commit` (the latest when not given), writing each file with `write(path, bytes)`;
+// returns its provenance: where it came from, at which commit, under what licence, and which files.
+export async function fetchModel({ folder, commit, fetchJson, fetchBytes, write, now = () => new Date() }) {
+    const pinned = commit ?? await latestCommit(fetchJson);
+    const files = await modelFiles(fetchJson, pinned, folder);
+    let licenceText = null;
+    for (const file of files) {
+        const bytes = await fetchBytes(file.url);
+        if (file.size !== undefined && bytes.byteLength !== file.size) throw new Error(`${folder}/${file.path} came back as ${bytes.byteLength} bytes, not ${file.size}.`);
+        await write(file.path, bytes);
+        if (file.path === 'LICENSE') licenceText = new TextDecoder().decode(bytes);
+    }
+    return {
+        source: 'MuJoCo Menagerie', repository: repository.url, folder, commit: pinned, fetchedAt: now().toISOString(),
+        licence: { name: licenceText === null ? null : licenceName(licenceText), file: licenceText === null ? null : 'LICENSE' },
+        files: files.map(({ path, size }) => ({ path, size }))
+    };
+}
