@@ -29,6 +29,19 @@ CONFIGURATION = json.loads(r'''{}''')
 # Times closer than this, relative to their size, are the same instant (the engine's times are sums of step sizes).
 _SAME_TIME = 1e-9
 
+# MuJoCo's own warnings that it found the simulation unstable. On one it resets its state to the model's initial pose
+# and carries on, which would leave a run looking calm when it is not; the provider stops the run instead.
+_INSTABILITY_WARNINGS = {
+    int(mujoco.mjtWarning.mjWARN_BADQACC): "accelerations",
+    int(mujoco.mjtWarning.mjWARN_BADQVEL): "speeds",
+    int(mujoco.mjtWarning.mjWARN_BADQPOS): "positions",
+}
+
+# MuJoCo's warning messages, kept here for the error that stops the run, rather than printed and written to a
+# MUJOCO_LOG.TXT in whatever directory the engine runs in.
+_warnings = []
+mujoco.set_mju_user_warning(_warnings.append)
+
 
 class MechanismNode(NodeProvider):
     def __init__(self):
@@ -76,13 +89,24 @@ class MechanismNode(NodeProvider):
         self._data.qfrc_applied[:] = 0.0
         for joint in self._joints:
             if joint["driven"]:
-                self._data.qfrc_applied[joint["dof"]] = inputs[f"{joint['key']}Effort"]
+                effort = inputs[f"{joint['key']}Effort"]
+                if not math.isfinite(effort):
+                    raise RuntimeError(f"Joint {joint['key']} was given a torque of {effort} at {start} s.")
+                self._data.qfrc_applied[joint["dof"]] = effort
+        warnings = {index: self._data.warning[index].number for index in _INSTABILITY_WARNINGS}
         # Whole MuJoCo steps no longer than its own timestep, shortened evenly to land on the step's end.
         count = max(1, math.ceil(step / self._timestep - 1e-9))
         self._model.opt.timestep = step / count
         try:
             for _ in range(count):
                 mujoco.mj_step(self._model, self._data)
+                for index, quantity in _INSTABILITY_WARNINGS.items():
+                    if self._data.warning[index].number != warnings[index]:
+                        said = f" MuJoCo: {_warnings[-1].strip()}" if _warnings else ""
+                        raise RuntimeError(
+                            f"MuJoCo found the mechanism's {quantity} not finite or too large between {start} s and {start + step} s: "
+                            "the simulation is unstable. A torque may be too large or change too fast for the step, as a motor's "
+                            f"current does when its step is longer than its electrical time constant (inductance over resistance).{said}")
         finally:
             self._model.opt.timestep = self._timestep
         self._time = start + step

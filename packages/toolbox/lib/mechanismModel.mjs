@@ -34,17 +34,17 @@ export function providerSource(template, configuration) {
 
 const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m' }, slide: { position: 'm', speed: 'm/s', effort: 'N' } };
 
-// `mechanism` is { name, mjcf, joints: [{ name, kind: 'hinge' | 'slide', initialPosition, initialSpeed, torque, torqueFrom }] },
-// where `torque` is { value, control?: { minimum, maximum, step } } and `torqueFrom` is { nodeId, stateId }. Ids start at
-// `firstId`, so a caller can place the mechanism among nodes of its own. `template` is mechanism.py's text; `helpers` are
-// Konjugate's equation helpers (validateEquationLatex is used). Time is in seconds.
-export function buildMechanismDocument(mechanism, { template, helpers, globalTimeStep = 0.01, outputInterval = globalTimeStep, targetTime = 10, firstId = 1 }) {
+// Places one mechanism's node (and the shared parameters its joints' torques come from) into `document`, taking ids
+// from `id()`. `mechanism` is { name, mjcf, joints: [{ name, kind: 'hinge' | 'slide', initialPosition, initialSpeed,
+// torque, torqueFrom }] }, where `torque` is { value, control?: { minimum, maximum, step } } and `torqueFrom` is
+// { nodeId, stateId }. `template` is mechanism.py's text; `helpers` are Konjugate's equation helpers
+// (validateEquationLatex is used). Returns the node and, by joint name, its position, speed and effort states.
+export function placeMechanism(document, id, mechanism, { template, helpers }) {
     if (!helpers?.validateEquationLatex) throw new Error('The mechanism builder needs Konjugate\'s equation helpers.');
-    let nextId = firstId;
-    const id = () => nextId++;
     const keys = new Set();
     const node = { id: id(), name: mechanism.name ?? 'Mechanism', type: 'mechanism', position: [0, 0, 0], states: [], sourceTerms: [], numerics: { substepsPerGlobalStep: 1 }, appearance: {} };
-    const sharedParameters = [];
+    document.sharedParameters ??= [];
+    const sharedParameters = document.sharedParameters;
     const joints = mechanism.joints.map((joint) => {
         const kind = joint.kind === 'slide' ? 'slide' : 'hinge';
         const key = jointKey(joint.name, keys);
@@ -91,11 +91,27 @@ export function buildMechanismDocument(mechanism, { template, helpers, globalTim
             { key: `${joint.key}Speed`, stateId: joint.speed.id, setsValue: true }
         ])
     };
+    (document.nodes ??= []).push(node);
+    return { node, joints: new Map(joints.map(({ name, position, speed, effort }) => [name, { position, speed, effort }])) };
+}
+
+// A run configuration for `document`, made its active one. Time is in seconds.
+export function addRunConfiguration(document, id, { globalTimeStep = 0.01, outputInterval = globalTimeStep, targetTime = 10 } = {}) {
     const runConfigurationId = id();
-    return {
-        format: 'konjugate', version: 1, copyright: 'Copyright © 2026 Zenin Easa Panthakkalakath', metadata: { units: 'SI' },
-        nodes: [node], edges: [], sharedParameters,
-        runConfigurations: [{ id: runConfigurationId, name: `${targetTime} s`, targetTime, globalTimeStep, outputInterval }],
-        activeRunConfigurationId: runConfigurationId
-    };
+    document.runConfigurations = [...(document.runConfigurations ?? []), { id: runConfigurationId, name: `${targetTime} s`, targetTime, globalTimeStep, outputInterval }];
+    document.activeRunConfigurationId = runConfigurationId;
+}
+
+export function emptyDocument() {
+    return { format: 'konjugate', version: 1, copyright: 'Copyright © 2026 Zenin Easa Panthakkalakath', metadata: { units: 'SI' }, nodes: [], edges: [], sharedParameters: [] };
+}
+
+// A document of one mechanism alone, ids from `firstId`, so a caller can put nodes of its own before it.
+export function buildMechanismDocument(mechanism, { template, helpers, globalTimeStep = 0.01, outputInterval = globalTimeStep, targetTime = 10, firstId = 1 }) {
+    let nextId = firstId;
+    const id = () => nextId++;
+    const document = emptyDocument();
+    placeMechanism(document, id, mechanism, { template, helpers });
+    addRunConfiguration(document, id, { globalTimeStep, outputInterval, targetTime });
+    return document;
 }

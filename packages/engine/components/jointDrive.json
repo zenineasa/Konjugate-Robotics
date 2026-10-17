@@ -1,0 +1,61 @@
+{
+    "copyright": "Copyright © 2026 Zenin Easa Panthakkalakath",
+    "id": "jointDrive",
+    "kind": "bundle",
+    "name": "Joint drive",
+    "description": "Wires a joint motor to its battery and its joint. The battery supplies the duty cycle's share of its voltage (an ideal drive: no losses, no current limit); the joint's speed, through the gearbox, sets the back-EMF; the battery loses the charge the drive draws. Torque and back-EMF share one motor constant, as they do in SI units.",
+    "domains": ["electrical", "mechanical"],
+    "color": "#68a9cc",
+    "endpoints": [
+        { "id": "battery", "label": "Battery" },
+        { "id": "motor", "label": "Joint motor" },
+        { "id": "joint", "label": "Joint", "ports": ["speed"] }
+    ],
+    "sharedParameters": [
+        { "key": "duty", "name": "Duty cycle", "symbol": "duty", "value": 0, "unit": "", "scope": "instance", "mode": "live", "control": { "minimum": -1, "maximum": 1, "step": 0.01 } },
+        { "key": "resistance", "name": "Winding resistance", "symbol": "resistance", "value": 1.2, "unit": "Ω", "scope": "instance" },
+        { "key": "inductance", "name": "Winding inductance", "symbol": "inductance", "value": 0.05, "unit": "H", "scope": "instance" },
+        { "key": "torqueConstant", "name": "Torque constant", "symbol": "torqueConstant", "value": 0.05, "unit": "N·m/A", "scope": "instance" },
+        { "key": "gearRatio", "name": "Gear ratio", "symbol": "gearRatio", "value": 50, "unit": "", "scope": "instance" }
+    ],
+    "edges": [
+        {
+            "name": "Supply",
+            "from": "battery",
+            "to": "motor",
+            "ports": { "source": "voltage", "target": "current" },
+            "output": { "role": "target", "state": "current" },
+            "latex": "\\frac{\\mathrm{duty} \\cdot \\mathrm{sourceVoltage} - \\mathrm{resistance} \\cdot \\mathrm{targetCurrent}}{\\mathrm{inductance}}",
+            "parameters": [
+                { "name": "Duty cycle", "symbol": "duty", "shared": "duty" },
+                { "name": "Winding resistance", "symbol": "resistance", "shared": "resistance" },
+                { "name": "Winding inductance", "symbol": "inductance", "shared": "inductance" }
+            ]
+        },
+        {
+            "name": "Back-EMF",
+            "from": "joint",
+            "to": "motor",
+            "ports": { "source": "speed", "target": "current" },
+            "output": { "role": "target", "state": "current" },
+            "latex": "-\\frac{\\mathrm{torqueConstant} \\cdot \\mathrm{gearRatio} \\cdot \\mathrm{sourceSpeed}}{\\mathrm{inductance}}",
+            "parameters": [
+                { "name": "Torque constant", "symbol": "torqueConstant", "shared": "torqueConstant" },
+                { "name": "Gear ratio", "symbol": "gearRatio", "shared": "gearRatio" },
+                { "name": "Winding inductance", "symbol": "inductance", "shared": "inductance" }
+            ]
+        },
+        {
+            "name": "Drain",
+            "from": "motor",
+            "to": "battery",
+            "ports": { "source": "current", "target": "stateOfCharge" },
+            "output": { "role": "target", "state": "stateOfCharge" },
+            "latex": "-\\frac{100 \\cdot \\mathrm{duty} \\cdot \\mathrm{sourceCurrent}}{\\mathrm{capacity}}",
+            "parameters": [
+                { "name": "Duty cycle", "symbol": "duty", "shared": "duty" },
+                { "name": "Battery capacity", "symbol": "capacity", "value": 7200, "unit": "A·s", "mode": "constant" }
+            ]
+        }
+    ]
+}

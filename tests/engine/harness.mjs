@@ -23,23 +23,39 @@ export const python = process.env.ROBOTICS_PYTHON
     ?? join(roboticsRoot, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 export const providerTemplate = await readFile(join(roboticsRoot, 'packages', 'engine', 'providers', 'mechanism.py'), 'utf8');
 
+// This toolbox's component templates, and core's that it places too, by id.
+export async function loadTemplates(coreIds = []) {
+    const plugin = JSON.parse(await readFile(join(roboticsRoot, 'packages', 'engine', 'plugin.json'), 'utf8'));
+    const templates = new Map();
+    for (const { entry } of plugin.contributes) {
+        const template = JSON.parse(await readFile(join(roboticsRoot, 'packages', 'engine', entry), 'utf8'));
+        templates.set(template.id, template);
+    }
+    for (const id of coreIds) templates.set(id, JSON.parse(await readFile(konjugateModule(join('assets', 'componentLibrary', `${id}.json`)), 'utf8')));
+    return templates;
+}
+
 if (!existsSync(executable)) throw new Error(`No Konjugate engine at ${executable}; build Konjugate or set KONJUGATE_ENGINE_PATH.`);
 if (!existsSync(python)) throw new Error(`No Python at ${python}; run "uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python mujoco", or set ROBOTICS_PYTHON.`);
 
-export function execute(command, args, { capture = false } = {}) {
+// `capture` keeps standard output, `captureErrors` standard error (otherwise passed through).
+export function execute(command, args, { capture = false, captureErrors = false } = {}) {
     return new Promise((resolve, reject) => {
-        const child = spawn(command, args, { stdio: ['ignore', capture ? 'pipe' : 'ignore', 'inherit'] });
+        const child = spawn(command, args, { stdio: ['ignore', capture ? 'pipe' : 'ignore', captureErrors ? 'pipe' : 'inherit'] });
         let output = '';
+        let errors = '';
         child.stdout?.on('data', (chunk) => { output += chunk; });
+        child.stderr?.on('data', (chunk) => { errors += chunk; });
         child.once('error', reject);
-        child.once('exit', (code) => resolve({ code, output }));
+        child.once('close', (code) => resolve({ code, output, errors }));
     });
 }
 
 // Validates and runs `document` for its run configuration's target time (or `targetTime`), in `directory`, from the
 // start or from `startCheckpoint` (one of a result's checkpoints); returns { times, series(key) } of "Node.state"
-// values at every output, and the raw result.
-export async function runDocument(directory, name, document, { targetTime, startCheckpoint } = {}) {
+// values at every output, and the raw result. With `expectFailure`, the run must fail; returns { errors }, what the
+// engine wrote to standard error.
+export async function runDocument(directory, name, document, { targetTime, startCheckpoint, expectFailure = false } = {}) {
     const inputPath = join(directory, `${name}.kjt`);
     const reportPath = join(directory, `${name}.report`);
     const outputPath = join(directory, `${name}.kjr`);
@@ -55,6 +71,11 @@ export async function runDocument(directory, name, document, { targetTime, start
     const report = decodeValidationReport(await readFile(reportPath));
     assert.equal(report.valid, true, `${name}: ${JSON.stringify(report.issues ?? report)}`);
     const args = ['run', inputPath, '--configuration', configurationPath, '--output', outputPath];
+    if (expectFailure) {
+        const { code, errors } = await execute(executable, args, { captureErrors: true });
+        assert.notEqual(code, 0, `${name}: the run should have failed.`);
+        return { errors };
+    }
     assert.equal((await execute(executable, args)).code, 0, `${name}: run failed.`);
     const result = decodeResultFile(await readFile(outputPath));
     const stateIds = new Map(document.nodes.flatMap((node) => node.states.map((state) => [`${node.name}.${state.symbol}`, state.id])));
@@ -66,12 +87,13 @@ export async function runDocument(directory, name, document, { targetTime, start
     return { name, document, result, times: result.samples.map((sample) => sample.time), series };
 }
 
-// MuJoCo on its own, for comparison: `reference.py` runs the same MJCF with the given joints, constant generalised
-// forces and output times, and returns each joint's positions.
-export async function runReference(directory, { mjcf, joints, forces = {}, times }) {
+// MuJoCo on its own, for comparison: `script` (in tests/engine) reads `request` and prints its result as JSON.
+// reference.py runs the same MJCF with the given joints, constant generalised forces and output times, and returns
+// each joint's positions; armReference.py drives the joints with motors (see it).
+export async function runReference(directory, request, script = 'reference.py') {
     const requestPath = join(directory, `reference-${Math.random().toString(36).slice(2)}.json`);
-    await writeFile(requestPath, JSON.stringify({ mjcf, joints, forces, times }));
-    const { code, output } = await execute(python, ['-I', join(roboticsRoot, 'tests', 'engine', 'reference.py'), requestPath], { capture: true });
+    await writeFile(requestPath, JSON.stringify(request));
+    const { code, output } = await execute(python, ['-I', join(roboticsRoot, 'tests', 'engine', script), requestPath], { capture: true });
     assert.equal(code, 0, 'The MuJoCo reference run failed.');
     return JSON.parse(output);
 }

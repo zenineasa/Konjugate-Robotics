@@ -1,0 +1,11 @@
+{
+    "copyright": "Copyright © 2026 Zenin Easa Panthakkalakath",
+    "pluginId": "konjugate.robotics.engine",
+    "name": "Konjugate Robotics Engine",
+    "version": "0.1.0",
+    "apiVersion": 1,
+    "contributes": [
+        { "kind": "component", "componentId": "jointMotor", "apiVersion": 1, "entry": "components/jointMotor.json" },
+        { "kind": "component", "componentId": "jointDrive", "apiVersion": 1, "entry": "components/jointDrive.json" }
+    ]
+}
