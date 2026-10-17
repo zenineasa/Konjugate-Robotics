@@ -1,0 +1,8 @@
+### Copyright (c) 2026 Zenin Easa Panthakkalakath ###
+
+node_modules/
+out/
+.keys/
+.venv/
+__pycache__/
+.DS_Store

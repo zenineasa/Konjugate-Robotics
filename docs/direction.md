@@ -75,7 +75,7 @@ Core has no declared ports today: a subsystem's ports are derived from the relat
 Playing a result in 3D and scrubbing through it is Pose Visualizer's job, so the toolbox does not build its own player. Each solid node carries Konjugate's pose states, so any robotics result plays in Pose Visualizer with nothing set up, even when the project is opened by someone without the toolbox. The window keeps to design (and to showing the jog panel's live pose, if the launcher can read live results). This needs from Pose Visualizer (see [Needs from Pose Visualizer](#needs-from-pose-visualizer)):
 
 - **True scale.** A node whose mesh is in metres, marked so, is drawn at its real size about its own origin (the joint frame, not the mesh's middle). Today's normalised size stays the default for every other model.
-- **Quaternions.** MuJoCo works in quaternions; Euler angles lock and wrap, which breaks playback between samples and Tuning across a wrap. Solid nodes carry `qw`, `qx`, `qy`, `qz` as well as `roll`, `pitch`, `yaw` (unwrapped, for reading), and Pose Visualizer gains a quaternion convention that wins when both are present.
+- **Quaternions.** MuJoCo works in quaternions; Euler angles lock and wrap, which breaks playback between samples and Tuning across a wrap. Solid nodes carry `qw`, `qx`, `qy`, `qz` as well as `roll`, `pitch`, `yaw` (unwrapped, for reading). Pose Visualizer never guesses which to use: by default it turns them by the three angles, as Konjugate's own convention does, so a robot plays with nothing set up; a user who wants the quaternion ticks a convention that says so, under state names of their choosing.
 - **Named frames** drawn as small axes on their solid, and contact forces as arrows, both optional.
 
 The window reuses Pose Visualizer's view cube and camera (`viewCamera.mjs`) and its pose model (`poseModel.mjs`), so the two views move the same way. Shared files stay MPL-2.0 inside the AGPL toolbox, as MPL allows; changes to them go to Pose Visualizer first.
@@ -145,9 +145,15 @@ Written up as a core proposal: [Toolbox mechanisms, model merging and design opt
 
 Each toolbox release needs a Konjugate release with what it requires, so core goes first.
 
+### Where milestone A stands
+
+Until group providers exist, milestone A runs on what core has (October 2026): a Python computational-node provider (`packages/engine/providers/mechanism.py`, MuJoCo through its Python package) on one mechanism node, with each joint's position and speed as its algebraic (`setsValue`) outputs. Each call is a co-simulation step, as an imported FMU's is: called at t with step h, it advances MuJoCo over [t, t + h] on torques read at t and reports the joints at t + h. A joint's torque comes from a state of the mechanism's own, set from a shared parameter, or from another node's state, such as a motor's: core now lets a node provider read other nodes' states through the step's synchronization snapshot, as edges do (added for this, with the validator, the partitioned backend's data exchange and code export following it).
+
+Still missing, and what a group provider would add: a node provider reads no parameters (so payload mass, friction and damping cannot reach MuJoCo yet), writes only its own node's states (so joints and solids are not nodes of their own, and Pose Visualizer has no solids to show), and is inline only, not packaged in a plugin. A run needs the Python with MuJoCo as the providers' interpreter, and core's Python SDK path. `npm run test:engine` runs the provider through Konjugate's engine and checks it against MuJoCo alone, the exact pendulum period, both ways of applying a torque and resuming from a checkpoint.
+
 ## Needs from Pose Visualizer
 
-Small and useful to any model with real geometry, not only robots: true scale for meshes marked as in metres, drawn about their own origin; a quaternion convention; optional frame axes and contact force arrows. Milestone A needs the first two. Pose Visualizer releases before the toolbox release that relies on them.
+Small and useful to any model with real geometry, not only robots: true scale for meshes marked as in metres, drawn about their own origin; conventions and mappings that turn bodies by a quaternion; optional frame axes and contact force arrows. Milestone A needs the first two. Quaternions are built (October 2026, not yet released): each convention, and each node's own mapping, chooses roll, pitch and yaw or a quaternion, with state names the user picks. Pose Visualizer releases before the toolbox release that relies on them.
 
 ## Out of scope
 

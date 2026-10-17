@@ -1,0 +1,12 @@
+{
+  "name": "konjugate-robotics",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Robotics toolbox for Konjugate.",
+  "copyright": "Copyright © 2026 Zenin Easa Panthakkalakath",
+  "scripts": {
+    "setup:python": "uv venv .venv --python 3.12 && uv pip install --python .venv/bin/python mujoco",
+    "test:engine": "node --test tests/engine/*.test.mjs"
+  }
+}
