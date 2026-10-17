@@ -26,6 +26,7 @@ own timestep, shortened evenly within a step so as to land on t + h.
 The model builder (packages/toolbox/lib/mechanismModel.mjs) writes the configuration below.
 """
 
+import base64
 import json
 import math
 import struct
@@ -57,9 +58,12 @@ mujoco.set_mju_user_warning(_warnings.append)
 class MechanismNode(NodeProvider):
     def __init__(self):
         self._configuration = CONFIGURATION
-        if "modelPath" in self._configuration:
-            # A model file on this computer, its meshes beside it (one fetched from Menagerie, say).
-            self._model = mujoco.MjModel.from_xml_path(self._configuration["modelPath"])
+        if "model" in self._configuration:
+            # A model's files carried in the project (one fetched from Menagerie, say, with its licence and where it
+            # came from beside them): its MJCF, and what that reads by path relative to it, meshes and included files.
+            files = {path: base64.b64decode(text) for path, text in self._configuration["model"]["files"].items()}
+            main = files.pop(self._configuration["model"]["main"]).decode("utf-8")
+            self._model = mujoco.MjModel.from_xml_string(main, assets=files)
         else:
             self._model = mujoco.MjModel.from_xml_string(self._configuration["mjcf"])
         self._data = mujoco.MjData(self._model)

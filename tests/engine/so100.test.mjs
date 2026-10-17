@@ -1,18 +1,19 @@
 /* Copyright © 2026 Zenin Easa Panthakkalakath */
 
 // A real robot from MuJoCo Menagerie, The Robot Studio's SO-ARM100, fetched at a pinned commit as the toolbox fetches
-// one at a user's request (kept on this computer, never shipped) and run in Konjugate's engine with its own servos:
+// one at a user's request (kept on this computer, never shipped), carried in the project with its licence and where it
+// came from, as an importer reads it from Konjugate's store, and run in Konjugate's engine with its own servos:
 // each joint's position actuator, run by MuJoCo at its own timestep, drives the joint to a setpoint from a shared
 // parameter. It runs as MuJoCo alone runs the same model file, positions and servo torques alike. Skipped, saying why,
 // when the model is not on this computer and cannot be fetched.
 
 import assert from 'node:assert/strict';
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { menagerieModel } from '../../scripts/fetchMenagerieModel.mjs';
-import { buildMechanismDocument } from '../../packages/toolbox/lib/mechanismModel.mjs';
+import { buildMechanismDocument, splitModelFiles } from '../../packages/toolbox/lib/mechanismModel.mjs';
 import { helpers, providerTemplate, runDocument, runReference } from './harness.mjs';
 
 // Menagerie's main branch on 17 October 2026.
@@ -39,12 +40,31 @@ test('the SO-ARM100 is fetched at a pinned commit with its licence and where it 
     assert.ok(!model.provenance.files.some(({ path }) => /\.png$/.test(path)), 'Menagerie\'s own pictures are left out.');
 });
 
+// The fetched folder's files, by path relative to it, as an importer is given them from the store.
+async function folderFiles(directory) {
+    const entries = await readdir(directory, { recursive: true, withFileTypes: true });
+    const files = {};
+    for (const entry of entries.filter((candidate) => candidate.isFile())) {
+        const path = join(entry.parentPath, entry.name);
+        files[path.slice(directory.length + 1).split('\\').join('/')] = new Uint8Array(await readFile(path));
+    }
+    return files;
+}
+
 test('the SO-ARM100, driven by its own servos to setpoints, runs in Konjugate as MuJoCo alone runs it', { skip: unavailable ?? false }, async () => {
-    const modelPath = join(model.directory, 'scene.xml');
+    const { run: files, notices } = splitModelFiles(await folderFiles(model.directory));
+    assert.ok('scene.xml' in files && 'so_arm100.xml' in files && 'assets/Base.stl' in files);
+    assert.deepEqual(Object.keys(notices).sort(), ['CHANGELOG.md', 'LICENSE', 'README.md', 'provenance.json']);
     const joints = ['Rotation', 'Pitch', 'Elbow', 'Wrist_Pitch', 'Wrist_Roll', 'Jaw'].map((name) => (name in setpoints
         ? { name, setpoint: { value: setpoints[name], control: { minimum: -3.3, maximum: 3.2, step: 0.01 } } }
         : { name }));
-    const document = buildMechanismDocument({ name: 'SO-ARM100', modelPath, joints }, { template: providerTemplate, helpers, globalTimeStep: 0.01, targetTime });
+    const licence = new TextDecoder().decode(notices.LICENSE);
+    const document = buildMechanismDocument({ name: 'SO-ARM100', model: { main: 'scene.xml', files, provenance: model.provenance, licence }, joints },
+        { template: providerTemplate, helpers, globalTimeStep: 0.01, targetTime });
+    // The project carries the robot, and its licence and provenance with it.
+    const source = document.nodes[0].implementation.source;
+    assert.ok(source.includes('"licence":"') && source.includes(model.provenance.commit) && source.includes('Apache License'));
+    const modelPath = join(model.directory, 'scene.xml');
     const directory = await mkdtemp(join(tmpdir(), 'robotics-so100-'));
     const run = await runDocument(directory, 'so100', document);
     const reference = await runReference(directory, { modelPath, joints: joints.map(({ name }) => ({ name, initialPosition: 0 })), setpoints, times: run.times }, 'servoReference.py');

@@ -39,17 +39,37 @@ export function providerSource(template, configuration) {
     return template.replace(marker, () => `CONFIGURATION = json.loads(r'''${json}''')`);
 }
 
+// A model's files as the provider carries them, by path relative to the model's folder: base64, as the project is JSON.
+// No dependencies, so it runs in the window as in Node.
+export function base64(bytes) {
+    let binary = '';
+    for (let start = 0; start < bytes.length; start += 0x8000) binary += String.fromCharCode(...bytes.subarray(start, start + 0x8000));
+    return btoa(binary);
+}
+
+// Of a model folder's files, the ones a run reads (its MJCF and what that uses: meshes, textures, height fields), and
+// apart from them the notices that travel with them (its licence, readme and changelog, and our provenance record).
+const notices = /^(LICENSE|COPYING|NOTICE)(\.[a-z]+)?$|\.(md|txt)$|^provenance\.json$/i;
+export function splitModelFiles(files) {
+    const run = {};
+    const kept = {};
+    for (const [path, bytes] of Object.entries(files)) (notices.test(path.split('/').pop()) && !path.includes('/') ? kept : run)[path] = bytes;
+    return { run, notices: kept };
+}
+
 // The unit of each quantity of MuJoCo's model a parameter may set, for a hinge (a slide's damping is N·s/m).
 const parameterUnits = { bodyMass: 'kg', jointDamping: 'N·m·s/rad', jointFrictionloss: 'N·m', jointArmature: 'kg·m²' };
 
 const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m', setpoint: 'rad', servoTorque: 'N·m' }, slide: { position: 'm', speed: 'm/s', effort: 'N', setpoint: 'm', servoTorque: 'N' } };
 
 // Places one mechanism's node (and the shared parameters its joints' torques come from) into `document`, taking ids
-// from `id()`. `mechanism` is { name, mjcf or modelPath, joints: [{ name, kind: 'hinge' | 'slide', initialPosition,
+// from `id()`. `mechanism` is { name, mjcf or model, joints: [{ name, kind: 'hinge' | 'slide', initialPosition,
 // initialSpeed, torque or torqueFrom or setpoint or setpointFrom }] }, where `torque` and `setpoint` are
 // { value, control?: { minimum, maximum, step } } and `torqueFrom` and `setpointFrom` are { nodeId, stateId }. A model
-// is given as MJCF text, or as the path of its file on this computer (one fetched from Menagerie, say, whose meshes sit
-// beside it). `mechanism.parameters` are quantities of MuJoCo's model the run may change:
+// is given as MJCF text, or as `model`: { main (the path of its MJCF), files ({ path: bytes }, what a run reads, as
+// splitModelFiles gives them), provenance (where it came from: source, repository, folder, commit, licence), licence
+// (the licence's text) }. The project then carries the model, so it runs wherever it is opened, and carries its licence
+// and provenance with it. `mechanism.parameters` are quantities of MuJoCo's model the run may change:
 // [{ name, kind: 'bodyMass' | 'jointDamping' | 'jointFrictionloss' | 'jointArmature', target (the body or joint), value,
 // unit?, control?, schedule? }], each a shared parameter the provider reads (or `sharedParameterId`, one already in the
 // document). `template` is mechanism.py's text; `helpers` are Konjugate's equation helpers (validateEquationLatex is
@@ -102,10 +122,18 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
             expressionModel: { latex, bindings, output: { stateId: joint.input.id }, mathJson: validation.mathJson }
         });
     }
-    if ((mechanism.mjcf === undefined) === (mechanism.modelPath === undefined)) throw new Error('A mechanism is given as MJCF text or as a model file\'s path, one of the two.');
+    if ((mechanism.mjcf === undefined) === (mechanism.model === undefined)) throw new Error('A mechanism is given as MJCF text or as a model\'s files, one of the two.');
+    if (mechanism.model && !(mechanism.model.main in mechanism.model.files)) throw new Error(`The model has no file ${mechanism.model.main}.`);
     const configuration = {
         providerId: 'konjugate.robotics.mechanism', name: node.name,
-        ...(mechanism.mjcf !== undefined ? { mjcf: mechanism.mjcf } : { modelPath: mechanism.modelPath }),
+        ...(mechanism.mjcf !== undefined ? { mjcf: mechanism.mjcf } : {
+            model: {
+                main: mechanism.model.main,
+                files: Object.fromEntries(Object.entries(mechanism.model.files).map(([path, bytes]) => [path, base64(bytes)])),
+                provenance: mechanism.model.provenance ?? null,
+                licence: mechanism.model.licence ?? null
+            }
+        }),
         joints: joints.map(({ name, key, initialPosition = 0, initialSpeed = 0, mode }) => ({ name, key, initialPosition, initialSpeed, mode })),
         parameters: []
     };

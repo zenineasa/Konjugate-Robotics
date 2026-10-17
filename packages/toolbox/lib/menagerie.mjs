@@ -4,8 +4,9 @@
 // on their device, never shipped with the toolbox (docs/direction.md, "Robots and data from public sources").
 //
 // A fetch is of one model's folder at one commit, recorded with the model's licence and where it came from, so a
-// project that uses it runs the same after an upstream edit and says whose it is. Images (Menagerie's own pictures of
-// its robots) are left out: the toolbox draws its own.
+// project that uses it runs the same after an upstream edit and says whose it is. Menagerie's own pictures of its
+// robots (images at the top of a model's folder) are left out: the toolbox draws its own. Images further in are
+// textures the model uses, and stay.
 //
 // No dependencies and no I/O of its own: `fetchJson(url)` and `fetchBytes(url)` come from the caller (the window's
 // network bridge, or Node's fetch in scripts and tests), as does `write(path, bytes)`.
@@ -13,7 +14,7 @@
 export const repository = { owner: 'google-deepmind', name: 'mujoco_menagerie', url: 'https://github.com/google-deepmind/mujoco_menagerie' };
 export const hosts = ['api.github.com', 'raw.githubusercontent.com'];
 
-const images = /\.(png|jpe?g|gif|webp|svg)$/i;
+const pictures = /^[^/]+\.(png|jpe?g|gif|webp|svg)$/i;
 
 // The commit `branch` points at now: a fetch pins to it.
 export async function latestCommit(fetchJson, branch = 'main') {
@@ -22,14 +23,15 @@ export async function latestCommit(fetchJson, branch = 'main') {
     return commit.sha;
 }
 
-// The files of one model's folder at `commit` (paths relative to the folder), images left out.
+// The files of one model's folder at `commit` (paths relative to the folder), its pictures left out.
 export async function modelFiles(fetchJson, commit, folder) {
     if (!/^[A-Za-z0-9_.-]+$/.test(folder)) throw new Error(`"${folder}" is not a Menagerie model folder name.`);
     const tree = await fetchJson(`https://api.github.com/repos/${repository.owner}/${repository.name}/git/trees/${commit}?recursive=1`);
     if (tree?.truncated) throw new Error('Menagerie\'s file list came back incomplete.');
     const files = (tree?.tree ?? [])
-        .filter((entry) => entry.type === 'blob' && entry.path.startsWith(`${folder}/`) && !images.test(entry.path))
-        .map((entry) => ({ path: entry.path.slice(folder.length + 1), size: entry.size, url: rawUrl(commit, entry.path) }));
+        .filter((entry) => entry.type === 'blob' && entry.path.startsWith(`${folder}/`))
+        .map((entry) => ({ path: entry.path.slice(folder.length + 1), size: entry.size, url: rawUrl(commit, entry.path) }))
+        .filter(({ path }) => !pictures.test(path));
     if (!files.length) throw new Error(`Menagerie has no model folder "${folder}" at commit ${commit}.`);
     return files;
 }
