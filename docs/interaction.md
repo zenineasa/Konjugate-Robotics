@@ -1,0 +1,47 @@
+<!-- Copyright © 2026 Zenin Easa Panthakkalakath -->
+
+# Interaction
+
+How the Robotics window should feel to three kinds of user, and what that means for every action in it. Keep this current when an action is added or changed. The rules are the Logistics toolbox's.
+
+## Three users
+
+- **A newcomer** reads the screen. Every action has a labelled button, a field or a list; nothing depends on knowing a gesture or a key. The hint at the foot of the view says what to do next, the Checks list says what stops a build and where, and every change can be undone.
+- **A regular user** works in the view: click to select, drag the handles to move or turn, click two points to join.
+- **A power user** keeps their hands on the keyboard: a key for every frequent action, several solids selected at a time, undo and redo for everything.
+
+## Rules
+
+1. **Every action three ways**: a button or field, a gesture in the view, a key. A key is never the only way.
+2. **Shortcuts are taught where they are used**: in tooltips, in the hint and all of them under `?`.
+3. **Act on the selection**: delete and duplicate act on everything selected, as one step.
+4. **Undo everything**, and say what was undone. Typing in one field in quick succession is one step.
+5. **Refuse with a reason, where the user is looking**: a message over the view, and the Checks list.
+6. **Escape always backs out** one level: the first point of a joint, then the tool, then the selection.
+7. **No surprises on keys**: keys act only when the user is not typing in a field.
+8. **Every platform as its own users expect**: `lib/platform.mjs` decides which keys mean what, as in Logistics.
+9. **Tests cover each way**: `tests/window/robotWindow.mjs` does the workflow by buttons, clicks in the view and keys, as a Windows or Linux user and as a Mac user.
+
+## Actions
+
+The command key is Ctrl on Windows and Linux and ⌘ on a Mac.
+
+| Action | Newcomer | Regular | Power |
+|---|---|---|---|
+| Add a solid | Box, Cylinder, Sphere, Capsule | | `B`, `C`, `S`, `P` |
+| Start from an example | Examples… | | |
+| Select | Its row under Parts; a check about it | Click it in the view | Shift-click or command-click to add |
+| Rename, resize, change its shape, material, mass, colour | Its card | | |
+| Move or turn a solid (and the solids it carries) | Its card: position and turn; Move, Turn | Drag the handles | `G`, `R` |
+| Join two solids | Join (with the kind beside it), then click a point on each | Click a point on each | `J` |
+| Join without moving | | Shift-click the second point | |
+| Change a joint: kind, point, axis, limits, damping, drive | Its card | Click its mark to select it | |
+| Flip a joint's axis, swap its solids | Its card | | |
+| Duplicate | Duplicate | | command-`D` |
+| Delete | Delete | | Delete or Backspace (⌫ on a Mac) |
+| Undo, redo | Undo, Redo | | command-`Z`; Ctrl+`Y` or Ctrl+Shift+`Z` (⇧⌘Z on a Mac) |
+| Fit the robot in the view, look from a side | Fit; Look from… | Drag to turn, right-drag to move, scroll to zoom | `F` |
+| Snap moves to 5 mm and turns to 15° | Snap | | |
+| Back out | Select | | `Escape` |
+| Build into the canvas | Build into canvas | | command-`B` |
+| Keys and gestures | ? | | `?` |

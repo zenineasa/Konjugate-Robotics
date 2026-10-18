@@ -1,45 +1,33 @@
 # Konjugate Robotics Toolbox
 
-A robotics extension for [Konjugate](https://github.com/zenineasa/Konjugate), the open-source, graph-native simulation engine. A robot's mechanism runs in [MuJoCo](https://mujoco.org), embedded in a Konjugate model, so the same model can hold the motors that drive it, the battery that feeds them, the heat in their windings and anything else Konjugate models, and be driven, forked, fitted and optimised like any other.
+Draw a robot, and get a [Konjugate](https://github.com/zenineasa/Konjugate) model of it. A simple CAD-like window: place solids, click a point on one solid and a point on another to join them, say how they join and what drives each joint, and press Build. In the canvas, **each solid is a node and each joint is an edge between two solids**, so the robot can be wired to motors, batteries, controllers and anything else Konjugate models, then run, driven with sliders, forked, fitted and optimised. The robot moves by its joints' own equations (Featherstone's articulated-body method, split along the joints), which Konjugate's engine runs like any other: nothing outside the graph solves it, and every equation can be read on its edge.
 
 ## Status
 
-Early development. Where it is going and why: [docs/direction.md](docs/direction.md). What exists today:
+Early development; where it is going and why: [docs/direction.md](docs/direction.md). What works today:
 
-- **Mechanisms in MuJoCo, inside Konjugate.** A Python computational-node provider (`packages/engine/providers/mechanism.py`) runs a MuJoCo model as one node of a Konjugate model, a co-simulation step per engine step. Each joint is driven by a torque, by the model's own servo to a setpoint, or left free; torques and setpoints come from shared parameters (live sliders) or from other nodes, such as a motor's. A body's mass and a joint's damping, friction and armature follow shared parameters, so a slider, a schedule, a fork or a fit reaches the physics. Runs match MuJoCo run on its own.
-- **A component library plugin**, `konjugate.robotics.engine`: a **joint motor** (a DC motor and gearbox: current, torque at the joint, winding temperature) and a **joint drive** bundle wiring it to a battery and its joint's speed. A motor faster than the step runs in substeps of its own.
-- **The Robotics Toolbox** add-on, `konjugate.robotics.toolbox`: a window that lists robots from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie), shows a robot's licence before anything is downloaded, keeps the download on this computer, reads its joints and servos, and builds a mechanism from them into the canvas. The project carries the robot with its licence and where it came from. No robot is shipped with the toolbox.
-- **Will these servos do it?** For the SO-ARM100, the window builds its pick-and-place move as its servos' setpoint schedules, holds its servos to their datasheet (current for torque, and the rated torque at stall in place of the model's own limit), adds a battery and each servo's winding, and puts a payload in its gripper as a slider: which servo reaches its limit, how hot it gets and how much charge the move takes, empty or loaded. A Compare step then forks the run from a chosen time, with a heavier payload or one servo held to a lower torque, and shows the baseline and the fork side by side, servo by servo, before opening the fork in the canvas.
-- **Seeing it move.** A built robot reports each link's place in the world and carries each link's shape, so [Pose Visualizer](https://github.com/zenineasa/Konjugate-PoseVisualizer) shows it moving at its true size, once it is given a naming convention for poses by quaternion (x, y, z, qw, qx, qy, qz) under *Naming conventions*.
-
-What it does not do yet: links as nodes of their own to wire to (until Konjugate has group providers); servo currents for the battery and heat; every action with a key and an undo, as the other toolboxes have. See [docs/direction.md](docs/direction.md), "Where milestone A stands".
+- **The Robotics window.** Boxes, cylinders, spheres and capsules, sized, placed and turned by typing or by handles in the 3D view, each of a material (its mass from its density) or a mass given. The Join tool: click a point on the first solid (or the floor, for the Ground) and a point on the second; the second turns and moves so the two points meet, faces together (Shift-click leaves it where it is). Points snap to face centres and edge middles. Hinge, slider, ball and fixed joints, with limits, damping, friction and armature, and a drive: free, a torque, or a position servo with its setpoint, stiffness and most torque. Checks say what stops a build and what to know, each pointing at its part. Undo and redo for everything; every action by button, by gesture and by key, on Windows, Linux and macOS. Three examples to start from: a pendulum, a two-link arm on a waist, a cart carrying two pendulums. The drawing is kept with the project.
+- **Build into the canvas.** The Ground, a node per solid (its joint's speed, position, acceleration and torque; its pose as `x`, `y`, `z`, `roll`, `pitch`, `yaw` and a rotation matrix; its energy; its shape at true size) and an edge per joint carrying the joint's equations, with its settings as parameters (the drive's torque or setpoint a live slider). Each solid's mass is a shared parameter. Pose Visualizer shows the robot moving.
+- **Checked** against an independent Newton-Euler solution of the same drawing, agreeing to within 1e-9, and against MuJoCo run on its own where it is installed.
+- **Not yet:** ball joints, closed loops (a four-bar linkage) and solids joined to nothing can be drawn but not built, and Build says so; contact; motors and batteries wired from the window; imported parts (STL, STEP, MJCF, URDF); keyframed moves. See the milestones in [docs/direction.md](docs/direction.md).
 
 ## Running a robot
 
-Konjugate runs the mechanism provider with the Python it is given for providers, which needs MuJoCo:
-
-```
-pip install mujoco
-```
-
-Then choose that Python under **Provider Toolchains** (⚒ in the titlebar). The window checks that Python for MuJoCo when it opens and before each comparison, and says how to install it into that very Python when it is missing (with a Konjugate that has the `pythonCheck` launcher feature; an older one only says MuJoCo is needed). Open the Robotics Toolbox from the toolstrip, choose a robot, read its licence, download it, set each joint's mode and build it into the canvas. Its servos' setpoints are live sliders there.
+Build, then run the model in the canvas. Nothing else is needed: no Python, no simulator. The run's step is set in the window (a millisecond by default); stiff servos on light solids need a shorter one.
 
 ## Building from source
 
-This repository builds against a sibling checkout of Konjugate, cloned side by side (`KONJUGATE_DIR` overrides that), whose engine is built:
+This repository builds against a sibling checkout of Konjugate (`KONJUGATE_DIR` overrides that), with its engine built for the engine tests:
 
 ```
-npm run setup:python     # .venv with MuJoCo, for the tests (needs uv)
-npm run build            # out/konjugate.robotics.engine-<version>.kjp and out/konjugate.robotics.toolbox-<version>.kja
-npm run install:dev      # builds and installs both into your local Konjugate
-npm run fetch:model trs_so_arm100 -- --commit 62ab00f2bc44f6f20c1c9b7a13f3fb1dd41a4e35   # a robot, for the tests
+npm run build            # out/konjugate.robotics.toolbox-<version>.kja
+npm run install:dev      # builds and installs it into your local Konjugate
 npm test                 # unit tests
-npm run test:engine      # mechanisms through Konjugate's engine, against MuJoCo alone
-npm run test:interaction # the window in the real app, offline
+npm run test:window      # the window in a plain browser, as a Windows or Linux user and as a Mac user
+npm run test:engine      # drawn robots through Konjugate's engine, against a Newton-Euler reference
+npm run setup:python     # optional: .venv with MuJoCo (needs uv), so test:engine also compares with MuJoCo alone
 ```
-
-The tests use the robots fetched to `out/models/` (the SO-ARM100, UR5e, Panda and Go2 at the commit above); a test whose robot is not there is skipped and says so.
 
 ## Licence
 
-[AGPL-3.0](LICENSE). The robots the toolbox fetches carry their own licences, shown before download and kept with every project built from them. MuJoCo, which runs the robots, is the user's own install (Apache-2.0), not shipped with the toolbox.
+[AGPL-3.0](LICENSE). MuJoCo (Apache-2.0) is used only by the tests, from the developer's own install, and is not shipped. three.js (MIT) is vendored in `packages/toolbox/vendor/` with its licence.

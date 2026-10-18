@@ -2,106 +2,142 @@
 
 # Direction
 
-Where the robotics toolbox is going and why. This is a first draft written before any code: the decisions below are working answers, each with its reasoning, and they change if building it teaches us otherwise. Open questions are listed at the end.
+Where the robotics toolbox is going and why. The decisions below are working answers, each with its reasoning; they change if building it teaches us otherwise. Open questions are listed at the end.
+
+This is the second version of this document (October 2026). The first put importing known robots and sizing their servos first and the drawing window third; what was built from it worked, but it was not the toolbox we set out to make. This version puts the drawing window first, and keeps what was built as a later way in (see [What is kept from the first version](#what-is-kept-from-the-first-version)).
 
 ## The idea
 
-A CAD-like window for Konjugate in which people build a robot from solids, or bring one in, and join the solids at explicitly chosen frames, getting a Konjugate model from the first click. Each mechanism becomes a subsystem in the Konjugate graph whose ports are its joints and named frames, so the robot is not a drawing exported to a simulator: it can be wired to motors, gearboxes, batteries, controllers and everything else Konjugate already models, then driven, forked, fitted and optimised.
+**Draw a robot, and get a Konjugate model of it.** A simple CAD-like window in which people place solids, choose explicitly where two solids join and how, and press Build. The drawing becomes part of the Konjugate graph: **each solid is a node and each joint is an edge between two solids.** It is not a drawing exported to a simulator: in the canvas the robot can be wired to motors, gearboxes, batteries, controllers and everything else Konjugate models, then driven, forked, fitted and optimised like any other model.
 
-The first question it answers is the one everyone building a robot has: **will these motors do it?** For a given move and payload, does each joint stay within its motor's torque and speed, how hot do the windings get, and how long does the battery last?
+Simple means: a few solid shapes, sizes typed or dragged, joints made by clicking a point on one solid and a point on another. Not sketches, constraints, fillets or drawings; the window does not try to match FreeCAD, Onshape or Fusion, and the model around the mechanism is what sets it apart.
 
 ## What makes it different
 
-1. **One graph from mechanism to digital twin.** CAD tools have geometry and parameters but no dynamics. Robot simulators have dynamics but no parameters and no link to the system around the robot. Here the mechanism, its electrical drive, its heat, its control and the business system it serves (a fleet of warehouse robots inside a logistics network, say) are one model.
-2. **The whole robot sized at once.** Vendor sizing tools mostly look at one axis at a time. Here the joints are coupled, and each motor is checked against its torque-speed curve, its winding temperature (from the thermal templates core already has) and the shared battery over a whole duty cycle.
-3. **Design in either direction.** Start from the motion (place joints, axes and ranges, simulate a stick figure, then grow solids around it), start from the parts (model solids, or import a robot or its parts, then pick joint frames on them), or mix the two. Both edit the same model. Later, a third direction: start from a goal (reach this point, lift this mass this fast) and let Konjugate propose the joints and sizes.
-4. **Parametric parts with physics attached.** Link lengths, sections, motor and gearbox choices and controller gains are Konjugate parameters. Changing one changes the geometry, the mass properties and the dynamics together, and catalog parts bring their torque curves and limits with them.
-5. **Drive it, fork it, fit it, optimise it.** Everything Konjugate already does applies to a robot: live sliders as a jog panel, schedules as trajectories, forks for what-if failures, Tuning to fit a real robot's logs, and an optimiser over the design and its controller together.
-6. **Open and cross-platform,** for novices, regular users and power users alike, on Windows, Linux and macOS.
-
-## The rule
-
-As in logistics: everything that can be made from public robot descriptions and public data goes in before we approach anyone. Many real robots are already described in MJCF or URDF (MuJoCo Menagerie, the `robot_descriptions` collection, the SO-100 and Koch arms of LeRobot), and LeRobot publishes recorded joint data from real arms. A user should see a robot they know moving, wired to real motors, within the first minute.
-
-The toolbox ships no robot and no dataset of anyone else's. Each is fetched when a user asks for it and kept on that user's device (see [Robots and data from public sources](#robots-and-data-from-public-sources)), so the toolbox redistributes nothing and its licence, AGPL-3.0 as the logistics toolbox's, is unaffected by theirs. A project built from a robot carries it, with its licence, as a project built from a map carries its roads. Licences vary: Menagerie's differ by model (some meshes come from manufacturers) and each LeRobot dataset carries its own; in October 2026 every Menagerie model is under Apache-2.0, BSD or MIT, the SO-ARM100 under Apache-2.0, the UR5e under BSD-3-Clause, and LeRobot's SO-100 datasets under Apache-2.0.
-
-## What Konjugate already has
-
-Found while reading the core repository (October 2026):
-
-- An Electron app with a three.js canvas, a C++ engine (Eigen, NLopt, METIS) and a WebAssembly web edition.
-- STEP and STL import through `occt-import-js` (read and tessellate only, not a modelling kernel) and a shape library with robotics parts: articulated link, servo, parallel gripper, drive wheel, propeller.
-- Component library templates for motors, batteries and thermal masses.
-- Robotics examples: two-link arm, articulated arm, four-bar linkage, single joint, position-controlled joint, battery-powered joint, wheeled drivetrain. They say plainly what they cannot do: the arm's joints are uncoupled, and the four-bar holds its rods with stiff springs (2 to 3 percent length error, a 0.002 s step) because there is no constraint solver.
-- The engine integrates with snapshot-coupled explicit Euler. Providers (C++ and Python) are scalar-in and scalar-out; computational-node providers have several outputs, their own checkpoint and restore, and run in process for C++, but are inline only, not packaged as plugins.
-- Launcher add-ons: a window with an importer that builds a model (`runImport`), puts it in the canvas (`openInCanvas`, replacing the model), and keeps its own state with the project (`keepSession`, `restoreSession`). The logistics and fintech toolboxes work this way.
-- Live parameters (sliders, programmatic control), shared parameters linked across many relationships, stored schedules (linear or hold), scenario forks with step, ramp, pulse and path interventions, and parameter fitting from CSV through NLopt.
-- The Pose Visualizer add-on (its own repository, MPL-2.0), a result visualizer that plays a result's bodies in three.js, in step with the timeline and live while a run goes. A node is a body when its states match a naming convention (by default Konjugate's own `x`, `y`, `z`, `roll`, `pitch`, `yaw`, as in the Free body template), with as few as one degree of freedom; users add conventions or map one node by hand. It draws each node's shape or imported mesh (the canvas's mesh document: flat positions, normals and indices) with its frame axes, labels lines between bodies by the relationship's name rather than claiming a physical connection, and shares the editor's view cube. Two limits matter here: every shape is scaled to the same on-screen size and centred on its own middle, so a robot's links would not look like the robot; and orientation is three Euler angles only, which lock at a pitch of 90 degrees and wrap at 180.
+1. **The drawing is the model.** Solids and joints in the window are nodes and edges in the graph, under the same names, so a user who draws a two-link arm sees a two-link arm in the canvas, not a black box.
+2. **One graph from mechanism to digital twin.** CAD tools have geometry but no dynamics; robot simulators have dynamics but no link to the system around the robot. Here the mechanism, its electrical drive, its heat, its control and the business system it serves (a fleet of warehouse robots inside a logistics network, say) are one model.
+3. **Design in either direction.** Start from the parts (draw solids, then join them) or from the motion (place joints, axes and ranges, simulate a stick figure, then grow solids around it), or mix the two. Later, from a goal: reach this point, lift this mass this fast.
+4. **Parametric parts with physics attached.** Sizes, masses, joint limits and drive settings are Konjugate parameters: changing one changes the geometry, the mass properties and the dynamics together.
+5. **Drive it, fork it, fit it, optimise it,** with what Konjugate already does: live sliders as a jog panel, schedules as trajectories, forks for what-if failures, Tuning to fit a real robot's logs, and an optimiser over the design.
+6. **Will these motors do it?** For a given move and payload, does each joint stay within its motor's torque and speed, how hot do the windings get, and how long does the battery last, with all joints coupled.
+7. **Open and cross-platform,** for novices, regular users and power users alike, on Windows, Linux and macOS.
 
 ## What a user does
 
-1. **Start.** From a known robot (MJCF or URDF, from a file or fetched from Menagerie on request), from an example, from a blank skeleton, or from parts (STEP, STL or the catalog).
-2. **Solids.** Primitives (box, cylinder, sphere, extrusion, revolve) and booleans, parametric robot templates (link between two joints, bracket, motor mount, servo horn, wheel, gripper finger, gear) and imported parts. Each solid carries its material, mass and inertia, computed from the geometry or entered.
-3. **Joints, at frames chosen explicitly.** Fixed, revolute, prismatic, spherical and later planar and helical. A joint is a point and an axis on a frame of each solid, with limits on range, speed and effort. Frames snap to features (a face centre, a hole axis, an edge midpoint) but belong to the solid, so a joint survives when the geometry around it changes.
-4. **Drive it.** Motors and gearboxes from the component library (or the catalog) wired to each actuated joint's port, with supplies and controllers in the canvas. Joint setpoints, gripper state and payload are live parameters: sliders while it runs, and keyframed poses saved as schedules for a pick-and-place cycle.
-5. **Size it.** Each joint's operating points over its motor's torque-speed envelope, winding temperatures, the battery's state of charge over a shift, and which joint gives out first. Forks answer the follow-ups: a heavier payload at 5 s, a smaller gearbox, a worn joint, a stuck gripper.
-6. **Simulate and compare.** Coupled multibody dynamics with gravity, closed loops and contact, seen moving in 3D. Two designs side by side.
-7. **Fit it to a real robot.** Import joint logs as CSV (a user's own or a public LeRobot dataset) and fit friction, inertia or motor constants with Tuning.
-8. **Optimise the design.** Choose parameters and bounds (link lengths, gear ratios, controller gains), an objective (cycle time, energy, mass, peak torque) and constraints (torque within the motor's limit, temperature below the winding's rating, the target reached), and compare the candidates as branches, or as a Pareto front when there are two objectives. Discrete choices (which motor from the catalog) run as one optimisation per choice.
-9. **Hand it to a larger model.** A larger model (a warehouse in the logistics toolbox) would be too slow with full dynamics for every robot, so it gets a reduced robot: a table per task, measured by running the detailed robot across a grid of payloads (and distances, for a mobile robot), giving cycle time, energy and peak current at each point. A robot template in the larger model interpolates the table; its parameters (payload, task) stay live, so forks still work. Each table records the design and run it came from, and the reduced robot says it is one. A fitted dynamic model comes only if a table proves too coarse.
-10. **Export.** MJCF and URDF for ROS, Gazebo, MuJoCo and Isaac users; STEP of the modelled parts.
+1. **Open the Robotics window** from the toolstrip. It shows a 3D view with a floor grid, the Ground (a fixed solid every robot can stand on) and a short hint of what to do first.
+2. **Add solids.** Box, cylinder, sphere or capsule, from a toolbar button, a menu item or a key. Each has a name, a size (typed, or dragged by handles in the view), a place and a turn (typed, or by the move and turn handles), a colour and either a density (its mass worked out from its shape) or a mass. Later: extruded profiles, parts imported from STEP or STL, and parametric robot parts (link between two joints, bracket, motor mount, wheel, gripper finger).
+3. **Choose where they join.** With the Joint tool, click a point on the surface of one solid, then a point on another. Each click makes a **frame** on its solid: a point with an axis, the axis along the surface's normal by default, snapped to the face's centre or an edge's middle when near one. A frame belongs to its solid and moves with it; its place and axis can be typed. The second click moves the second solid so the two frames meet, unless the user holds a key to keep it where it is.
+4. **Say how they join.** The joint's kind: **hinge** (turns about the frame's axis), **slider** (slides along it), **ball** (drawn, but not yet built) or **fixed**. Its limits, damping and friction. Which solid carries which is shown by an arrow, from the parent (nearer the Ground) to the child.
+5. **Say how each joint is driven.** **Free** (nothing drives it), **torque** (a torque the user sets, a slider in the canvas), **servo** (a position servo holding a setpoint, a slider in the canvas, with its gain and torque limit) or **motor** (a DC motor and gearbox on a battery, from the component library, in the canvas).
+6. **Build.** The window checks the drawing (every solid joined to the Ground or explicitly free, no two joints on one child, no joint without two frames) and says plainly what is wrong and where. Then it builds the model into the canvas, as the logistics toolbox does, and keeps the drawing with the project.
+7. **Run and watch it.** In the canvas, run it, move the sliders while it runs, and see it move in Pose Visualizer. Change the drawing, build again.
 
-## How it is built
+Every action has a button or menu item, a gesture in the view and a key, works on the selection and can be undone, on Windows, Linux and macOS alike.
 
-The same shape as the logistics toolbox:
+Later steps, in later milestones: keyframed poses saved as schedules; the sizing view (each joint's operating points over its motor's envelope, winding temperatures, the battery's charge); forks for a heavier payload or a weaker motor; Tuning against a real robot's logs; optimising sizes and gear ratios; handing a reduced robot to a larger model; MJCF and URDF export.
 
-- `packages/engine`: a plugin with the component library (joint and frame nodes, servo, gearbox, sensors, robot-specific motor variants) and the mechanism provider.
-- `packages/toolbox`: a launcher window with the 3D design view.
+## How the drawing becomes Konjugate
 
-### The window owns the design, the model is built from it
+Build turns the drawing into these, side by side in the canvas, laid out from the Ground outwards (a subsystem would hide them behind a box the newcomer must open; that can come with merging, below):
 
-The design (solids, frames, joints, parameters, keyframes) lives in the window's session, kept with the project. Each change rebuilds the model through the importer and puts it in the canvas, as Build does in logistics.
+| In the window | In the graph | What it holds |
+|---|---|---|
+| the Ground | a **node** | its place, which nothing changes, and its acceleration: upward at g, which is how gravity enters |
+| a solid | a **node**, named as the solid | for a solid carried by a hinge or slider, that joint's speed and position (`jointSpeed`, then `jointAngle` or `jointPosition`, the only states it integrates), its acceleration and the drive's torque; its place in the world (`x`, `y`, `z` in metres, z up; `roll`, `pitch`, `yaw`, so Pose Visualizer shows it with nothing set up; and its rotation matrix `r11` to `r33`); its spatial velocity and acceleration; its articulated inertia and bias force; its kinetic and potential energy; its shape, drawn at true size |
+| a joint | an **edge** from the solid nearer the Ground to the other, named as the joint | the joint's equations (below), and its parameters: damping and friction (live sliders), armature, lower and upper limit, and its drive: a torque (a live slider), or a servo's setpoint (a live slider), stiffness and torque limit (a live slider) |
+| a solid's mass | a **shared parameter** `<solid> mass` | linked from the edge that carries the solid |
+| a joint in motor mode | a **joint motor** node and a **battery** node from the component library, wired to the joint's edge | current, torque at the joint, winding temperature; the battery's charge (milestone B) |
 
-The window is CAD-like, but built for robots: it does not try to match FreeCAD, Onshape or Fusion feature for feature, and the model around the mechanism is what sets it apart. Geometry uses OpenCascade compiled to WebAssembly (opencascade.js) for B-rep modelling and STEP, Manifold where fast mesh booleans are enough, and three.js for display, reusing what Pose Visualizer and the canvas already do. OpenCascade is large (tens of megabytes), so it loads when the user first models or edits a solid, not when the window opens; importing a robot and driving it need only the meshes.
+So in the canvas a two-link arm reads as `Ground → Shoulder → Upper arm → Elbow → Forearm`, and a user adds a controller by wiring it to the `Forearm` node's `jointAngle` and to the `Elbow` edge's setpoint.
 
-### A mechanism is one subsystem with ports
+Each build replaces the model in the canvas, as Build in logistics does. Until core can merge a rebuild with what the user wired by hand (Part 1 of the core proposal), hand-made work around the robot is lost on the next build; the window should warn before that happens (still to do).
 
-Each mechanism appears in the canvas as one subsystem. What people wire to are its joints (torque or setpoint in; angle, speed and servo current out) and its named frames (end effector, payload, sensor mount: pose and force). The solids sit inside it, so their poses and contact forces are result signals like any other.
+### The dynamics are the joints' own equations
 
-Core has no declared ports today: a subsystem's ports are derived from the relationships that cross its boundary, and subsystems are flattened before the engine runs. So each joint and each named frame is a real node inside the subsystem, holding its states, with a stable key from the importer (`joint:<name>`, `frame:<name>`). The user's edges end on those nodes. A rebuild keeps every node whose key is still produced, with its id, so those edges survive; a renamed or deleted joint loses them, and the window warns before it builds. This depends on the owner keys of Part 1 of the core proposal. The subsystem is also the natural boundary for the group provider core needs to add (see [Needs from core](#needs-from-core)).
+Konjugate's main idea holds without exception: a node changes another only through an edge between them, and nothing outside the graph solves the model. So the robot moves by equations on its joint edges alone, with no solver node and no simulator behind it.
+
+A robot's joints are coupled: how fast the elbow turns depends on the whole arm. One equation per joint, each reading only its own two solids, cannot capture that on its own. Featherstone's articulated-body method can, because it splits along the joints:
+
+1. **Outward**, each joint sets its child's pose and velocity from its parent's and its own angle and speed.
+2. **Inward**, each joint passes its child's articulated inertia and bias force to its parent (what the child and everything it carries resists, seen through the joint), each parent summing what its children pass and adding its own.
+3. **Outward again**, each joint works out its own acceleration from its parent's acceleration and the articulated quantities, and sets its child's.
+
+Every quantity is a spatial vector or matrix in the world frame, about the world's origin, so a joint needs no transforms between its two solids. Each joint edge carries these as one relationship with several equations, each setting a state on one of its two solids (core's algebraic relationships, below). The engine evaluates them in dependency order at every instant, so the three sweeps settle within one step, and each solid's node then integrates its joint's speed and position, the speed first and the position from the new speed (semi-implicit Euler), which keeps a swinging arm's energy bounded where explicit Euler would let it grow.
+
+The equations are written out as MathJSON with LaTeX beside it, so a user can open a joint edge and read its equations. They are checked against a second, independent solution of the same drawing (`tests/engine/newtonEuler.mjs`: the recursive Newton-Euler method for the mass matrix and bias forces, then a linear solve, stepped the same way): pendulum, two-link arm, a cart carrying two pendulums on a slider, friction, armature, every shape and joints read either way round agree to within 1e-9. MuJoCo run on its own gives a third opinion where a Python with MuJoCo is at hand; it treats damping implicitly and its servos as position actuators, so it agrees closely rather than to rounding, and the bound is stated in the test.
+
+What this does not do yet, said plainly: **ball joints**, **closed loops** (a four-bar linkage) and **solids joined to nothing** (floating) are refused by Build with a message saying so; **contact** is not modelled. Loops need constraint forces across the loop's closing joint, contact needs forces between solids that are not joined: both are edges too, and come later.
+
+### Time steps and how a joint is driven
+
+The engine's step is the robot's step: a millisecond by default, which suits most drawings. Stiff servos on light solids need a shorter one; the run report states the step. The equations are cheap (a few hundred operations per joint), so a millisecond step runs much faster than real time for small robots.
+
+- **Servo mode** (the default for hobby and smart servos, such as the SO-100's Feetech STS3215, which close their own position loop): a torque of stiffness times (setpoint minus position), limited to the servo's most torque, every step. Speed and current limits come later.
+- **Torque mode** (for a motor driven by a controller the user builds in the canvas): a constant torque, a live slider. Wiring a joint motor's torque into a joint edge comes with milestone B.
+- A joint's **limits** are a stiff spring and damper beyond them, scaled by the joint's effective inertia so they hold without a smaller step. **Friction** is smoothed over a hundredth of a radian per second (a tanh), so a joint at rest creeps very slowly rather than sticking.
 
 ### Seeing it move: Pose Visualizer, not a second player
 
-Playing a result in 3D and scrubbing through it is Pose Visualizer's job, so the toolbox does not build its own player. Each solid node carries Konjugate's pose states, so any robotics result plays in Pose Visualizer with nothing set up, even when the project is opened by someone without the toolbox. The window keeps to design (and to showing the jog panel's live pose, if the launcher can read live results). This needs from Pose Visualizer (see [Needs from Pose Visualizer](#needs-from-pose-visualizer)):
+Playing a result in 3D and scrubbing through it is Pose Visualizer's job, so the toolbox does not build its own player. Each solid node carries Konjugate's pose states, so any robotics result plays in Pose Visualizer with nothing set up, even when the project is opened by someone without the toolbox. This needs from Pose Visualizer (see [Needs from Pose Visualizer](#needs-from-pose-visualizer)):
 
-- **True scale.** A node whose mesh is in metres, marked so, is drawn at its real size about its own origin (the joint frame, not the mesh's middle). Today's normalised size stays the default for every other model.
-- **Quaternions.** MuJoCo works in quaternions; Euler angles lock and wrap, which breaks playback between samples and Tuning across a wrap. Solid nodes carry `qw`, `qx`, `qy`, `qz` as well as `roll`, `pitch`, `yaw` (unwrapped, for reading). Pose Visualizer never guesses which to use: by default it turns them by the three angles, as Konjugate's own convention does, so a robot plays with nothing set up; a user who wants the quaternion ticks a convention that says so, under state names of their choosing.
-- **Named frames** drawn as small axes on their solid, and contact forces as arrows, both optional.
+- **True scale.** A node whose mesh is in metres, marked so, is drawn at its real size about its own origin.
+- **Angles that do not lock.** Solid nodes carry their rotation matrix as well as `roll`, `pitch`, `yaw`; Pose Visualizer turns them by the three angles by default, as Konjugate's own convention does.
+- **Named frames** drawn as small axes on their solid, optional.
 
-The window reuses Pose Visualizer's view cube and camera (`viewCamera.mjs`) and its pose model (`poseModel.mjs`), so the two views move the same way. Shared files stay MPL-2.0 inside the AGPL toolbox, as MPL allows; changes to them go to Pose Visualizer first.
+### The window
 
-### The dynamics run in MuJoCo, inside one provider
+`packages/toolbox`: a launcher window, as logistics and fintech have, built on three.js. The drawing (solids, frames, joints, drive settings) lives in the window's session, kept with the project, and has a small, versioned JSON form of its own (`lib/drawing.mjs`), so it can be tested without a browser and read by scripts. Turning a drawing into the graph (`lib/modelBuilder.mjs`, with `lib/expressions.mjs` for the equations) is a pure function of the drawing, tested on its own; so is turning it into MJCF (`lib/mjcfWriter.mjs`), used today only to check the build against MuJoCo and later for export.
 
-A robot cannot be one ordinary edge per joint: the joints are coupled, closed loops need constraints, and explicit Euler on stiff joints is unstable. So the toolbox compiles a mechanism into a single group provider that embeds MuJoCo (DeepMind's C physics engine, Apache-2.0) and exchanges values with the rest of the graph once per engine step, much as an FMU does in co-simulation. MuJoCo is a library here, as Eigen and NLopt are to the core engine: users never see it as a separate program, and its own viewer is not used.
+Imported and extruded parts come later, with OpenCascade compiled to WebAssembly loaded only when first needed.
 
-Each engine step, the provider:
+### Rules
 
-1. reads its inputs from the graph: for each joint, a torque (torque mode) or a setpoint (servo mode, below), and external forces on named frames;
-2. reads its parameters (payload mass, friction, joint damping, link offsets, servo gains and current limits) and writes those that changed into MuJoCo's model, then calls `mj_setConst` when a mass, inertia or body position changed, so derived quantities (subtree masses, reference inertias) do not go stale. Live sliders, schedules, fork interventions, Tuning and the optimiser all reach the physics this way;
-3. steps MuJoCo with its own substeps (around 1 ms), holding torque inputs over the engine step and running each servo's inner loop at every substep;
-4. writes back joint angles and speeds (which feed motor back-EMF and sensors), each servo's current, body poses (for the 3D view), contact forces and sensor readings as Konjugate states;
-5. checkpoints and restores MuJoCo's full state, servo integrators included, so forks and restarts work as for any other node.
+- **Never outside the graph.** A node changes another only through an edge between them; no node solves others, and nothing runs the robot but the engine.
+- **Solids speak Konjugate's pose vocabulary.** Positions in metres with z up.
+- **Joints attach to frames, not to faces.** A frame belongs to its solid; a face may vanish when a part is edited, a frame does not.
+- **Equations read parameters, never baked numbers, for what can change during a run** (mass, damping, friction, armature, limits, drive settings), so sliders, schedules, forks, Tuning and the optimiser reach the motion. What cannot (shapes, which solid carries which, a joint's kind, point and axis) waits for the next build, and the window says which is which.
+- The conventions of the other toolboxes: every input says where it came from (typed, worked out from a density, a datasheet); limits and bugs are stated plainly.
 
-### Time steps and the two joint modes
+## Needs from core
 
-The engine's explicit Euler needs a step well below the fastest time constant it integrates. A real small motor's electrical time constant L/R is around 1 ms (the core templates default to 0.5 H and 2 ohm, 250 ms, which hides this), and a real servo loop runs at around 1 kHz. A stiff PD controller held for 10 ms behaves differently from one running at 1 kHz, or goes unstable. So nothing fast is left to the engine step:
+General additions, not robotics-specific, described in the core proposal [Toolbox mechanisms, model merging and design optimisation](https://github.com/zenineasa/Konjugate/blob/main/docs/proposals/toolboxMechanismsAndDesignOptimisation.md) as Part 2:
 
-- **Servo mode** (the default for hobby and smart servos, such as the SO-100's Feetech STS3215, which close their own position loop). The servo's inner position loop runs inside the provider at MuJoCo's substep: built as the model's own position actuator on the joint (Menagerie's SO-ARM100 has one per joint, a gain of 50 N·m/rad limited to 3.5 N·m), which MuJoCo runs at every one of its steps, so its gain and torque limit are the model's for now; making them parameters, and a speed and current limit, come later. Konjugate sends setpoints at the engine step, as the real servo's bus does, and reads back the current it draws, which feeds the battery and the thermal model. The motor is still modelled once: its loop and mechanics in the provider, its losses and heat in Konjugate.
-- **Torque mode** (for a motor driven by a controller the user builds in the canvas). A joint motor (`packages/engine/components/jointMotor.json`, wired by the joint drive bundle) computes the torque from its current, and the mechanism reads it. The motor keeps its inductance and runs in substeps of its own, a tenth of its electrical time constant each (24 of a 1 ms step for a winding of 0.42 ms), while the mechanism and the rest of the model keep the engine step: core runs each node at its own rate. Tried and measured (`tests/engine/arm.test.mjs`): with one substep, a winding of 1 ms on a 1 ms step overstates the peak current by a third, and one of 0.42 ms diverges. A quasi-static current (i = (V - k_e w) / R) would need a source term reading the joint's speed on another node, which core does not allow, and drops the inductance; it stays an option if substeps prove too slow. A controller in the canvas runs at the engine step, so the window suggests that step from the controller's gains.
+1. **Algebraic relationships** (built, October 2026, not yet released). A relationship may carry several equations (`equationModel.outputs`), each setting a state on one of its two endpoints. At each instant the engine evaluates every such equation across the model in dependency order, summing equations that set the same state, and refuses a model whose equations depend on each other in a loop. A launcher requires it as `algebraicRelationships`.
+2. **Semi-implicit integration** (built, October 2026, not yet released). A node may integrate its states in the order listed, each from the ones updated before it (`numerics.integration: "semiImplicit"`).
+3. **Arcsin, Arccos, Arctan, Arctan2 and Tanh** in equations (built, October 2026, not yet released).
+4. **A resumed run steps exactly as the run it came from** (fixed, October 2026): the last step of a run resumed from a checkpoint is no longer a few ulps short.
 
-The engine step is a choice the window makes from these (around 5 to 10 ms in servo mode), and the run report states it.
+Later, from the same proposal: merging a rebuild with hand-made work (Part 1), and design objectives with constraints (Part 3). Each toolbox release needs a Konjugate release with what it requires, so core goes first.
 
-Why MuJoCo rather than Pinocchio: MuJoCo brings contact (grippers, wheels, feet), closed loops through equality constraints (the four-bar comes with the first milestone, not a later one) and MJCF natively, and much of the robotics community already uses it. Pinocchio's advantage, analytic derivatives, goes unused while design optimisation runs a whole simulation per evaluation with finite-difference gradients. Pinocchio can come later as a second provider if gradient-based optimisation through the dynamics is ever needed.
+## Where milestone A stands
+
+Built (October 2026): the core additions above, with engine and JavaScript tests; the window as described under What a user does, steps 1 to 7, except motor mode; the model builder with the articulated-body equations on the joint edges; three examples (a pendulum, a two-link arm, a cart carrying two pendulums); unit tests; engine tests against the Newton-Euler reference (and MuJoCo where it is installed); a window test that drives the page in a browser and has Konjugate's engine validate the model it builds.
+
+Still to do in milestone A: a warning before a build replaces hand-made work; selecting several solids to move together; dragging a joint's point in the view.
+
+## Milestones
+
+Each one ends in something that can be shown.
+
+- **A. Draw it, build it, run it.** The window with boxes, cylinders, spheres and capsules; frames picked on surfaces; hinge, slider and fixed joints; free, torque and servo drives; undo, keys and menus. Build makes solid nodes and joint edges carrying the articulated-body equations. Checked against an independent Newton-Euler solution and against MuJoCo running the same MJCF on its own. Shown on a two-link arm and a cart carrying two pendulums.
+- **A2. Loops, balls and floating solids.** Closed loops (a four-bar linkage) through constraint forces on the closing joint's edge; ball joints; a solid joined to nothing.
+- **B. Drive it.** Motor mode (joint motor and battery from the component library); a jog panel of live setpoints; keyframed poses saved as schedules; a pick-and-place example.
+- **C. Will these motors do it?** The sizing view and forks for a heavier payload or a weaker motor, as built in the first version, on drawn robots.
+- **D. Start from a known robot.** MJCF and URDF import, and Menagerie fetched on request, into the drawing as solids (with their meshes) and joints, as built in the first version; then STL and STEP parts.
+- **E. Parametric parts.** Extruded profiles, robot part templates, joint-first skeleton design, sizes as shared parameters.
+- **F. Fit to a real robot.** Tuning against a public LeRobot dataset of an SO-100 arm, then a user's own logs.
+- **G. Design optimisation.** Objectives and constraints over sizes, gear ratios and gains; motor choice from a catalog in an outer loop; candidates as branches.
+- **H. Contact.** A gripper picking a box; a wheeled robot on the floor: contact forces as edges between the solids that touch.
+- **I. The joined demo.** A fleet of warehouse robots inside the logistics toolbox's warehouse model, each reduced from its detailed model to a table of cycle time and energy per task.
+- **J. Exchange.** MJCF and URDF export; STEP export of modelled parts.
+
+## What is kept from the first version
+
+The first version ran the robot in MuJoCo inside one computational node that set the states of every solid. That solved the robot outside the graph, against Konjugate's main idea, so it is gone, as are the core additions it needed (a node setting other nodes' states, and a relationship solved by a node), withdrawn from core before any release. Its code is in the repository's history. Kept from it:
+
+- **The joint motor, servo winding and supply components**, in the history too, to come back with milestone B wired to joint edges.
+- **Pose Visualizer additions:** quaternions, several bodies on one node, true-size parts.
+- **Menagerie import with licences and provenance, and the SO-ARM100 servo sizing and fork comparison,** set aside for milestones C and D, where they come back on top of the drawing (up to commit `32ca8e2`).
 
 ### Robots and data from public sources
 
@@ -114,69 +150,11 @@ Fetched on request, one model or dataset at a time, and kept on the user's devic
 - **Names, not logos.** A model is named as its maker names it, to identify it; no logos or others' images, and previews are drawn by the toolbox.
 - **Hosts.** `raw.githubusercontent.com` and `api.github.com` for Menagerie, `huggingface.co` for datasets, listed in the add-on's network hosts.
 
-Nothing new from core: logistics already keeps map files this way. The importer runs in JavaScript, so it reads a model's joints and servos without MuJoCo's Python (the describer in `packages/engine/tools` is for scripts): from the MJCF itself, or MuJoCo's WebAssembly build, still to choose.
-
-### Rules
-
-- **Solids speak Konjugate's pose vocabulary.** Positions `x`, `y`, `z` in metres with z up, as the Free body template and Pose Visualizer expect, plus a quaternion; MuJoCo's own frames are converted at the provider's edge, never in the canvas.
-- **Joints attach to frames, not to faces.** A frame belongs to its solid and snaps to features; a face may vanish when a part is edited, a frame does not.
-- **Every dimension says which side drives it.** Driven by the joint (moving the joint stretches the link) or by the part (editing the part moves the joint). A lock per relationship, so the two never fight.
-- **The provider reads parameters, never baked numbers.** Mass, inertia, link lengths and joint frames reach the provider as parameters, read every step, usually shared ones. Otherwise a live payload slider, a fitted inertia or an optimiser would change nothing. The window computes them from the geometry and writes them as parameters.
-- **Template parts write their mass properties as equations of their own parameters** (a beam link: m = rho L w h, I = m L^2 / 12), so the optimiser can change a design without going back to the CAD kernel. The window regenerates the shape afterwards. Imported parts keep fixed mass properties.
-- **Geometry changed during a run updates the dynamics at once and the shape at the next build;** the window shows when the two differ. Structural changes (adding a joint, a new mesh) always wait for the next build, as MuJoCo recompiles its model.
-- **The motor's mechanical side lives in MuJoCo, its electrical side in Konjugate.** Rotor and reflected gearbox inertia go into MuJoCo's `armature` and damping, so the stiff loop between a light joint and its motor's back-EMF does not cross the engine step. MuJoCo's own actuators are plain torque inputs (servo mode applies its torque through the same input from inside the provider), so the motor is never modelled twice.
-- **Contact is soft and says so.** MuJoCo's contact is tunable and needs small substeps (around 1 to 2 ms); the UI states this where contact matters.
-- **Imported parts are editable, not parametric.** Push and pull faces, resize holes, stretch between two planes. We say so in the UI.
-- The conventions of the other toolboxes: every action has a button or menu item, a gesture and a key, works on the selection and can be undone, on every platform; every input says where it came from; limits and bugs are stated plainly.
-
-## Milestones
-
-Each one ends in something that can be shown.
-
-- **A. Mechanism provider on MuJoCo, fed by import.** MJCF and URDF import into a mechanism subsystem with joint and frame nodes, in servo mode and in torque mode with the existing motor templates. Compared against an analytic pendulum, against the two-link arm, and against MuJoCo running the same model on its own; the four-bar linkage again, now exact. Shown on an SO-100 or UR5 from Menagerie, playing at true scale in Pose Visualizer. Starts as an inline computational-node provider while core builds group providers.
-- **B. Will these motors do it?** Motor, gearbox, winding temperature and battery per joint; a jog panel of live setpoints; keyframes saved as schedules; the torque-speed envelope view; a pick-and-place example with forks for a heavier payload and a weaker motor.
-- **C. The CAD-like window.** Primitives and booleans, STEP and STL import, parametric robot templates, frames, the joint picker, joint-first skeleton design, Build into the canvas, the robot moving in 3D.
-- **D. Fit to a real robot.** Tuning against a public LeRobot dataset of an SO-100 arm, then against a user's own logs.
-- **E. Design optimisation.** Objectives and constraints over link lengths, gear ratios and controller gains; motor choice from a catalog of motors, gearboxes and bearings carrying their physics, in an outer loop; candidates as branches; a Pareto view.
-- **F. Contact.** A gripper picking a box; a wheeled robot on the floor.
-- **G. The joined demo.** A fleet of warehouse robots (autonomous mobile robots, built from the wheeled drivetrain) inside the logistics toolbox's warehouse model: battery, charging schedule, fleet size, cycle time and cost per pick in one model, with each robot reduced from its detailed model to a table (see What a user does, step 9).
-- **H. Digital twin.** Live inputs from a joystick or a ROS topic.
-- **I. Exchange.** MJCF and URDF export; STEP export of modelled parts.
-- **Later.** Pinocchio as a second provider.
+Nothing new from core: logistics already keeps map files this way. The importer runs in JavaScript and reads a model's joints and servos from the MJCF itself.
 
 ## Moving robotics out of core
 
-Once the mechanism provider replaces them, six of the seven robotics examples move here, with the springs-versus-exact four-bar as a before and after. The position-controlled joint stays in core as a teaching example, since the web edition cannot install add-ons and welcome content or videos may point at it; before moving the others, check what links to them. The robotics shapes (articulated link, servo, parallel gripper, drive wheel, propeller) move with them. The generic motor, battery and thermal templates stay in core, as other toolboxes and examples use them. Pose Visualizer stays its own add-on, as it serves models not built in the toolbox, and becomes the toolbox's player (see [Seeing it move](#seeing-it-move-pose-visualizer-not-a-second-player)).
-
-## Needs from core
-
-Written up as a core proposal: [Toolbox mechanisms, model merging and design optimisation](https://github.com/zenineasa/Konjugate/blob/main/docs/proposals/toolboxMechanismsAndDesignOptimisation.md). In short:
-
-1. A toolbox rebuild that updates only what it made, leaving what the user added by hand (a controller, a battery) in place. With a mechanism as one subsystem, this is mostly replacing the subsystem's inside while keeping, by their stable keys, the joint and frame nodes the user's edges end on. Later, reading the canvas model and hearing its changes, for editing from the canvas back to the window.
-2. A provider that owns a group of nodes and edges (a mechanism subsystem) and is packaged in a plugin, with MuJoCo linked in.
-3. Optimisation towards a design objective with constraints, not only fitting to data.
-
-Each toolbox release needs a Konjugate release with what it requires, so core goes first.
-
-### Where milestone A stands
-
-Until group providers exist, milestone A runs on what core has (October 2026): a Python computational-node provider (`packages/engine/providers/mechanism.py`, MuJoCo through its Python package) on one mechanism node, with each joint's position and speed as its algebraic (`setsValue`) outputs. Each call is a co-simulation step, as an imported FMU's is: called at t with step h, it advances MuJoCo over [t, t + h] on torques read at t and reports the joints at t + h. A joint's torque comes from a state of the mechanism's own, set from a shared parameter, or from another node's state, such as a motor's: core now lets a node provider read other nodes' states through the step's synchronization snapshot, as edges do (added for this, with the validator, the partitioned backend's data exchange and code export following it).
-
-Joint motors drive it: a two-link arm with two motors on one battery runs as MuJoCo alone runs it with the same motor equations integrated beside it, angles, currents, winding temperatures and charge alike, including a small motor in substeps. When MuJoCo finds the mechanism unstable it resets itself to its initial pose and carries on; the provider stops the run instead, saying why.
-
-Shared parameters reach MuJoCo too (core lets a node provider read them, added for this): a body's mass (its inertia scaled with it) and a joint's damping, friction loss and armature, applied before a step whenever they change, so a live slider, a stored schedule, a fork's intervention and fitting reach the physics. The canvas, which used to drop a node's provider when it saved or ran a model, now keeps it and lists its parameters with the shared ones.
-
-A real robot runs too: Menagerie's SO-ARM100, fetched at a pinned commit with its licence (Apache-2.0) and where it came from, into a folder on this computer standing in for Konjugate's store (`npm run fetch:model trs_so_arm100`), carried in the project with them (the provider loads the model from those files), and described by MuJoCo itself (`packages/engine/tools/describeMechanism.py`: its joints, ranges and servos, defaults and includes resolved). Driven by its own servos to setpoints from shared parameters, it runs as MuJoCo alone runs the same model file, positions and servo torques alike; each servo meets its 3.5 N·m limit at the start of a move, and the shoulder holds the arm 0.017 rad short of its setpoint at 0.85 N·m, as a gain of 50 says. A joint left free has its servo switched off.
-
-The window exists, in a first version (`packages/toolbox`): it lists four Menagerie robots (the SO-ARM100, UR5e, Panda and Go2), shows a robot's licence fetched at Menagerie's current commit before anything is downloaded, downloads it into Konjugate's store pinned to that commit, reads its joints and servos with its importer (`lib/mjcf.mjs`, MJCF read in JavaScript: includes, angle units, default classes and actuator shortcuts, checked against MuJoCo's own reading on all four robots), offers each joint a mode, and builds the mechanism into the canvas, keeping its session with the project. `npm run test:interaction` drives it in the real app, offline. Not yet: keys and undo for its actions as the other toolboxes have, the user's own MJCF or URDF files, and a robot's own keyframes as starting poses. The window checks that the providers' Python imports MuJoCo when it opens and before each comparison (core's `checkPython`, the `pythonCheck` launcher feature, added for this: it imports each module for real in the Python a run will use, so one built for another Python counts as missing), and says how to install it into that Python; the toolbox uses it when there and does not require it, so an older Konjugate only says MuJoCo is needed.
-
-And it can be watched: the mechanism reports each body's place in the world as states on its node (`<body>X`, `Y`, `Z` and `Qw` to `Qz`, starting at the reference pose read from the model and matching MuJoCo's body frames throughout), and carries each body's shape as an appearance part of the node (its visible geoms as one mesh in its own frame, read from the model's STL and OBJ files and primitives, filling the same space MuJoCo puts them in, to 0.2 mm on the four robots). Core keeps a node's parts and hands them to visualizers; Pose Visualizer finds several bodies on one node by prefix and draws each with its part at true size. Seen in the real app (`npm run test:interaction` drives it, and keeps a picture with `ROBOTICS_SCREENSHOT`), the SO-ARM100 after a second stands as MuJoCo's own renderer shows it. Pose Visualizer needs a naming convention for poses by quaternion (x, y, z, qw, qx, qy, qz) before it shows the robot, since it guesses nothing from state names.
-
-And it answers the question this toolbox opens with, on a real robot. Built from the window with its pick-and-place move (`lib/moves.mjs`, setpoint schedules), its servos as their datasheet gives them (`lib/servos.mjs`: the 7.4 V Feetech STS3215, from vendor listings at 6 V, 1.91 N·m and 2 A at stall, 0.15 A idle; each servo's current its idle current and its torque over 1.03 N·m/A, worked out from those) and a battery and a winding for each servo (`servoWinding`, `servoSupply`), the SO-ARM100 runs as MuJoCo alone runs it, draws what the datasheet says for its torque, and heats and drains as the same equations integrated beside it say. Its servos are held to their datasheet's 1.91 N·m, not the model's 3.5 (Menagerie's model allows nearly twice what the servo is rated for, so the model as published would answer the question too kindly). With the gripper empty the shoulder peaks at 1.75 N·m, 92 percent of its rating; with 0.3 kg in it (an approximation: added to the gripper's own mass), the shoulder and the elbow both reach their limit, the shoulder's winding peaks 2.6 K hotter, and the battery gives half as much again (`tests/engine/servoDemo.test.mjs`). The gripper's servo holds about 1.56 N·m whenever it is closed, its setpoint pressing the jaws together. The windings' heat capacity and resistance to ambient are assumed, and say so.
-
-And the window answers the follow-up, as a fork. Once a robot is built with servos from their datasheet, a Compare step forks the run from a time the user chooses, with a heavier payload from then on or one servo held to a lower torque, through the toolbox's two scenarios (`heavierPayload`, `weakerServo`: interventions on the payload's mass or a servo's torque limit, both live sliders, whose values the window supplies per parameter as paths counted from the fork). It shows the baseline and the fork side by side, servo by servo: peak torque, about how long at the limit (counted from the few hundred points the host returns), the hottest winding, and the battery's charge used, with a sentence saying what changed most (`lib/comparison.mjs`); and it opens the fork in the canvas as a branch beside the baseline. In the real app, 0.6 kg from 2.5 s in place of 0.3 kg keeps the SO-ARM100's shoulder at its limit for about 4.6 s instead of 0.03 s and its winding 2.8 K hotter, and takes a fifth more charge.
-
-Still missing, and what a group provider would add: a node provider writes only its own node's states (so joints and solids are not nodes of their own: a robot is one node whose bodies are known by prefix, not nodes to wire to), and is inline only, not packaged in a plugin. A run needs the Python with MuJoCo as the providers' interpreter, and core's Python SDK path. `npm run test:engine` runs the provider through Konjugate's engine and checks it against MuJoCo alone, the exact pendulum period, both ways of applying a torque, resuming from a checkpoint, the motor-driven arm, a damping and a scheduled payload mass reaching the physics, and the SO-ARM100 on its servos (fetched when not already on this computer, and skipped, saying so, when it cannot be).
+Once the toolbox replaces them, six of the seven robotics examples move here, with the springs-versus-exact four-bar as a before and after once loops are built. The position-controlled joint stays in core as a teaching example, since the web edition cannot install add-ons and welcome content or videos may point at it; before moving the others, check what links to them. The robotics shapes (articulated link, servo, parallel gripper, drive wheel, propeller) move with them. The generic motor, battery and thermal templates stay in core, as other toolboxes and examples use them. Pose Visualizer stays its own add-on, as it serves models not built in the toolbox, and becomes the toolbox's player (see [Seeing it move](#seeing-it-move-pose-visualizer-not-a-second-player)).
 
 ## Needs from Pose Visualizer
 
@@ -184,10 +162,11 @@ Built (October 2026, not yet released): quaternions (each convention, and each n
 
 ## Out of scope
 
-Topology optimisation and finite element analysis; drawings and full mechanical drafting; soft bodies and fluids around the robot; motion planning beyond keyframes and schedules (planners can come through providers later).
+Topology optimisation and finite element analysis; sketches, constraints, fillets, drawings and full mechanical drafting; soft bodies and fluids around the robot; motion planning beyond keyframes and schedules (planners can come through providers later).
 
 ## Open questions
 
-- **First user:** students and hobbyists (the SO-100 and LeRobot community: public robots and data, quick to reach), robotics start-ups sizing actuators, or the warehouse customers of the logistics toolbox (mobile robot fleets)? The working answer is hobbyists and start-ups for milestones A to E, as they need no sales cycle, and warehouse fleets for G. It decides the order after B.
-- **Web edition:** add-ons do not run there today. WebAssembly builds of MuJoCo exist, so the provider itself would not stand in the way; does the robotics toolbox need it, for students in particular?
-- **Core proposal:** it still lists Pinocchio or MuJoCo and a node per body; it should be updated to match this document (MuJoCo, mechanism subsystems with joint and frame nodes under stable keys, servo mode).
+- **Speed for large robots.** Each joint's equations are a few hundred operations, evaluated by the engine's interpreter. A humanoid with thirty joints at a millisecond step should still run faster than real time, but this is not yet measured.
+- **Stiffness.** Semi-implicit Euler is stable for a swinging arm but still needs a step well below a stiff servo's time constant; an implicit treatment of the drive, inside the joint's equations, may come if users hit it.
+- **First user:** students and hobbyists, robotics start-ups sizing actuators, or the warehouse customers of the logistics toolbox? The working answer is hobbyists and students first: the drawing window serves them best, and they need no sales cycle.
+- **Web edition:** add-ons do not run there today; nothing the toolbox builds needs more than the engine.

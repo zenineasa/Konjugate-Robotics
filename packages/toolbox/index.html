@@ -1,78 +1,85 @@
 <!doctype html>
+<!-- Copyright © 2026 Zenin Easa Panthakkalakath -->
 <html lang="en">
 <head>
     <meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
-    <title>Robotics Toolbox</title>
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:">
+    <title>Robotics</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-    <main class="panel">
-        <section class="step" id="stepRobot">
-            <h2><span class="stepNumber">1</span> Robot</h2>
-            <p class="muted">Robots from MuJoCo Menagerie (github.com/google-deepmind/mujoco_menagerie), fetched when you ask for one and kept on this computer. Nothing is downloaded until you have seen its licence.</p>
-            <ul class="robots" id="robots"></ul>
-            <div id="robotStatus"></div>
+    <header class="toolbar" role="toolbar" aria-label="Drawing tools">
+        <div class="group" aria-label="Add a solid">
+            <span class="groupLabel">Add</span>
+            <button type="button" class="tool" data-add="box" title="Add a box (B)"><span class="glyph">■</span>Box</button>
+            <button type="button" class="tool" data-add="cylinder" title="Add a cylinder (C)"><span class="glyph">▮</span>Cylinder</button>
+            <button type="button" class="tool" data-add="sphere" title="Add a sphere (S)"><span class="glyph">●</span>Sphere</button>
+            <button type="button" class="tool" data-add="capsule" title="Add a capsule (P)"><span class="glyph">⬮</span>Capsule</button>
+        </div>
+        <div class="group" aria-label="Tools">
+            <button type="button" class="tool" data-tool="select" title="Select: click a solid or a joint (Escape)"><span class="glyph">↖</span>Select</button>
+            <button type="button" class="tool" data-tool="move" title="Move the selected solid and what it carries (G)"><span class="glyph">✥</span>Move</button>
+            <button type="button" class="tool" data-tool="turn" title="Turn the selected solid and what it carries (R)"><span class="glyph">⟳</span>Turn</button>
+            <button type="button" class="tool" data-tool="join" title="Join two solids: click a point on each (J)"><span class="glyph">⊕</span>Join</button>
+            <label class="inline" title="The kind of joint the Join tool makes">as
+                <select id="joinKind" aria-label="Kind of joint to make">
+                    <option value="hinge">Hinge</option>
+                    <option value="slider">Slider</option>
+                    <option value="ball">Ball</option>
+                    <option value="fixed">Fixed</option>
+                </select>
+            </label>
+        </div>
+        <div class="group" aria-label="Edit">
+            <button type="button" class="tool" id="duplicateButton" title="Duplicate the selected solids"><span class="glyph">⧉</span>Duplicate</button>
+            <button type="button" class="tool" id="deleteButton" title="Delete what is selected"><span class="glyph">✕</span>Delete</button>
+            <button type="button" class="tool" id="undoButton" title="Undo"><span class="glyph">↶</span>Undo</button>
+            <button type="button" class="tool" id="redoButton" title="Redo"><span class="glyph">↷</span>Redo</button>
+        </div>
+        <div class="group" aria-label="View">
+            <button type="button" class="tool" id="fitButton" title="Fit the robot in the view (F)"><span class="glyph">⛶</span>Fit</button>
+            <select id="viewSide" aria-label="Look from" title="Look from a side">
+                <option value="">Look from…</option>
+                <option value="iso">Above, at an angle</option>
+                <option value="front">The front</option>
+                <option value="right">The right</option>
+                <option value="top">The top</option>
+            </select>
+            <label class="inline" title="Move in 5 mm steps and turn in 15 degree steps"><input type="checkbox" id="snapToggle" checked> Snap</label>
+        </div>
+        <div class="spacer"></div>
+        <select id="exampleSelect" aria-label="Start from an example" title="Start from an example (undo brings your drawing back)">
+            <option value="">Examples…</option>
+        </select>
+        <button type="button" class="tool" id="openButton" title="Open a drawing from a JSON file">Open…</button>
+        <button type="button" class="primary" id="buildButton" title="Build the robot into the canvas">Build into canvas</button>
+        <button type="button" class="tool" id="helpButton" title="Keys and gestures (?)" aria-label="Keys and gestures">?</button>
+    </header>
+
+    <main class="layout">
+        <aside class="panel left" aria-label="Robot">
+            <label class="field"><span>Robot</span><input id="robotName" type="text" autocomplete="off" spellcheck="false"></label>
+            <h2>Parts</h2>
+            <ul class="tree" id="partsTree" role="tree" aria-label="Solids and joints"></ul>
+            <h2>Checks</h2>
+            <ul class="checks" id="checksList" aria-live="polite"></ul>
+            <p class="muted small" id="buildStatus" aria-live="polite"></p>
+        </aside>
+
+        <section class="viewport" id="viewport" aria-label="3D view">
+            <div class="hint" id="hint" aria-live="polite"></div>
+            <div class="toast" id="toast" role="status" hidden></div>
         </section>
 
-        <section class="step" id="stepJoints" hidden>
-            <h2><span class="stepNumber">2</span> Joints</h2>
-            <p class="muted" id="jointsIntro"></p>
-            <table class="joints">
-                <thead><tr><th>Joint</th><th>Range</th><th>Mode</th><th>Setpoint or torque</th></tr></thead>
-                <tbody id="joints"></tbody>
-            </table>
-            <p class="muted small">Servo: the model's own servo holds the joint at its setpoint, a live slider in the canvas. Torque: a constant torque, in N·m. Free: nothing drives it.</p>
-        </section>
-
-        <section class="step" id="stepBuild" hidden>
-            <h2><span class="stepNumber">3</span> Build</h2>
-            <div class="row">
-                <label>Name <input id="modelName" type="text" autocomplete="off"></label>
-            </div>
-            <div class="row">
-                <label>Step <input id="timeStep" type="number" min="0.0005" step="0.0005" value="0.01"> s</label>
-                <label>Run <input id="runTime" type="number" min="0.1" step="0.1" value="10"> s</label>
-            </div>
-            <fieldset class="options" id="servoOptions" hidden>
-                <legend>Will these servos do it?</legend>
-                <label id="moveOption"><input id="useMove" type="checkbox"> <span id="moveLabel"></span></label>
-                <label><input id="useServo" type="checkbox"> <span id="servoLabel"></span></label>
-                <div class="row indent">
-                    <label><input id="useSupply" type="checkbox"> A battery of <input id="supplyVoltage" type="number" min="0.1" step="0.1" value="7.4"> V and <input id="supplyCapacity" type="number" min="0.1" step="0.1" value="2"> Ah, and each servo's winding</label>
-                </div>
-                <div class="row indent">
-                    <label><input id="usePayload" type="checkbox"> A payload of <input id="payloadMass" type="number" min="0" step="0.01" value="0.3"> kg in the gripper (a slider in the canvas)</label>
-                </div>
-                <p class="muted small" id="servoNote"></p>
-            </fieldset>
-            <div class="row"><button type="button" id="buildButton" class="primary">Build into the canvas</button></div>
-            <div id="buildStatus"></div>
-            <div id="pythonStatus" aria-live="polite"><p class="muted small">Checking the Python that runs it for MuJoCo…</p></div>
-            <div class="row"><button type="button" id="pythonCheckButton" hidden>Check Python again</button></div>
-        </section>
-        <section class="step" id="stepCompare" hidden>
-            <h2><span class="stepNumber">4</span> Compare</h2>
-            <p class="muted">The run as built, and a fork of it from a time you choose, side by side.</p>
-            <div class="row">
-                <label>What changes <select id="scenarioSelect">
-                    <option value="heavierPayload">A heavier payload</option>
-                    <option value="weakerServo">A weaker servo</option>
-                </select></label>
-                <label>From <input id="forkAt" type="number" min="0" step="0.1" value="2.5"> s</label>
-            </div>
-            <div class="row" id="payloadChange">
-                <label>Payload <input id="scenarioPayload" type="number" min="0" max="1" step="0.01" value="0.5"> kg</label>
-            </div>
-            <div class="row" id="servoChange" hidden>
-                <label>Servo <select id="scenarioServo"></select></label>
-                <label>Torque limit <input id="scenarioLimit" type="number" min="0.01" step="0.01" value="1"> N·m</label>
-            </div>
-            <div class="row"><button type="button" id="compareButton" class="primary">Run and compare</button> <button type="button" id="showCompareButton" disabled>Show in the canvas</button></div>
-            <div id="compareStatus"></div>
-            <div id="compareResult"></div>
-        </section>
+        <aside class="panel right" id="inspector" aria-label="Selected part"></aside>
     </main>
+
+    <dialog id="helpDialog">
+        <h2>Keys and gestures</h2>
+        <table id="helpTable"></table>
+        <form method="dialog"><button class="primary">Close</button></form>
+    </dialog>
+
     <script type="module" src="toolbox.mjs"></script>
 </body>
 </html>
