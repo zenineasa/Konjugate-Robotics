@@ -48,7 +48,8 @@
             </fieldset>
             <div class="row"><button type="button" id="buildButton" class="primary">Build into the canvas</button></div>
             <div id="buildStatus"></div>
-            <p class="muted small">Running it, or comparing, needs Python with MuJoCo (<code>pip install mujoco</code>) chosen as the Python for providers, under Provider Toolchains in the titlebar.</p>
+            <div id="pythonStatus" aria-live="polite"><p class="muted small">Checking the Python that runs it for MuJoCo…</p></div>
+            <div class="row"><button type="button" id="pythonCheckButton" hidden>Check Python again</button></div>
         </section>
         <section class="step" id="stepCompare" hidden>
             <h2><span class="stepNumber">4</span> Compare</h2>

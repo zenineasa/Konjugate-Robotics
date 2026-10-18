@@ -47,6 +47,36 @@ export function compareServos(answer, { servos, limit, mechanism }) {
     };
 }
 
+// What a fork changes, as the toolbox's scenarios take it: `built` is what the importer's build step answers with
+// (mechanism, servos, stallTorque, payload, runTime). For heavierPayload, `mass` is the payload from the fork on, in kg;
+// for weakerServo, `joint`'s servo is held to `torqueLimit` N·m from the fork on. Returns the run's options for
+// runScenario (supplied paths are counted from the fork), the torque limit each servo had (for compareServos) and a
+// sentence saying what changed.
+export function forkChange(built, { scenarioId, forkAt, mass, joint, torqueLimit }) {
+    const at = Math.min(Math.max(Number(forkAt) || 0, 0), built.runTime);
+    const held = (value) => [[0, value], [Math.max(built.runTime - at, 0.01), value]];
+    const options = (parameter, entity, value) => ({ forkAt: at, runTime: built.runTime, supplied: { byParameter: { [parameter]: { entities: [entity], samples: { [entity]: held(value) } } } }, signals: comparisonSignals(built.servos) });
+    if (scenarioId === 'heavierPayload') {
+        if (!built.payload) throw new Error('This robot was built without a payload to change.');
+        const payload = Math.max(Number(mass) || 0, 0);
+        return {
+            run: options('payloadMass', built.payload.body, built.payload.own + payload),
+            limit: () => built.stallTorque,
+            change: `${payload.toFixed(2)} kg in the gripper from ${at} s, against ${built.payload.mass.toFixed(2)} kg as built`
+        };
+    }
+    if (scenarioId === 'weakerServo') {
+        if (!built.servos.some(({ name }) => name === joint)) throw new Error(`${joint} has no servo to weaken.`);
+        const value = Math.max(Number(torqueLimit) || 0.01, 0.01);
+        return {
+            run: options('servoTorqueLimit', joint, value),
+            limit: (branch, name, time) => (branch === 'scenario' && name === joint && time >= at ? value : built.stallTorque),
+            change: `${joint}'s servo held to ${value} N·m from ${at} s, against ${built.stallTorque.toFixed(2)} N·m as built`
+        };
+    }
+    throw new Error(`There is no scenario ${scenarioId}.`);
+}
+
 // The states a scenario run is asked to answer with, for compareServos.
 export function comparisonSignals(servos) {
     return [...servos.map((servo) => `${servo.key}ServoTorque`), 'windingTemperature', 'stateOfCharge'];

@@ -22,7 +22,7 @@ Konjugate runs the mechanism provider with the Python it is given for providers,
 pip install mujoco
 ```
 
-Then choose that Python under **Provider Toolchains** (⚒ in the titlebar). Open the Robotics Toolbox from the toolstrip, choose a robot, read its licence, download it, set each joint's mode and build it into the canvas. Its servos' setpoints are live sliders there.
+Then choose that Python under **Provider Toolchains** (⚒ in the titlebar). The window checks that Python for MuJoCo when it opens and before each comparison, and says how to install it into that very Python when it is missing (with a Konjugate that has the `pythonCheck` launcher feature; an older one only says MuJoCo is needed). Open the Robotics Toolbox from the toolstrip, choose a robot, read its licence, download it, set each joint's mode and build it into the canvas. Its servos' setpoints are live sliders there.
 
 ## Building from source
 

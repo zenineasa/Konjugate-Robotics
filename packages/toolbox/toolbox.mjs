@@ -8,8 +8,9 @@
 
 import { robots, robotByFolder, storedName } from './lib/catalog.mjs';
 import { latestCommit, licenceName, modelFiles, rawUrl, repository } from './lib/menagerie.mjs';
-import { compareServos, comparisonHeadline, comparisonSignals } from './lib/comparison.mjs';
+import { compareServos, comparisonHeadline, forkChange } from './lib/comparison.mjs';
 import { moves } from './lib/moves.mjs';
+import { pythonAdvice, pythonModules } from './lib/python.mjs';
 import { servoById } from './lib/servos.mjs';
 
 const api = window.konjugateLauncher;
@@ -381,7 +382,6 @@ function renderCompare() {
 }
 $('#scenarioSelect').addEventListener('change', () => { renderCompare(); keepSessionSoon(); });
 
-const kilograms = (value) => `${value.toFixed(2)} kg`;
 const format = (value, digits = 2) => (value === null || value === undefined ? '' : value.toFixed(digits));
 
 function renderComparison(comparison, change) {
@@ -408,32 +408,18 @@ $('#compareButton').addEventListener('click', async () => {
     const built = state.built;
     if (!built) return;
     const scenarioId = $('#scenarioSelect').value;
-    const forkAt = Math.min(Math.max(Number($('#forkAt').value) || 0, 0), built.runTime);
-    const length = built.runTime - forkAt;
-    let supplied;
-    let change;
-    let limit;
-    if (scenarioId === 'heavierPayload') {
-        const mass = Math.max(Number($('#scenarioPayload').value) || 0, 0);
-        const value = built.payload.own + mass;
-        // A path counted from the fork, held from there to the end.
-        supplied = { byParameter: { payloadMass: { entities: [built.payload.body], samples: { [built.payload.body]: [[0, value], [Math.max(length, 0.01), value]] } } } };
-        change = `${kilograms(mass)} in the gripper from ${forkAt} s, against ${kilograms(built.payload.mass)} as built`;
-        limit = () => built.stallTorque;
-    } else {
-        const joint = $('#scenarioServo').value;
-        const value = Math.max(Number($('#scenarioLimit').value) || 0.01, 0.01);
-        supplied = { byParameter: { servoTorqueLimit: { entities: [joint], samples: { [joint]: [[0, value], [Math.max(length, 0.01), value]] } } } };
-        change = `${joint}'s servo held to ${value} N·m from ${forkAt} s, against ${built.stallTorque.toFixed(2)} N·m as built`;
-        limit = (branch, name, time) => (branch === 'scenario' && name === joint && time >= forkAt ? value : built.stallTorque);
-    }
     const button = $('#compareButton');
     button.disabled = true;
-    show('#compareStatus', notice('', 'Running the baseline and the fork…'));
     try {
-        const answer = await call(api.runScenario(scenarioId, { supplied, forkAt, runTime: built.runTime, signals: comparisonSignals(built.servos), retain: true }));
+        const fork = forkChange(built, {
+            scenarioId, forkAt: $('#forkAt').value, mass: $('#scenarioPayload').value, joint: $('#scenarioServo').value, torqueLimit: $('#scenarioLimit').value
+        });
+        // A comparison runs twice through MuJoCo: say so now, rather than after a run that cannot start.
+        if ((await checkPython()).ready === false) throw new Error('Comparing needs Python with MuJoCo: see under Build.');
+        show('#compareStatus', notice('', 'Running the baseline and the fork…'));
+        const answer = await call(api.runScenario(scenarioId, { ...fork.run, retain: true }));
         const clamped = (answer.interventions ?? []).filter((item) => item.clamped);
-        renderComparison(compareServos(answer, { servos: built.servos, mechanism: built.mechanism, limit }), change);
+        renderComparison(compareServos(answer, { servos: built.servos, mechanism: built.mechanism, limit: fork.limit }), fork.change);
         show('#compareStatus', ...clamped.map((item) => notice('warning', `${item.name} was held to its slider, ${item.clamped.minimum} to ${item.clamped.maximum}.`)));
         $('#showCompareButton').disabled = false;
         state.compared = scenarioId;
@@ -447,6 +433,21 @@ $('#compareButton').addEventListener('click', async () => {
 $('#showCompareButton').addEventListener('click', async () => {
     try { await call(api.openInCanvas(state.compared, { focus: true, silent: true, session: sessionState() })); } catch (error) { show('#compareStatus', notice('error', error.message)); }
 });
+
+// ---- the providers' Python -------------------------------------------------------------------------------------
+
+// Asked of the host when the window opens and before each comparison, so a Python changed meanwhile is seen.
+async function checkPython() {
+    let answer = null;
+    if (api.checkPython) {
+        try { answer = await call(api.checkPython(pythonModules)); } catch (error) { answer = { found: false, modules: {}, message: error.message }; }
+    }
+    const advice = pythonAdvice(answer);
+    show('#pythonStatus', advice.kind ? notice(advice.kind, advice.text) : element('p', { class: 'muted small', text: advice.text }));
+    $('#pythonCheckButton').hidden = !api.checkPython;
+    return advice;
+}
+$('#pythonCheckButton').addEventListener('click', () => checkPython());
 
 // ---- the session kept with the project -------------------------------------------------------------------------
 
@@ -506,6 +507,7 @@ async function start() {
         show('#robotStatus', notice('error', error.message));
     }
     renderRobots();
+    checkPython();
     await restore();
 }
 

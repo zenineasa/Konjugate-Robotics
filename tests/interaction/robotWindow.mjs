@@ -128,7 +128,7 @@ try {
         toolbox.on('console', (message) => log.push(`${message.type()}: ${message.text().slice(0, 300)}`));
         toolbox.on('pageerror', (error) => log.push(`pageerror: ${error.message}`));
         const fail = async (error) => {
-            const shown = await toolbox.evaluate(() => ({ robot: document.querySelector('#robotStatus')?.innerText, build: document.querySelector('#buildStatus')?.innerText })).catch((problem) => problem.message);
+            const shown = await toolbox.evaluate(() => ({ robot: document.querySelector('#robotStatus')?.innerText, build: document.querySelector('#buildStatus')?.innerText, python: document.querySelector('#pythonStatus')?.innerText, compare: document.querySelector('#compareStatus')?.innerText })).catch((problem) => problem.message);
             throw new Error(`${error.message}\nThe window shows: ${JSON.stringify(shown)}\nToolbox window log:\n${log.join('\n')}`);
         };
         await toolbox.waitForLoadState('domcontentloaded');
@@ -196,8 +196,10 @@ try {
         assert.ok(Math.abs(shared('pitchServoTorqueLimit')?.value - 1.9123) < 1e-3, 'The shoulder\'s servo is held to its datasheet.');
         assert.equal(shared('fixedJawMassWithPayload')?.mode, 'live', 'The payload is a slider.');
 
-        // 4b. Compare: the run as built and a fork of it with a heavier payload, servo by servo.
+        // 4b. Compare: the run as built and a fork of it with a heavier payload, servo by servo. The window has checked
+        // that the providers' Python has MuJoCo (this suite's Python does).
         await toolbox.bringToFront();
+        await toolbox.waitForFunction(() => /has MuJoCo [\d.]+: runs and comparisons will work/.test(document.querySelector('#pythonStatus .notice.ok')?.textContent ?? ''), null, { timeout: 30000 }).catch(fail);
         await toolbox.waitForSelector('#stepCompare:not([hidden])', { timeout: 10000 }).catch(fail);
         assert.equal(await toolbox.locator('#scenarioServo option').count(), 5, 'Each servo can be the weaker one.');
         await toolbox.selectOption('#scenarioSelect', 'heavierPayload');
@@ -219,6 +221,30 @@ try {
         assert.ok(usedAfter > usedBefore, `The battery gives more with the heavier payload: ${compared.battery}`);
         assert.ok(!/^The servos meet it as they met/.test(compared.headline), `The headline says what changed: ${compared.headline}`);
         assert.ok(!(await toolbox.locator('#showCompareButton').isDisabled()), 'The fork can be shown in the canvas.');
+
+        // 4c. A weaker servo: the shoulder's held to 1.2 N·m from 1 s, so it spends longer at its (lower) limit.
+        await toolbox.selectOption('#scenarioSelect', 'weakerServo');
+        assert.ok(await toolbox.locator('#payloadChange').isHidden(), 'A weaker servo asks for a servo and a limit, not a payload.');
+        await toolbox.selectOption('#scenarioServo', 'Pitch');
+        await toolbox.fill('#forkAt', '1');
+        await toolbox.fill('#scenarioLimit', '1.2');
+        await toolbox.evaluate(() => document.querySelector('#compareResult').replaceChildren());
+        await toolbox.click('#compareButton');
+        await toolbox.waitForFunction(() => document.querySelectorAll('#compareResult .comparison tbody tr').length === 5 || /error/.test(document.querySelector('#compareStatus .notice')?.className ?? ''), null, { timeout: 180000 }).catch(fail);
+        const weaker = await toolbox.evaluate(() => ({
+            status: document.querySelector('#compareStatus')?.innerText,
+            headline: document.querySelector('#compareResult .headline')?.textContent,
+            change: document.querySelector('#compareResult .headline + p')?.textContent,
+            rows: [...document.querySelectorAll('#compareResult .comparison tbody tr')].map((row) => [...row.cells].map((cell) => cell.textContent))
+        }));
+        assert.equal(weaker.rows.length, 5, `The comparison has a row for each servo: ${JSON.stringify(weaker)}`);
+        assert.match(weaker.change, /^Pitch's servo held to 1\.2 N·m from 1 s/);
+        const weakPitch = weaker.rows.find(([name]) => name === 'Pitch');
+        const [peakBefore, peakAfter] = weakPitch[1].split(' → ').map(Number);
+        const [limitBefore, limitAfter] = weakPitch[2].split(' → ').map(Number);
+        assert.ok(peakAfter <= 1.2 + 1e-6 || peakAfter <= peakBefore, `The shoulder's peak after the fork is held to its new limit: ${weakPitch[1]}.`);
+        assert.ok(limitAfter > limitBefore, `The shoulder spends longer at its lower limit: ${weakPitch[2]}.`);
+        assert.match(weaker.headline, /Pitch/, `The headline names the shoulder: ${weaker.headline}`);
 
         // 5. Run in the app, and shown in Pose Visualizer.
         await project.bringToFront();
@@ -264,7 +290,8 @@ try {
             await pose.screenshot({ path: process.env.ROBOTICS_SCREENSHOT });
         }
         console.log('Robotics toolbox window: licence, download, joints, build into the canvas, a fork compared, a run and Pose Visualizer all passed.');
-        console.log(`The fork: ${compared.headline} Shoulder ${pitch.slice(1).join(', ')}. ${compared.battery}`);
+        console.log(`The heavier payload: ${compared.headline} Shoulder ${pitch.slice(1).join(', ')}. ${compared.battery}`);
+        console.log(`The weaker shoulder: ${weaker.headline} Shoulder ${weakPitch.slice(1).join(', ')}.`);
     } finally {
         await app.close();
     }

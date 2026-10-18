@@ -4,7 +4,7 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { compareServos, comparisonHeadline, comparisonSignals } from '../../packages/toolbox/lib/comparison.mjs';
+import { compareServos, comparisonHeadline, comparisonSignals, forkChange } from '../../packages/toolbox/lib/comparison.mjs';
 
 const servos = [{ name: 'Pitch', key: 'pitch' }, { name: 'Jaw', key: 'jaw' }];
 const series = (values) => values.map((value, index) => [index * 0.5, value]);
@@ -47,4 +47,30 @@ test('the same branches twice say nothing changed, and the signals asked for are
     const comparison = compareServos({ branches: [{ id: 'baseline', ...baseline }, { id: 'scenario', ...baseline }] }, { servos, mechanism: 'Arm', limit: () => 2 });
     assert.match(comparisonHeadline(comparison), /as they met the baseline/);
     assert.deepEqual(comparisonSignals(servos), ['pitchServoTorque', 'jawServoTorque', 'windingTemperature', 'stateOfCharge']);
+});
+
+const built = { mechanism: 'Arm', servos, stallTorque: 1.91, payload: { body: 'Jaw_Body', own: 0.09, mass: 0.3 }, runTime: 9 };
+
+test('a heavier payload is supplied as the gripper\'s own mass and the payload, held from the fork to the end', () => {
+    const fork = forkChange(built, { scenarioId: 'heavierPayload', forkAt: '2.5', mass: '0.6' });
+    assert.equal(fork.run.forkAt, 2.5);
+    assert.equal(fork.run.runTime, 9);
+    assert.deepEqual(fork.run.supplied, { byParameter: { payloadMass: { entities: ['Jaw_Body'], samples: { Jaw_Body: [[0, 0.69], [6.5, 0.69]] } } } });
+    assert.deepEqual(fork.run.signals, comparisonSignals(servos));
+    assert.equal(fork.limit('scenario', 'Pitch', 5), 1.91);
+    assert.equal(fork.change, '0.60 kg in the gripper from 2.5 s, against 0.30 kg as built');
+    assert.throws(() => forkChange({ ...built, payload: null }, { scenarioId: 'heavierPayload', forkAt: 0, mass: 1 }), /without a payload/);
+});
+
+test('a weaker servo is held to its new limit from the fork, and only there is that limit counted', () => {
+    const fork = forkChange(built, { scenarioId: 'weakerServo', forkAt: 3, joint: 'Jaw', torqueLimit: '0.8' });
+    assert.deepEqual(fork.run.supplied, { byParameter: { servoTorqueLimit: { entities: ['Jaw'], samples: { Jaw: [[0, 0.8], [6, 0.8]] } } } });
+    assert.equal(fork.limit('scenario', 'Jaw', 3), 0.8);
+    assert.equal(fork.limit('scenario', 'Jaw', 2.9), 1.91, 'Before the fork the servo is as built.');
+    assert.equal(fork.limit('baseline', 'Jaw', 5), 1.91, 'The baseline is as built.');
+    assert.equal(fork.limit('scenario', 'Pitch', 5), 1.91, 'Only the chosen servo is weaker.');
+    // A fork past the end is held to the end, with a path still of some length; a joint with no servo is refused.
+    assert.equal(forkChange(built, { scenarioId: 'weakerServo', forkAt: 20, joint: 'Jaw', torqueLimit: 1 }).run.supplied.byParameter.servoTorqueLimit.samples.Jaw[1][0], 0.01);
+    assert.throws(() => forkChange(built, { scenarioId: 'weakerServo', forkAt: 0, joint: 'Wrist', torqueLimit: 1 }), /no servo/);
+    assert.throws(() => forkChange(built, { scenarioId: 'colderDay', forkAt: 0 }), /no scenario/);
 });
