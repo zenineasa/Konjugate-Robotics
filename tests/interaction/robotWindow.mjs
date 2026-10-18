@@ -106,7 +106,10 @@ try {
                     const file = answers.files[decodeURIComponent(raw[2])];
                     if (file) {
                         const bytes = Buffer.from(file, 'base64');
-                        return new Response(bytes, { status: 200, headers: { 'content-length': String(bytes.length) } });
+                        // As GitHub answers: text gzipped, its content-length the compressed size, while fetch hands over
+                        // the body unpacked (a download held to that length stopped short of its own size).
+                        const text = !/\.(stl|obj|png)$/i.test(raw[2]);
+                        return new Response(bytes, { status: 200, headers: text ? { 'content-length': String(Math.ceil(bytes.length / 3)), 'content-encoding': 'gzip' } : { 'content-length': String(bytes.length) } });
                     }
                 }
                 return new Response('not found', { status: 404 });

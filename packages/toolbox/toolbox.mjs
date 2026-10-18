@@ -159,6 +159,8 @@ async function download(folder) {
                 details: { robot: folder, commit: licence.commit, path: file.path, licence: licence.name }
             }));
             kept.push(stored.id);
+            // GitHub's listing gives each file's size; the store cannot always check it (text comes compressed), so this does.
+            if (file.size !== undefined && stored.bytes !== file.size) throw new Error(`${file.path} came as ${stored.bytes} bytes, not the ${file.size} GitHub lists. Try again.`);
             before += file.size ?? 1;
             state.downloading.done = before;
         }
