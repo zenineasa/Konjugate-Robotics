@@ -196,6 +196,30 @@ try {
         assert.ok(Math.abs(shared('pitchServoTorqueLimit')?.value - 1.9123) < 1e-3, 'The shoulder\'s servo is held to its datasheet.');
         assert.equal(shared('fixedJawMassWithPayload')?.mode, 'live', 'The payload is a slider.');
 
+        // 4b. Compare: the run as built and a fork of it with a heavier payload, servo by servo.
+        await toolbox.bringToFront();
+        await toolbox.waitForSelector('#stepCompare:not([hidden])', { timeout: 10000 }).catch(fail);
+        assert.equal(await toolbox.locator('#scenarioServo option').count(), 5, 'Each servo can be the weaker one.');
+        await toolbox.selectOption('#scenarioSelect', 'heavierPayload');
+        await toolbox.fill('#forkAt', '2.5');
+        await toolbox.fill('#scenarioPayload', '0.6');
+        await toolbox.click('#compareButton');
+        await toolbox.waitForFunction(() => document.querySelectorAll('#compareResult .comparison tbody tr').length === 5 || /error/.test(document.querySelector('#compareStatus .notice')?.className ?? ''), null, { timeout: 180000 }).catch(fail);
+        const compared = await toolbox.evaluate(() => ({
+            status: document.querySelector('#compareStatus')?.innerText,
+            headline: document.querySelector('#compareResult .headline')?.textContent,
+            rows: [...document.querySelectorAll('#compareResult .comparison tbody tr')].map((row) => [...row.cells].map((cell) => cell.textContent)),
+            battery: [...document.querySelectorAll('#compareResult p')].at(-1)?.textContent
+        }));
+        assert.equal(compared.rows.length, 5, `The comparison has a row for each servo: ${JSON.stringify(compared)}`);
+        const pitch = compared.rows.find(([name]) => name === 'Pitch');
+        const [before, after] = pitch[3].split(' → ').map(Number);
+        assert.ok(after > before, `The shoulder's winding gets hotter with the heavier payload: ${pitch[3]}.`);
+        const [usedBefore, usedAfter] = compared.battery.match(/[\d.]+(?= %)/g).map(Number);
+        assert.ok(usedAfter > usedBefore, `The battery gives more with the heavier payload: ${compared.battery}`);
+        assert.ok(!/^The servos meet it as they met/.test(compared.headline), `The headline says what changed: ${compared.headline}`);
+        assert.ok(!(await toolbox.locator('#showCompareButton').isDisabled()), 'The fork can be shown in the canvas.');
+
         // 5. Run in the app, and shown in Pose Visualizer.
         await project.bringToFront();
         await project.waitForFunction(() => !document.querySelector('#runButton').disabled, null, { timeout: 30000 });
@@ -239,7 +263,8 @@ try {
             await new Promise((resolve) => setTimeout(resolve, 1500));
             await pose.screenshot({ path: process.env.ROBOTICS_SCREENSHOT });
         }
-        console.log('Robotics toolbox window: licence, download, joints, build into the canvas, a run and Pose Visualizer all passed.');
+        console.log('Robotics toolbox window: licence, download, joints, build into the canvas, a fork compared, a run and Pose Visualizer all passed.');
+        console.log(`The fork: ${compared.headline} Shoulder ${pitch.slice(1).join(', ')}. ${compared.battery}`);
     } finally {
         await app.close();
     }

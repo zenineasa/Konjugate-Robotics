@@ -101,7 +101,13 @@ export default async function importRobot({ files, helpers, options = {} }) {
     const servoJoints = joints.filter(({ setpoint }) => setpoint);
     const parameters = [];
     if (servo) {
-        for (const joint of servoJoints) parameters.push({ name: `${joint.name} servo torque limit`, kind: 'servoTorqueLimit', target: joint.name, value: servo.stallTorque });
+        // Live, so a fork can take a servo's torque away (a worn or a smaller one): from a tenth of its rating to twice it.
+        for (const joint of servoJoints) {
+            parameters.push({
+                name: `${joint.name} servo torque limit`, kind: 'servoTorqueLimit', target: joint.name, value: servo.stallTorque,
+                control: { minimum: Math.round(servo.stallTorque * 10) / 100, maximum: Math.round(servo.stallTorque * 200) / 100, step: 0.01 }
+            });
+        }
         notes.push(`Each servo is held to the ${servo.name}'s ${servo.stallTorque.toFixed(2)} N·m at stall, from its datasheet; the model's own limit is not used.`);
     }
     if (options.payload) {
@@ -142,9 +148,26 @@ export default async function importRobot({ files, helpers, options = {} }) {
     }
     addRunConfiguration(document, id, { globalTimeStep: options.timeStep ?? 0.01, targetTime: options.runTime ?? (move ? move.keyframes.at(-1)[0] + 1 : 10) });
     const drivenCount = joints.filter((joint) => joint.setpoint || joint.torque).length;
+    // What a scenario may change, by what it is of: each servo's torque limit by its joint, and the payload by the body
+    // it is on.
+    const parameterIndex = [];
+    const index = (key, entity, shared) => parameterIndex.push({
+        key, entity, name: shared.name, symbol: shared.symbol, sharedParameterId: shared.id, scope: 'instance', value: shared.value, unit: shared.unit,
+        live: shared.mode === 'live', minimum: shared.control?.minimum ?? null, maximum: shared.control?.maximum ?? null
+    });
+    if (servo) for (const joint of servoJoints) index('servoTorqueLimit', joint.name, placed.parameters.get(`${joint.name} servo torque limit`));
+    if (options.payload) index('payloadMass', options.payload.body, placed.parameters.get(`${options.payload.body} mass with payload`));
     return {
-        ok: true, document,
-        data: { step: 'build', joints: joints.length, driven: drivenCount },
+        ok: true, document, parameterIndex,
+        data: {
+            step: 'build', joints: joints.length, driven: drivenCount,
+            // For a scenario's comparison: the mechanism, its servo joints by their states' prefix, their rating and the payload.
+            mechanism: options.name ?? 'Robot',
+            servos: servo ? servoJoints.map(({ name }) => ({ name, key: placed.joints.get(name).servoTorque.symbol.replace(/ServoTorque$/, '') })) : [],
+            stallTorque: servo?.stallTorque ?? null,
+            payload: options.payload ? { body: options.payload.body, own: placed.parameters.get(`${options.payload.body} mass with payload`).value - options.payload.mass, mass: options.payload.mass } : null,
+            runTime: document.runConfigurations.at(-1).targetTime
+        },
         report: { errors: [], warnings, notes, summary: `${options.name ?? 'The robot'}: ${joints.length} joints, ${drivenCount} driven` }
     };
 }

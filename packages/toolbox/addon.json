@@ -11,7 +11,8 @@
         "files.store",
         "model.open",
         "network.fetch",
-        "project.data"
+        "project.data",
+        "scenario.run"
     ],
     "requires": [
         "projectSession",
@@ -19,7 +20,9 @@
         "binaryInputs",
         "multipleBinaryInputs",
         "storedFiles",
-        "nodeProviderInputs"
+        "nodeProviderInputs",
+        "scenarioForkTime",
+        "suppliedPerParameter"
     ],
     "contributes": {
         "toolstrip": [
@@ -51,6 +54,42 @@
                             "png"
                         ],
                         "description": "A robot's MuJoCo model (its MJCF and the meshes and textures it reads), as fetched from MuJoCo Menagerie and kept on this computer: each file named for its path in the model's folder, with / written as ^."
+                    }
+                ]
+            }
+        ],
+        "scenarios": [
+            {
+                "scenarioId": "heavierPayload",
+                "name": "Heavier payload",
+                "description": "From a time in the move, the gripper carries a heavier payload. Watch which servos reach their limit, how hot their windings get and how much charge the move takes.",
+                "forkAt": 2.5,
+                "runTime": 9,
+                "effects": [
+                    "The payload's mass changes to the one given, from the time given to the end of the run."
+                ],
+                "interventions": [
+                    {
+                        "parameter": "payloadMass",
+                        "target": "supplied",
+                        "samples": true
+                    }
+                ]
+            },
+            {
+                "scenarioId": "weakerServo",
+                "name": "Weaker servo",
+                "description": "From a time in the move, a servo gives less torque than its datasheet says, as a worn or a smaller one would. Watch whether the move is still made, and what the others do about it.",
+                "forkAt": 0,
+                "runTime": 9,
+                "effects": [
+                    "The chosen servo's torque limit changes to the one given, from the time given to the end of the run."
+                ],
+                "interventions": [
+                    {
+                        "parameter": "servoTorqueLimit",
+                        "target": "supplied",
+                        "samples": true
                     }
                 ]
             }

@@ -52,3 +52,9 @@ progress { width: 100%; }
 .options { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin: 10px 0; display: grid; gap: 6px; }
 .options legend { color: var(--muted); font-size: 11px; padding: 0 4px; }
 .indent { margin: 0 0 0 22px; }
+.comparison { width: 100%; border-collapse: collapse; margin: 8px 0; }
+.comparison th, .comparison td { padding: 4px 6px; border-bottom: 1px solid var(--border); text-align: right; }
+.comparison th:first-child, .comparison td:first-child { text-align: left; }
+.comparison th { color: var(--muted); font-weight: 600; font-size: 11px; }
+.comparison .worse { color: var(--warn); }
+.headline { color: var(--bright); font-weight: 600; }

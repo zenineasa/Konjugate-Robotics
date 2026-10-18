@@ -5,6 +5,7 @@
   "private": true,
   "type": "module",
   "description": "Robotics toolbox for Konjugate.",
+  "license": "AGPL-3.0-only",
   "copyright": "Copyright © 2026 Zenin Easa Panthakkalakath",
   "scripts": {
     "build": "node scripts/build.mjs",

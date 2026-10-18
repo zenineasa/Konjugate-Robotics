@@ -48,7 +48,28 @@
             </fieldset>
             <div class="row"><button type="button" id="buildButton" class="primary">Build into the canvas</button></div>
             <div id="buildStatus"></div>
-            <p class="muted small">Running it needs Python with MuJoCo (<code>pip install mujoco</code>) chosen as the Python for providers, under Provider Toolchains in the titlebar.</p>
+            <p class="muted small">Running it, or comparing, needs Python with MuJoCo (<code>pip install mujoco</code>) chosen as the Python for providers, under Provider Toolchains in the titlebar.</p>
+        </section>
+        <section class="step" id="stepCompare" hidden>
+            <h2><span class="stepNumber">4</span> Compare</h2>
+            <p class="muted">The run as built, and a fork of it from a time you choose, side by side.</p>
+            <div class="row">
+                <label>What changes <select id="scenarioSelect">
+                    <option value="heavierPayload">A heavier payload</option>
+                    <option value="weakerServo">A weaker servo</option>
+                </select></label>
+                <label>From <input id="forkAt" type="number" min="0" step="0.1" value="2.5"> s</label>
+            </div>
+            <div class="row" id="payloadChange">
+                <label>Payload <input id="scenarioPayload" type="number" min="0" max="1" step="0.01" value="0.5"> kg</label>
+            </div>
+            <div class="row" id="servoChange" hidden>
+                <label>Servo <select id="scenarioServo"></select></label>
+                <label>Torque limit <input id="scenarioLimit" type="number" min="0.01" step="0.01" value="1"> N·m</label>
+            </div>
+            <div class="row"><button type="button" id="compareButton" class="primary">Run and compare</button> <button type="button" id="showCompareButton" disabled>Show in the canvas</button></div>
+            <div id="compareStatus"></div>
+            <div id="compareResult"></div>
         </section>
     </main>
     <script type="module" src="toolbox.mjs"></script>

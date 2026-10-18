@@ -8,6 +8,7 @@
 
 import { robots, robotByFolder, storedName } from './lib/catalog.mjs';
 import { latestCommit, licenceName, modelFiles, rawUrl, repository } from './lib/menagerie.mjs';
+import { compareServos, comparisonHeadline, comparisonSignals } from './lib/comparison.mjs';
 import { moves } from './lib/moves.mjs';
 import { servoById } from './lib/servos.mjs';
 
@@ -314,7 +315,8 @@ function servoBuildOptions() {
         ...($('#useMove').checked && robotMove() ? { move: robotMove()[0] } : {}),
         ...(servoOn ? { servo: robotByFolder(state.selected).servo } : {}),
         ...(servoOn && $('#useSupply').checked ? { supply: { voltage: Number($('#supplyVoltage').value) || 7.4, capacity: (Number($('#supplyCapacity').value) || 2) * 3600 } } : {}),
-        ...(servoOn && $('#usePayload').checked ? { payload: { body: robotByFolder(state.selected).gripper, mass: Number($('#payloadMass').value) || 0 } } : {})
+        // The payload is always a slider when the servos are, at nothing when none is chosen, so a fork can add one.
+        ...(servoOn && robotByFolder(state.selected).gripper ? { payload: { body: robotByFolder(state.selected).gripper, mass: $('#usePayload').checked ? Number($('#payloadMass').value) || 0 : 0 } } : {})
     };
 }
 
@@ -347,6 +349,8 @@ $('#buildButton').addEventListener('click', async () => {
             ...servoBuildOptions()
         }));
         if (!answer.imported) throw new Error(answer.report?.errors?.join(' ') || 'The robot could not be built.');
+        state.built = answer.data;
+        renderCompare();
         await call(api.openInCanvas(null, { focus: true, silent: true, session: sessionState() }));
         show('#buildStatus', notice('ok', `${answer.report.summary}, now in the canvas. Its servos' setpoints are live sliders there${$('#useMove').checked ? ', following the move until a slider is moved' : ''}.`),
             ...(answer.report.notes ?? []).map((text) => notice('', text)),
@@ -356,6 +360,92 @@ $('#buildButton').addEventListener('click', async () => {
     } finally {
         button.disabled = false;
     }
+});
+
+// ---- compare: the run as built, and a fork of it ---------------------------------------------------------------
+
+// Offered once a robot is built with its servos as their datasheet gives them: what a fork changes needs those.
+function renderCompare() {
+    const built = state.built;
+    $('#stepCompare').hidden = !built?.servos?.length;
+    if ($('#stepCompare').hidden) return;
+    const servoSelect = $('#scenarioServo');
+    const chosen = servoSelect.value;
+    servoSelect.replaceChildren(...built.servos.map(({ name }) => element('option', { value: name, text: name })));
+    if (built.servos.some(({ name }) => name === chosen)) servoSelect.value = chosen;
+    $('#forkAt').max = String(built.runTime);
+    const payload = $('#scenarioSelect').value === 'heavierPayload';
+    $('#payloadChange').hidden = !payload;
+    $('#servoChange').hidden = payload;
+    $('#scenarioSelect').querySelector('option[value="heavierPayload"]').disabled = !built.payload;
+}
+$('#scenarioSelect').addEventListener('change', () => { renderCompare(); keepSessionSoon(); });
+
+const kilograms = (value) => `${value.toFixed(2)} kg`;
+const format = (value, digits = 2) => (value === null || value === undefined ? '' : value.toFixed(digits));
+
+function renderComparison(comparison, change) {
+    const row = (servo) => {
+        const cell = (before, after, digits, worse) => element('td', { class: worse(after, before) ? 'worse' : '', text: `${format(before, digits)} → ${format(after, digits)}` });
+        return element('tr', {}, [
+            element('td', { text: servo.name }),
+            cell(servo.baseline.peakTorque, servo.scenario.peakTorque, 2, (after, before) => after > before + 0.01),
+            cell(servo.baseline.secondsAtLimit, servo.scenario.secondsAtLimit, 2, (after, before) => after > before + 0.01),
+            cell(servo.baseline.peakWinding, servo.scenario.peakWinding, 1, (after, before) => after > before + 0.1)
+        ]);
+    };
+    show('#compareResult',
+        element('p', { class: 'headline', text: comparisonHeadline(comparison) }),
+        element('p', { class: 'muted small', text: `${change}. Baseline → fork. Time at a limit is about right: it is counted from the few hundred points a comparison is given.` }),
+        element('table', { class: 'comparison' }, [
+            element('thead', {}, [element('tr', {}, ['Servo', 'Peak torque (N·m)', 'At its limit (s)', 'Winding, hottest (°C)'].map((text) => element('th', { text })))]),
+            element('tbody', {}, comparison.servos.map(row))
+        ]),
+        element('p', { text: `Battery charge used: ${format(comparison.battery.baseline, 3)} % → ${format(comparison.battery.scenario, 3)} %.` }));
+}
+
+$('#compareButton').addEventListener('click', async () => {
+    const built = state.built;
+    if (!built) return;
+    const scenarioId = $('#scenarioSelect').value;
+    const forkAt = Math.min(Math.max(Number($('#forkAt').value) || 0, 0), built.runTime);
+    const length = built.runTime - forkAt;
+    let supplied;
+    let change;
+    let limit;
+    if (scenarioId === 'heavierPayload') {
+        const mass = Math.max(Number($('#scenarioPayload').value) || 0, 0);
+        const value = built.payload.own + mass;
+        // A path counted from the fork, held from there to the end.
+        supplied = { byParameter: { payloadMass: { entities: [built.payload.body], samples: { [built.payload.body]: [[0, value], [Math.max(length, 0.01), value]] } } } };
+        change = `${kilograms(mass)} in the gripper from ${forkAt} s, against ${kilograms(built.payload.mass)} as built`;
+        limit = () => built.stallTorque;
+    } else {
+        const joint = $('#scenarioServo').value;
+        const value = Math.max(Number($('#scenarioLimit').value) || 0.01, 0.01);
+        supplied = { byParameter: { servoTorqueLimit: { entities: [joint], samples: { [joint]: [[0, value], [Math.max(length, 0.01), value]] } } } };
+        change = `${joint}'s servo held to ${value} N·m from ${forkAt} s, against ${built.stallTorque.toFixed(2)} N·m as built`;
+        limit = (branch, name, time) => (branch === 'scenario' && name === joint && time >= forkAt ? value : built.stallTorque);
+    }
+    const button = $('#compareButton');
+    button.disabled = true;
+    show('#compareStatus', notice('', 'Running the baseline and the fork…'));
+    try {
+        const answer = await call(api.runScenario(scenarioId, { supplied, forkAt, runTime: built.runTime, signals: comparisonSignals(built.servos), retain: true }));
+        const clamped = (answer.interventions ?? []).filter((item) => item.clamped);
+        renderComparison(compareServos(answer, { servos: built.servos, mechanism: built.mechanism, limit }), change);
+        show('#compareStatus', ...clamped.map((item) => notice('warning', `${item.name} was held to its slider, ${item.clamped.minimum} to ${item.clamped.maximum}.`)));
+        $('#showCompareButton').disabled = false;
+        state.compared = scenarioId;
+    } catch (error) {
+        show('#compareStatus', notice('error', error.message));
+    } finally {
+        button.disabled = false;
+    }
+});
+
+$('#showCompareButton').addEventListener('click', async () => {
+    try { await call(api.openInCanvas(state.compared, { focus: true, silent: true, session: sessionState() })); } catch (error) { show('#compareStatus', notice('error', error.message)); }
 });
 
 // ---- the session kept with the project -------------------------------------------------------------------------
