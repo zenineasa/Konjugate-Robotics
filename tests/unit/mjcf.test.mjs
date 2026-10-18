@@ -40,6 +40,12 @@ function sameAsMuJoCo(ours, theirs) {
         if (joint.kind !== 'free') near([joint.initialPosition], [theirs.joints[index].initialPosition], `${joint.name} starting position`);
     });
     assert.deepEqual(ours.actuators.map(({ name, joint, kind }) => [name, joint, kind]), theirs.actuators.map(({ name, joint, kind }) => [name, joint, kind]), 'actuators');
+    // Each body's place at the reference pose; a quaternion and its negative are the same orientation.
+    ours.frames.forEach((frame, index) => {
+        near(frame.position, theirs.frames[index].position, `${ours.bodies[index]} position`);
+        const sign = Math.sign(frame.quaternion.reduce((sum, value, at) => sum + value * theirs.frames[index].quaternion[at], 0)) || 1;
+        near(frame.quaternion.map((value) => value * sign), theirs.frames[index].quaternion, `${ours.bodies[index]} orientation`);
+    });
     ours.actuators.forEach((actuator, index) => {
         near([actuator.gain], [theirs.actuators[index].gain], `${actuator.name} gain`);
         near(actuator.forceRange, theirs.actuators[index].forceRange, `${actuator.name} force range`);
@@ -72,7 +78,13 @@ test('degrees by default, default classes, childclass, ref and the actuator shor
         <geom size="0.04" mass="0.5"/>
       </body>
     </body>
-    <body name="loose" pos="1 0 0"><freejoint name="float"/><geom size="0.1" mass="1"/></body>
+    <body name="loose" pos="1 0 0" euler="10 20 30"><freejoint name="float"/><geom size="0.1" mass="1"/>
+      <body name="tilted" pos="0 0.2 0" axisangle="1 1 0 45"><geom size="0.02" mass="0.1"/>
+        <body name="aimed" pos="0.1 0 0" xyaxes="0 1 0 -1 0 0"><geom size="0.02" mass="0.1"/>
+          <body name="pointed" zaxis="1 1 1"><geom size="0.02" mass="0.1"/></body>
+        </body>
+      </body>
+    </body>
   </worldbody>
   <actuator>
     <position name="shoulderServo" joint="shoulder" class="arm"/>

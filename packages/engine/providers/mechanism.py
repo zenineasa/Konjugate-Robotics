@@ -12,6 +12,9 @@ Each joint is in one of three modes:
 An actuator the model has on a joint in torque or free mode is switched off, so nothing drives a joint that the
 mechanism does not say drives it.
 
+The bodies named in the configuration report their place in the world as states too: a position (x, y, z, in metres,
+z up) and an orientation (a unit quaternion w, x, y, z), so a result shows where each part of the robot was.
+
 The mechanism may also read shared parameters, each setting one quantity of MuJoCo's model: a body's mass (its inertia
 scaled with it, as for a body of the same shape and density), or a joint's damping, friction loss or armature. Each is
 applied before a step whenever its value has changed, so a live slider, a stored schedule, a fork's intervention and
@@ -52,6 +55,9 @@ _INSTABILITY_WARNINGS = {
 # MuJoCo's warning messages, kept here for the error that stops the run, rather than printed and written to a
 # MUJOCO_LOG.TXT in whatever directory the engine runs in.
 _warnings = []
+
+# A body's pose as states, in this order: position, then orientation as a unit quaternion.
+_POSE_PARTS = ("X", "Y", "Z", "Qw", "Qx", "Qy", "Qz")
 mujoco.set_mju_user_warning(_warnings.append)
 
 
@@ -95,6 +101,12 @@ class MechanismNode(NodeProvider):
             self._data.qpos[self._joints[-1]["qpos"]] = float(joint.get("initialPosition", 0.0))
             self._data.qvel[self._joints[-1]["dof"]] = float(joint.get("initialSpeed", 0.0))
         self._parameters = [self._parameter(parameter) for parameter in self._configuration.get("parameters", [])]
+        self._bodies = []
+        for body in self._configuration.get("bodies", []):
+            index = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, body["name"])
+            if index < 0:
+                raise ValueError(f"The mechanism has no body named {body['name']}.")
+            self._bodies.append({"key": body["key"], "index": index})
         mujoco.mj_forward(self._model, self._data)
         # The time MuJoCo has reached; None until the first call.
         self._time = None
@@ -153,7 +165,8 @@ class MechanismNode(NodeProvider):
             [port for joint in self._joints for port in (
                 ScalarPort(f"{joint['key']}Position", "Position", ""),
                 ScalarPort(f"{joint['key']}Speed", "Speed", ""),
-            ) + ((ScalarPort(f"{joint['key']}ServoTorque", "Torque the servo applies", ""),) if joint["mode"] == "servo" else ())],
+            ) + ((ScalarPort(f"{joint['key']}ServoTorque", "Torque the servo applies", ""),) if joint["mode"] == "servo" else ())]
+            + [ScalarPort(f"{body['key']}{part}", f"Body {part}", "") for body in self._bodies for part in _POSE_PARTS],
         )
 
     def evaluate(self, context, inputs, outputs):
@@ -199,6 +212,10 @@ class MechanismNode(NodeProvider):
             outputs.add_gradient(f"{joint['key']}Speed", float(self._data.qvel[joint["dof"]]))
             if joint["mode"] == "servo":
                 outputs.add_gradient(f"{joint['key']}ServoTorque", float(self._data.actuator_force[joint["actuator"]]))
+        for body in self._bodies:
+            pose = [*self._data.xpos[body["index"]], *self._data.xquat[body["index"]]]
+            for part, value in zip(_POSE_PARTS, pose):
+                outputs.add_gradient(f"{body['key']}{part}", float(value))
 
     # A checkpoint holds the time reached and MuJoCo's whole integration state.
     def checkpoint(self):

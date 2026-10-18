@@ -8,11 +8,16 @@
 //   - used, its six joints are listed, each with its own servo; one is set free, one given a setpoint
 //   - built, the mechanism is in the canvas: the project carries the robot with its licence and commit, and its
 //     servos' setpoints are live shared parameters, the one set in the window at its value
-// Uses Playwright from the Konjugate checkout, as the logistics toolbox's interaction tests do.
+//   - run in the app (with this repository's Python, which has MuJoCo, as the providers' Python) and shown in Pose
+//     Visualizer, once a naming convention for poses by quaternion is made: each of its seven links is a body of the
+//     one mechanism node, drawn with its own mesh at its true size, where the run put it
+// Uses Playwright from the Konjugate checkout, as the logistics toolbox's interaction tests do; Pose Visualizer is
+// installed from a sibling checkout's build (../konjugate-posevisualizer, npm run build), as Konjugate's own tests do.
+// ROBOTICS_SCREENSHOT=<path> keeps a picture of Pose Visualizer showing the robot.
 
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -24,6 +29,8 @@ const require = createRequire(join(konjugateDir, 'package.json'));
 const { _electron: electron } = require('playwright');
 const electronPath = require('electron');
 const { encodeProjectFile } = await import(pathToFileURL(konjugateModule('src/projectFile.mjs')));
+const { installInteractionAddons } = await import(pathToFileURL(konjugateModule('scripts/interactionAddons.mjs')));
+const python = process.env.ROBOTICS_PYTHON ?? join(roboticsRoot, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 
 const commit = '62ab00f2bc44f6f20c1c9b7a13f3fb1dd41a4e35';
 const folder = 'trs_so_arm100';
@@ -67,6 +74,11 @@ const userData = join(scratch, 'userData');
 
 try {
     await installBuiltPackages(userData);
+    const addons = await installInteractionAddons(konjugateDir, userData);
+    assert.ok(addons.some((name) => name.startsWith('konjugate.poseVisualizer')), 'Pose Visualizer is not built: npm run build in ../konjugate-posevisualizer.');
+    // The providers' Python: this repository's, which has MuJoCo.
+    await mkdir(join(userData, 'providers'), { recursive: true });
+    await writeFile(join(userData, 'providers', 'toolchains.json'), JSON.stringify({ version: 1, cpp: { compilerPath: '' }, python: { interpreterPath: python }, executionMode: '' }));
     const projectPath = join(scratch, 'empty.kjt');
     await writeFile(projectPath, await encodeProjectFile(JSON.stringify({
         format: 'konjugate', version: 1, metadata: { units: 'SI' }, nodes: [], edges: [], sharedParameters: [],
@@ -148,6 +160,7 @@ try {
             if (saved?.nodes?.length) break;
             await new Promise((resolve) => setTimeout(resolve, 100));
         }
+        if (process.env.ROBOTICS_SAVED) await writeFile(process.env.ROBOTICS_SAVED, JSON.stringify(saved));
         const mechanism = saved.nodes.find((node) => node.name === 'SO-ARM100');
         assert.ok(mechanism?.implementation, 'The canvas has the mechanism, with its provider.');
         const source = mechanism.implementation.source;
@@ -158,7 +171,50 @@ try {
         assert.ok(setpoints.every(({ mode }) => mode === 'live'), 'Each servo\'s setpoint is a live slider.');
         assert.equal(setpoints.find(({ symbol }) => symbol === 'elbowSetpoint').value, 1.2);
         assert.ok(!mechanism.implementation.bindings.some(({ key }) => key === 'wristRollSetpoint'), 'The joint set free has no setpoint.');
-        console.log('Robotics toolbox window: licence, download, joints and build into the canvas all passed.');
+        // 4. Run in the app, and shown in Pose Visualizer.
+        await project.bringToFront();
+        await project.waitForFunction(() => !document.querySelector('#runButton').disabled, null, { timeout: 30000 });
+        await project.click('#runButton');
+        await project.waitForFunction(() => document.querySelector('#runLaunchDialog').open, null, { timeout: 10000 });
+        await project.evaluate(() => { document.querySelector('#runTargetTime').value = '1'; document.querySelector('#startRun').click(); });
+        await project.waitForFunction(() => document.querySelector('.resultMode b')?.textContent === 'Results', null, { timeout: 120000 });
+        const poseTool = '.addonTool[data-addon-id="konjugate.poseVisualizer"][data-command-id="openPoseVisualizer"]:not([hidden])';
+        // Found and clicked as Konjugate's own tests do: the toolstrip may hold it out of sight.
+        await project.waitForFunction((selector) => Boolean(document.querySelector(selector)), poseTool, { timeout: 30000 }).catch(async (error) => {
+            const tools = await project.evaluate(() => [...document.querySelectorAll('.addonTool')].map((tool) => `${tool.dataset.addonId}/${tool.dataset.commandId}${tool.hidden ? ' (hidden)' : ''}`));
+            const status = await project.evaluate(() => ({ mode: document.querySelector('.resultMode')?.innerText, banner: document.querySelector('#runStatus, .runStatus, #statusBar, .statusBar')?.innerText, validation: document.querySelector('#validationSummary')?.innerText, toasts: [...document.querySelectorAll('.toast, [role="alert"]')].map((node) => node.innerText) }));
+            throw new Error(`${error.message}\nToolstrip: ${tools.join(', ')}\nInstalled: ${addons.join(', ')}\nProject window: ${JSON.stringify(status)}`);
+        });
+        const known = new Set(app.windows());
+        await project.evaluate((selector) => document.querySelector(selector).click(), poseTool);
+        let pose = null;
+        for (let attempt = 0; attempt < 150 && !pose; attempt += 1) {
+            pose = app.windows().find((candidate) => !known.has(candidate) && candidate.url().includes('konjugate.poseVisualizer'));
+            if (!pose) await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        assert.ok(pose, 'Pose Visualizer did not open.');
+        await pose.waitForLoadState('domcontentloaded');
+        // Nothing is guessed from state names: a convention for poses by quaternion, named as the toolbox names them.
+        await pose.evaluate(() => { document.querySelector('.conventionPanel').open = true; });
+        await pose.click('#newConvention');
+        const form = '#conventionForm';
+        await pose.fill(`${form} [name="name"]`, 'Quaternion');
+        await pose.selectOption(`${form} [name="orientation"]`, 'quaternion');
+        for (const role of ['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz']) await pose.fill(`${form} [name="${role}"]`, role);
+        await pose.click(`${form} button[type="submit"]`);
+        await pose.waitForFunction(() => (window.__debugPoseVisualizer?.bodies() ?? []).length === 7, null, { timeout: 20000 });
+        const shown = await pose.evaluate(() => window.__debugPoseVisualizer.bodies());
+        assert.deepEqual(shown.map(({ id }) => id.split(':')[1]), ['base', 'rotationPitch', 'upperArm', 'lowerArm', 'wristPitchRoll', 'fixedJaw', 'movingJaw']);
+        assert.ok(shown.every(({ part, vertices }) => part && vertices > 100), 'Each link is drawn with its own mesh.');
+        // At its true size: the arm is a few tens of centimetres across, its links apart.
+        const spread = Math.max(...[0, 1, 2].map((axis) => Math.max(...shown.map(({ position }) => position[axis])) - Math.min(...shown.map(({ position }) => position[axis]))));
+        assert.ok(spread > 0.1 && spread < 1, `The links span ${spread} m.`);
+        if (process.env.ROBOTICS_SCREENSHOT) {
+            await pose.evaluate(() => document.querySelector('[data-nav-action="fit"]')?.click?.());
+            await new Promise((resolve) => setTimeout(resolve, 1500));
+            await pose.screenshot({ path: process.env.ROBOTICS_SCREENSHOT });
+        }
+        console.log('Robotics toolbox window: licence, download, joints, build into the canvas, a run and Pose Visualizer all passed.');
     } finally {
         await app.close();
     }

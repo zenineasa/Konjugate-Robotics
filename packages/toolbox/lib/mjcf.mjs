@@ -8,7 +8,10 @@
 // MuJoCo's own reading (packages/engine/tools/describeMechanism.py) on the models it is tested on; a model it cannot
 // read is refused with the reason, not guessed at.
 //
-// No dependencies: a small XML reader of its own, for MJCF's plain elements and attributes.
+// No dependencies but frames.mjs: a small XML reader of its own, for MJCF's plain elements and attributes.
+
+import { compose, frameOf, fromAxisAngle, identity, normalise as unitQuaternion, rotate } from './frames.mjs';
+import { MeshBuilder, primitiveTriangles, readObj, readStl } from './meshes.mjs';
 
 // ---- XML -------------------------------------------------------------------------------------------------------
 
@@ -51,7 +54,7 @@ const numbers = (text) => String(text ?? '').trim().split(/\s+/).filter(Boolean)
 
 // The directory part of a path in the model's folder ("" at its top).
 const directoryOf = (path) => (path.includes('/') ? path.slice(0, path.lastIndexOf('/') + 1) : '');
-const normalise = (path) => {
+const normalisePath = (path) => {
     const parts = [];
     for (const part of path.split('/')) {
         if (part === '..') parts.pop();
@@ -73,7 +76,7 @@ function resolveIncludes(main, files) {
     const expand = (element) => {
         element.children = element.children.flatMap((child) => {
             if (child.name !== 'include') return [expand(child)];
-            const path = normalise(base + child.attributes.file);
+            const path = normalisePath(base + child.attributes.file);
             if (seen.has(path)) throw new Error(`The model includes ${path} more than once.`);
             seen.add(path);
             const included = parseXml(text(path), path);
@@ -127,8 +130,9 @@ function resolver(classes) {
 
 const actuatorKinds = new Set(['general', 'motor', 'position', 'velocity', 'intvelocity', 'damper', 'cylinder', 'muscle', 'adhesion', 'plugin']);
 
-// What a run of this model needs to know of it to build a mechanism: { joints, actuators, bodies }, as
-// describeMechanism.py gives it from MuJoCo. `files` maps paths in the model's folder to text or bytes; `main` is
+// What a run of this model needs to know of it to build a mechanism: { joints, actuators, bodies, frames }, as
+// describeMechanism.py gives it from MuJoCo; `frames` are each body's place in the world, { position, quaternion },
+// at the model's reference pose (every joint at its ref, a floating base where the model puts it), in the bodies' order. `files` maps paths in the model's folder to text or bytes; `main` is
 // the model's MJCF among them (its scene file, say, which includes the robot).
 export function describeModel(files, main) {
     const root = resolveIncludes(main, files);
@@ -137,15 +141,20 @@ export function describeModel(files, main) {
     const compiler = root.children.filter((child) => child.name === 'compiler').reduce((all, child) => ({ ...all, ...child.attributes }), {});
     const degrees = (compiler.angle ?? 'degree') === 'degree';
     const angle = (value) => (degrees ? (value * Math.PI) / 180 : value);
+    const placement = { angle, sequence: compiler.eulerseq ?? 'xyz' };
 
     const joints = [];
     const bodies = [];
-    const visitBody = (body, childClass) => {
+    const frames = [];
+    const visitBody = (body, childClass, world) => {
         const inside = body.attributes.childclass ?? childClass;
         for (const child of body.children) {
+            if (child.name === 'frame') throw new Error('The model places bodies with <frame> elements, which this reader does not take yet.');
             if (child.name === 'body') {
                 bodies.push(child.attributes.name ?? '');
-                visitBody(child, inside);
+                const frame = compose(world, frameOf(child.attributes, placement));
+                frames.push(frame);
+                visitBody(child, inside, frame);
             } else if (child.name === 'freejoint') {
                 joints.push({ name: child.attributes.name ?? '', kind: 'free', range: null, initialPosition: 0 });
             } else if (child.name === 'joint') {
@@ -168,7 +177,7 @@ export function describeModel(files, main) {
         }
     };
     const worldbody = root.children.filter((child) => child.name === 'worldbody');
-    for (const world of worldbody) visitBody(world, null);
+    for (const world of worldbody) visitBody(world, null, identity);
 
     const actuators = [];
     for (const section of root.children.filter((child) => child.name === 'actuator')) {
@@ -205,5 +214,112 @@ export function describeModel(files, main) {
             actuators.push({ name: element.attributes.name ?? '', joint: target, kind, gain, forceRange: isLimited ? forceRange : null });
         }
     }
-    return { joints, actuators, bodies };
+    return { joints, actuators, bodies, frames };
+}
+
+// ---- How a model looks ----------------------------------------------------------------------------------------------
+
+const hex = (rgba) => `#${rgba.slice(0, 3).map((value) => Math.round(Math.min(Math.max(value, 0), 1) * 255).toString(16).padStart(2, '0')).join('')}`;
+
+// Each named body's look: a mesh of its visible geoms (groups 0 to 2, as MuJoCo's viewer shows by default; Menagerie's
+// visual shapes), in metres in the body's own frame, and the colour of the largest of them, as a Map from body name to
+// { mesh, color }. Meshes come from the model's STL and OBJ files (scaled, and moved by a mesh's refpos and refquat);
+// boxes, spheres, capsules, cylinders and ellipsoids are tessellated. A body with nothing visible has no entry.
+export function bodyShapes(files, main) {
+    const root = resolveIncludes(main, files);
+    const classes = defaultClasses(root);
+    const resolve = resolver(classes);
+    const compiler = root.children.filter((child) => child.name === 'compiler').reduce((all, child) => ({ ...all, ...child.attributes }), {});
+    const degrees = (compiler.angle ?? 'degree') === 'degree';
+    const angle = (value) => (degrees ? (value * Math.PI) / 180 : value);
+    const placement = { angle, sequence: compiler.eulerseq ?? 'xyz' };
+    const meshDirectory = normalisePath(directoryOf(main) + (compiler.meshdir ?? compiler.assetdir ?? ''));
+
+    // The model's meshes and materials, by name.
+    const meshes = new Map();
+    const materials = new Map();
+    for (const asset of root.children.filter((child) => child.name === 'asset')) {
+        for (const element of asset.children) {
+            const className = element.attributes.class ?? 'main';
+            if (element.name === 'mesh') {
+                const file = resolve(element, 'mesh', className, 'file');
+                if (!file) continue;
+                const name = element.attributes.name ?? file.split('/').pop().replace(/\.[^.]+$/, '');
+                meshes.set(name, {
+                    file: normalisePath(`${meshDirectory ? `${meshDirectory}/` : ''}${file}`),
+                    scale: numbers(resolve(element, 'mesh', className, 'scale') ?? '1 1 1'),
+                    refpos: numbers(resolve(element, 'mesh', className, 'refpos') ?? '0 0 0'),
+                    refquat: unitQuaternion(numbers(resolve(element, 'mesh', className, 'refquat') ?? '1 0 0 0'))
+                });
+            } else if (element.name === 'material') {
+                const rgba = resolve(element, 'material', className, 'rgba');
+                if (element.attributes.name && rgba) materials.set(element.attributes.name, numbers(rgba));
+            }
+        }
+    }
+    const triangleCache = new Map();
+    const meshTriangles = (name) => {
+        if (triangleCache.has(name)) return triangleCache.get(name);
+        const mesh = meshes.get(name);
+        if (!mesh) throw new Error(`A geom names mesh ${name}, which the model does not define.`);
+        const bytes = files[mesh.file];
+        if (bytes === undefined) throw new Error(`The model has no file ${mesh.file}.`);
+        const data = typeof bytes === 'string' ? new TextEncoder().encode(bytes) : bytes;
+        const extension = mesh.file.split('.').pop().toLowerCase();
+        const read = extension === 'stl' ? readStl(data, mesh.file) : extension === 'obj' ? readObj(data, mesh.file) : null;
+        if (!read) throw new Error(`${mesh.file} is a .${extension} mesh, which this reader does not take yet.`);
+        const inverse = [mesh.refquat[0], -mesh.refquat[1], -mesh.refquat[2], -mesh.refquat[3]];
+        const placed = read.map((triangle) => triangle.map((corner) => rotate(inverse, corner.map((value, axis) => value * mesh.scale[axis] - mesh.refpos[axis]))));
+        triangleCache.set(name, placed);
+        return placed;
+    };
+
+    const shapes = new Map();
+    const visitBody = (body, childClass) => {
+        const inside = body.attributes.childclass ?? childClass;
+        const builder = new MeshBuilder();
+        let largest = { area: -1, color: null };
+        for (const geom of body.children.filter((child) => child.name === 'geom')) {
+            const className = geom.attributes.class ?? inside;
+            const get = (attribute) => resolve(geom, 'geom', className, attribute);
+            const group = Number(get('group') ?? 0);
+            const rgba = get('rgba') !== undefined ? numbers(get('rgba')) : (materials.get(get('material')) ?? [0.5, 0.5, 0.5, 1]);
+            if (group > 2 || rgba[3] === 0) continue;
+            const type = get('type') ?? (get('mesh') ? 'mesh' : 'sphere');
+            if (type === 'plane' || type === 'hfield' || type === 'sdf') continue;
+            let size = numbers(get('size') ?? '0 0 0');
+            let frame;
+            const fromto = get('fromto');
+            if (fromto !== undefined && ['capsule', 'cylinder', 'box', 'ellipsoid'].includes(type)) {
+                const [x0, y0, z0, x1, y1, z1] = numbers(fromto);
+                const along = [x1 - x0, y1 - y0, z1 - z0];
+                const length = Math.hypot(...along);
+                const axis = [-along[1], along[0], 0];
+                const turn = Math.hypot(...axis) < 1e-12 ? (along[2] < 0 ? [0, 1, 0, 0] : [1, 0, 0, 0]) : fromAxisAngle(axis, Math.acos(Math.max(-1, Math.min(1, along[2] / length))));
+                frame = { position: [(x0 + x1) / 2, (y0 + y1) / 2, (z0 + z1) / 2], quaternion: turn };
+                size = type === 'box' || type === 'ellipsoid' ? [size[0], size[1] ?? size[0], length / 2] : [size[0], length / 2];
+            } else {
+                frame = frameOf({ pos: get('pos'), quat: get('quat'), axisangle: get('axisangle'), euler: get('euler'), xyaxes: get('xyaxes'), zaxis: get('zaxis') }, placement);
+            }
+            const triangles = type === 'mesh' ? meshTriangles(get('mesh')) : primitiveTriangles(type, size);
+            if (!triangles) throw new Error(`A geom of type ${type}, which this reader does not draw yet.`);
+            let area = 0;
+            for (const triangle of triangles) {
+                const corners = triangle.map((corner) => compose(frame, { position: corner, quaternion: [1, 0, 0, 0] }).position);
+                builder.triangle(...corners);
+                const [a, b, c] = corners;
+                const u = b.map((value, axis) => value - a[axis]);
+                const v = c.map((value, axis) => value - a[axis]);
+                area += Math.hypot(u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]) / 2;
+            }
+            if (area > largest.area) largest = { area, color: hex(rgba) };
+        }
+        const name = body.attributes.name;
+        if (name && builder.index.length) shapes.set(name, { mesh: builder.document(), color: largest.color });
+        for (const child of body.children.filter((candidate) => candidate.name === 'body')) visitBody(child, inside);
+    };
+    for (const world of root.children.filter((child) => child.name === 'worldbody')) {
+        for (const body of world.children.filter((child) => child.name === 'body')) visitBody(body, null);
+    }
+    return shapes;
 }

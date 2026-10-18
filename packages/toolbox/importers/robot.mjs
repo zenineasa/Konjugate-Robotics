@@ -10,7 +10,7 @@
 //   (lib/mechanismModel.mjs), as a project document.
 
 import { pathOfStoredName } from '../lib/catalog.mjs';
-import { describeModel } from '../lib/mjcf.mjs';
+import { bodyShapes, describeModel } from '../lib/mjcf.mjs';
 import { addRunConfiguration, emptyDocument, placeMechanism, splitModelFiles } from '../lib/mechanismModel.mjs';
 
 const failure = (message) => ({ ok: false, report: { errors: [message], warnings: [] } });
@@ -67,12 +67,22 @@ export default async function importRobot({ files, helpers, options = {} }) {
     if (!joints.length) return failure('The robot has no hinge or slide joint to drive.');
 
     const { source: template } = await helpers.readPackageJson('engine/mechanismProvider.json');
+    let shapes;
+    try {
+        shapes = bodyShapes(run, main);
+    } catch (error) {
+        // A robot that cannot be drawn still runs: it is built without its shapes, and the report says why.
+        shapes = new Map();
+        warnings.push(`The robot's shapes could not be read, so it is built without them: ${error.message}`);
+    }
     const document = emptyDocument();
     let nextId = 1;
     const id = () => nextId++;
     try {
         placeMechanism(document, id, {
             name: options.name ?? 'Robot', joints,
+            // Every named body reports where it is, and carries how it looks, for Pose Visualizer to show the robot moving.
+            bodies: description.bodies.map((name, index) => ({ name, frame: description.frames[index], shape: shapes.get(name) ?? null })).filter(({ name }) => name),
             model: { main, files: run, provenance: options.provenance ?? null, licence: decodeText(notices.LICENSE) }
         }, { template, helpers });
     } catch (error) {

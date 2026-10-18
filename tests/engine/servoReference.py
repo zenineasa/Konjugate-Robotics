@@ -4,8 +4,9 @@
 file, each servo joint's actuator given its setpoint (held throughout), every other joint's actuator switched off, the
 model stepped at its own timestep.
 
-Reads a JSON request {modelPath, joints: [{name, initialPosition}], setpoints: {joint: value}, times} and prints, for
-each joint, its position at each time and, for a servo joint, the torque its servo applies.
+Reads a JSON request {modelPath, joints: [{name, initialPosition}], setpoints: {joint: value}, times, bodies} and
+prints, for each joint, its position at each time and, for a servo joint, the torque its servo applies; and for each
+body named, its place in the world at each time (position and quaternion, as `bodies`).
 """
 
 import json
@@ -35,6 +36,8 @@ def main(path):
                 model.actuator_biasprm[actuator][:] = 0.0
     mujoco.mj_forward(model, data)
     record = {name: {"position": [], "servoTorque": []} for name in joints}
+    bodies = {name: mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in request.get("bodies", [])}
+    record["bodies"] = {name: [] for name in bodies}
     timestep = model.opt.timestep
     for time in request["times"]:
         while data.time < time - timestep / 2:
@@ -43,6 +46,8 @@ def main(path):
             record[name]["position"].append(float(data.qpos[qpos]))
             if name in setpoints:
                 record[name]["servoTorque"].append(float(data.actuator_force[actuators[0]]))
+        for name, index in bodies.items():
+            record["bodies"][name].append([float(value) for value in (*data.xpos[index], *data.xquat[index])])
     json.dump(record, sys.stdout)
 
 

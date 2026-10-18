@@ -55,7 +55,22 @@ export function execute(command, args, { capture = false, captureErrors = false 
 // start or from `startCheckpoint` (one of a result's checkpoints); returns { times, series(key) } of "Node.state"
 // values at every output, and the raw result. With `expectFailure`, the run must fail; returns { errors }, what the
 // engine wrote to standard error.
+// The canvas binds a node's every state to each of its source terms, as its node editor does, ahead of the term's own
+// parameters: a parameter of a state's name would lose its name to the state, and the term would read the state. A
+// document built headless must not depend on the canvas never seeing it.
+export function checkCanvasBindings(document) {
+    for (const node of document.nodes) {
+        const states = new Set(node.states.map(({ symbol }) => symbol));
+        for (const term of node.sourceTerms ?? []) {
+            for (const parameter of term.parameters ?? []) {
+                assert.ok(!states.has(parameter.symbol), `${node.name}: the parameter ${parameter.symbol} of the source term on ${term.state} has a state's name, which the canvas would bind instead.`);
+            }
+        }
+    }
+}
+
 export async function runDocument(directory, name, document, { targetTime, startCheckpoint, expectFailure = false } = {}) {
+    checkCanvasBindings(document);
     const inputPath = join(directory, `${name}.kjt`);
     const reportPath = join(directory, `${name}.report`);
     const outputPath = join(directory, `${name}.kjr`);

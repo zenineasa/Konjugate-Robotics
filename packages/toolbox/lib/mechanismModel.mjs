@@ -57,10 +57,14 @@ export function splitModelFiles(files) {
     return { run, notices: kept };
 }
 
+// A body's pose as states: position (m, z up), then orientation as a unit quaternion, as Pose Visualizer reads them.
+const poseParts = ['X', 'Y', 'Z', 'Qw', 'Qx', 'Qy', 'Qz'];
+const poseLabels = ['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz'];
+
 // The unit of each quantity of MuJoCo's model a parameter may set, for a hinge (a slide's damping is N·s/m).
 const parameterUnits = { bodyMass: 'kg', jointDamping: 'N·m·s/rad', jointFrictionloss: 'N·m', jointArmature: 'kg·m²' };
 
-const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m', setpoint: 'rad', servoTorque: 'N·m' }, slide: { position: 'm', speed: 'm/s', effort: 'N', setpoint: 'm', servoTorque: 'N' } };
+const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m', setpoint: 'rad', command: 'rad', servoTorque: 'N·m' }, slide: { position: 'm', speed: 'm/s', effort: 'N', setpoint: 'm', command: 'm', servoTorque: 'N' } };
 
 // Places one mechanism's node (and the shared parameters its joints' torques come from) into `document`, taking ids
 // from `id()`. `mechanism` is { name, mjcf or model, joints: [{ name, kind: 'hinge' | 'slide', initialPosition,
@@ -69,7 +73,10 @@ const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m', setpoi
 // is given as MJCF text, or as `model`: { main (the path of its MJCF), files ({ path: bytes }, what a run reads, as
 // splitModelFiles gives them), provenance (where it came from: source, repository, folder, commit, licence), licence
 // (the licence's text) }. The project then carries the model, so it runs wherever it is opened, and carries its licence
-// and provenance with it. `mechanism.parameters` are quantities of MuJoCo's model the run may change:
+// and provenance with it. `mechanism.bodies` are the bodies whose place in the world the node reports, as seven states
+// each (<body>X, Y, Z in metres and Qw, Qx, Qy, Qz): [{ name, frame, shape }], `frame` their place at the reference
+// pose, { position, quaternion }, as describeModel gives it, and `shape` how they look, { mesh, color }, as bodyShapes
+// gives it: kept as the node's appearance parts, by the same prefix as its pose states, for Pose Visualizer to draw. `mechanism.parameters` are quantities of MuJoCo's model the run may change:
 // [{ name, kind: 'bodyMass' | 'jointDamping' | 'jointFrictionloss' | 'jointArmature', target (the body or joint), value,
 // unit?, control?, schedule? }], each a shared parameter the provider reads (or `sharedParameterId`, one already in the
 // document). `template` is mechanism.py's text; `helpers` are Konjugate's equation helpers (validateEquationLatex is
@@ -78,7 +85,10 @@ const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m', setpoi
 export function placeMechanism(document, id, mechanism, { template, helpers }) {
     if (!helpers?.validateEquationLatex) throw new Error('The mechanism builder needs Konjugate\'s equation helpers.');
     const keys = new Set();
-    const node = { id: id(), name: mechanism.name ?? 'Mechanism', type: 'mechanism', position: [0, 0, 0], states: [], sourceTerms: [], numerics: { substepsPerGlobalStep: 1 }, appearance: {} };
+    const node = {
+        id: id(), name: mechanism.name ?? 'Mechanism', type: 'mechanism', position: [0, 0, 0], states: [], sourceTerms: [], numerics: { substepsPerGlobalStep: 1 },
+        appearance: { type: 'primitive', shape: 'box', color: '#5b8db8' }
+    };
     document.sharedParameters ??= [];
     const sharedParameters = document.sharedParameters;
     const joints = mechanism.joints.map((joint) => {
@@ -96,10 +106,13 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
         const given = ['torque', 'torqueFrom', 'setpoint', 'setpointFrom'].filter((field) => joint[field] !== undefined);
         if (given.length > 1) throw new Error(`Joint ${joint.name} is given ${given.join(' and ')}; it takes one.`);
         const mode = joint.torque || joint.torqueFrom ? 'torque' : joint.setpoint || joint.setpointFrom ? 'servo' : 'free';
-        // The input the provider reads, as a state of the mechanism's own when it comes from a shared parameter.
-        const role = mode === 'servo' ? 'setpoint' : 'effort';
+        // The input the provider reads, as a state of the mechanism's own when it comes from a shared parameter. Named
+        // apart from that parameter (a setpoint's state is its "command", a torque's its "effort"): the canvas binds a
+        // node's every state to each of its source terms, as its editor does, and a state of the parameter's name would
+        // take the name from it, so the term would read its own output.
+        const role = mode === 'servo' ? 'command' : 'effort';
         const own = joint.torque ?? joint.setpoint;
-        const input = own ? state(role, mode === 'servo' ? 'setpoint' : kind === 'slide' ? 'force' : 'torque') : null;
+        const input = own ? state(role, mode === 'servo' ? 'setpoint command' : kind === 'slide' ? 'force' : 'torque') : null;
         const servoTorque = mode === 'servo' ? state('servoTorque', kind === 'slide' ? 'servo force' : 'servo torque') : null;
         return { ...joint, kind, key, mode, role, own, input, from: joint.torqueFrom ?? joint.setpointFrom, position, speed, servoTorque };
     });
@@ -149,6 +162,29 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
             ...(joint.servoTorque ? [{ key: `${joint.key}ServoTorque`, stateId: joint.servoTorque.id, setsValue: true }] : [])
         ])
     };
+    // Each body to report, by its name in the model, with its place at the reference pose (describeModel's frames) as
+    // its states' starting values: the provider sets them at the end of every step, not before the first.
+    const bodyKeys = new Set();
+    configuration.bodies = [];
+    const bodies = new Map();
+    for (const body of mechanism.bodies ?? []) {
+        if (!body.name) continue;
+        const key = jointKey(body.name, bodyKeys);
+        const pose = [...(body.frame?.position ?? [0, 0, 0]), ...(body.frame?.quaternion ?? [1, 0, 0, 0])];
+        const states = poseParts.map((part, index) => {
+            const created = { id: id(), name: `${body.name} ${poseLabels[index]}`, symbol: `${key}${part}`, initialValue: pose[index], unit: index < 3 ? 'm' : '' };
+            node.states.push(created);
+            node.implementation.outputs.push({ key: created.symbol, stateId: created.id, setsValue: true });
+            return created;
+        });
+        configuration.bodies.push({ name: body.name, key });
+        bodies.set(body.name, { key, states });
+        if (body.shape?.mesh?.position?.length) {
+            node.appearance.parts ??= [];
+            node.appearance.parts.push({ prefix: key, mesh: body.shape.mesh, ...(body.shape.color ? { color: body.shape.color } : {}) });
+        }
+    }
+
     const parameters = new Map();
     for (const parameter of mechanism.parameters ?? []) {
         if (!parameterUnits[parameter.kind]) throw new Error(`Parameter ${parameter.name} sets ${parameter.kind}, which the mechanism does not know.`);
@@ -171,7 +207,7 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
     }
     node.implementation.source = providerSource(template, configuration);
     (document.nodes ??= []).push(node);
-    return { node, parameters, joints: new Map(joints.map(({ name, mode, position, speed, input, servoTorque }) => [name, { mode, position, speed, input, servoTorque }])) };
+    return { node, parameters, bodies, joints: new Map(joints.map(({ name, mode, position, speed, input, servoTorque }) => [name, { mode, position, speed, input, servoTorque }])) };
 }
 
 // A run configuration for `document`, made its active one. Time is in seconds.
