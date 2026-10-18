@@ -146,15 +146,22 @@ export function describeModel(files, main) {
     const joints = [];
     const bodies = [];
     const frames = [];
-    const visitBody = (body, childClass, world) => {
+    // Each body's place in its parent (index into bodies, -1 for the world), the joints that move it there (a hinge or a
+    // slide: its anchor and axis in the body's frame, and its ref) and its mass when the model gives one: for
+    // bodyFramesAt, and for a payload added to a body's own mass.
+    const tree = [];
+    const visitBody = (body, childClass, world, bodyIndex) => {
         const inside = body.attributes.childclass ?? childClass;
         for (const child of body.children) {
             if (child.name === 'frame') throw new Error('The model places bodies with <frame> elements, which this reader does not take yet.');
             if (child.name === 'body') {
                 bodies.push(child.attributes.name ?? '');
-                const frame = compose(world, frameOf(child.attributes, placement));
+                const local = frameOf(child.attributes, placement);
+                const frame = compose(world, local);
                 frames.push(frame);
-                visitBody(child, inside, frame);
+                const inertial = child.children.find((candidate) => candidate.name === 'inertial');
+                tree.push({ parent: bodyIndex, local, joints: [], mass: inertial?.attributes.mass === undefined ? null : Number(inertial.attributes.mass) });
+                visitBody(child, inside, frame, bodies.length - 1);
             } else if (child.name === 'freejoint') {
                 joints.push({ name: child.attributes.name ?? '', kind: 'free', range: null, initialPosition: 0 });
             } else if (child.name === 'joint') {
@@ -173,11 +180,19 @@ export function describeModel(files, main) {
                     range: converted,
                     initialPosition: kind === 'hinge' ? angle(reference) : kind === 'slide' ? reference : 0
                 });
+                if ((kind === 'hinge' || kind === 'slide') && bodyIndex >= 0) {
+                    tree[bodyIndex].joints.push({
+                        name: child.attributes.name ?? '', kind,
+                        anchor: numbers(resolve(child, 'joint', className, 'pos') ?? '0 0 0'),
+                        axis: numbers(resolve(child, 'joint', className, 'axis') ?? '0 0 1'),
+                        reference: kind === 'hinge' ? angle(reference) : reference
+                    });
+                }
             }
         }
     };
     const worldbody = root.children.filter((child) => child.name === 'worldbody');
-    for (const world of worldbody) visitBody(world, null, identity);
+    for (const world of worldbody) visitBody(world, null, identity, -1);
 
     const actuators = [];
     for (const section of root.children.filter((child) => child.name === 'actuator')) {
@@ -214,7 +229,32 @@ export function describeModel(files, main) {
             actuators.push({ name: element.attributes.name ?? '', joint: target, kind, gain, forceRange: isLimited ? forceRange : null });
         }
     }
-    return { joints, actuators, bodies, frames };
+    return { joints, actuators, bodies, frames, tree };
+}
+
+// Each body's place in the world, { position, quaternion }, with its hinges and slides at `positions` ({ joint name:
+// radians or metres }; a joint not named stays at its ref), as MuJoCo's kinematics put it: a hinge turns its body about
+// its axis through its anchor, a slide moves it along its axis. A ball or free joint stays where the model puts it.
+export function bodyFramesAt(description, positions = {}) {
+    const frames = [];
+    description.tree.forEach((body, index) => {
+        let frame = compose(body.parent < 0 ? identity : frames[body.parent], body.local);
+        for (const joint of body.joints) {
+            const offset = (positions[joint.name] ?? joint.reference) - joint.reference;
+            if (!offset) continue;
+            if (joint.kind === 'hinge') {
+                const turn = fromAxisAngle(joint.axis, offset);
+                const anchor = joint.anchor;
+                const back = rotate(turn, anchor.map((value) => -value));
+                frame = compose(frame, { position: anchor.map((value, axis) => value + back[axis]), quaternion: turn });
+            } else {
+                const length = Math.hypot(...joint.axis);
+                frame = compose(frame, { position: joint.axis.map((value) => (value / length) * offset), quaternion: [1, 0, 0, 0] });
+            }
+        }
+        frames[index] = frame;
+    });
+    return frames;
 }
 
 // ---- How a model looks ----------------------------------------------------------------------------------------------

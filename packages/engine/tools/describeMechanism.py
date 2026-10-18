@@ -6,7 +6,9 @@ force limit), its bodies and their places in the world at the model's reference 
 first, so defaults, includes and mesh directories are resolved as they will be in a run, which reading the XML by hand
 would not do.
 
-    python describeMechanism.py <model.xml>
+    python describeMechanism.py <model.xml> [<positions.json>]
+
+With a JSON object of joint positions ({joint name: value}), the bodies' places are reported with the joints there.
 
 Prints JSON.
 """
@@ -41,7 +43,7 @@ def _actuator_kind(model, index):
     return "other"
 
 
-def describe(path):
+def describe(path, positions=None):
     model = mujoco.MjModel.from_xml_path(path)
     joints = []
     for index in range(model.njnt):
@@ -66,6 +68,8 @@ def describe(path):
     bodies = [_name(model, mujoco.mjtObj.mjOBJ_BODY, index) for index in range(1, model.nbody)]
     # Each body's place in the world at the model's reference pose (qpos0).
     data = mujoco.MjData(model)
+    for name, value in (positions or {}).items():
+        data.qpos[model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, name)]] = value
     mujoco.mj_kinematics(model, data)
     frames = [{"position": [float(value) for value in data.xpos[index]], "quaternion": [float(value) for value in data.xquat[index]]}
               for index in range(1, model.nbody)]
@@ -118,4 +122,8 @@ def _visual_bounds(model, data):
 
 
 if __name__ == "__main__":
-    json.dump(describe(sys.argv[1]), sys.stdout, indent=2)
+    positions = None
+    if len(sys.argv) > 2:
+        with open(sys.argv[2], encoding="utf-8") as handle:
+            positions = json.load(handle)
+    json.dump(describe(sys.argv[1], positions), sys.stdout, indent=2)

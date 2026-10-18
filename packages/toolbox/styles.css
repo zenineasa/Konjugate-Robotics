@@ -49,3 +49,6 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 .notice.warning { border-left-color: var(--warn); }
 .notice.error { border-left-color: var(--danger); }
 progress { width: 100%; }
+.options { border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; margin: 10px 0; display: grid; gap: 6px; }
+.options legend { color: var(--muted); font-size: 11px; padding: 0 4px; }
+.indent { margin: 0 0 0 22px; }

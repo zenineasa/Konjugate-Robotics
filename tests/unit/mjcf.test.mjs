@@ -12,15 +12,15 @@ import { mkdtemp, readdir, readFile, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { describeModel, parseXml } from '../../packages/toolbox/lib/mjcf.mjs';
+import { bodyFramesAt, describeModel, parseXml } from '../../packages/toolbox/lib/mjcf.mjs';
 import { roboticsRoot } from '../../scripts/konjugatePaths.mjs';
 
 const python = process.env.ROBOTICS_PYTHON ?? join(roboticsRoot, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
 const describer = join(roboticsRoot, 'packages', 'engine', 'tools', 'describeMechanism.py');
 const commit = '62ab00f2bc44f6f20c1c9b7a13f3fb1dd41a4e35';
 
-function mujocoDescription(path) {
-    const result = spawnSync(python, ['-I', describer, path], { encoding: 'utf8' });
+function mujocoDescription(path, positionsPath) {
+    const result = spawnSync(python, ['-I', describer, path, ...(positionsPath ? [positionsPath] : [])], { encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
     assert.equal(result.status, 0, result.stderr);
     return JSON.parse(result.stdout);
 }
@@ -122,5 +122,30 @@ for (const folder of ['trs_so_arm100', 'universal_robots_ur5e', 'franka_emika_pa
     const fetched = existsSync(join(directory, 'scene.xml'));
     test(`Menagerie's ${folder} reads as MuJoCo reads it`, { skip: !fetched && `not fetched (npm run fetch:model ${folder} -- --commit ${commit})` }, async () => {
         sameAsMuJoCo(describeModel(await folderFiles(directory), 'scene.xml'), mujocoDescription(join(directory, 'scene.xml')));
+    });
+}
+
+// The bodies' places with the joints moved, as MuJoCo's kinematics put them: for a move that starts away from the
+// model's reference pose.
+for (const folder of ['trs_so_arm100', 'universal_robots_ur5e', 'franka_emika_panda', 'unitree_go2']) {
+    const directory = join(roboticsRoot, 'out', 'models', 'menagerie', commit, folder);
+    const fetched = existsSync(join(directory, 'scene.xml'));
+    test(`Menagerie's ${folder}, its joints moved, has its bodies where MuJoCo puts them`, { skip: !fetched && `not fetched (npm run fetch:model ${folder} -- --commit ${commit})` }, async () => {
+        const description = describeModel(await folderFiles(directory), 'scene.xml');
+        // Each hinge and slide at a place within its range, the same each run.
+        let seed = 7;
+        const random = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+        const positions = Object.fromEntries(description.joints.filter(({ kind, name }) => (kind === 'hinge' || kind === 'slide') && name).map(({ name, range }) => {
+            const [low, high] = range ?? [-1, 1];
+            return [name, low + (high - low) * random()];
+        }));
+        const positionsPath = join(await mkdtemp(join(tmpdir(), 'robotics-positions-')), 'positions.json');
+        await writeFile(positionsPath, JSON.stringify(positions));
+        const theirs = mujocoDescription(join(directory, 'scene.xml'), positionsPath);
+        bodyFramesAt(description, positions).forEach((frame, index) => {
+            near(frame.position, theirs.frames[index].position, `${description.bodies[index]} position`);
+            const sign = Math.sign(frame.quaternion.reduce((sum, value, at) => sum + value * theirs.frames[index].quaternion[at], 0)) || 1;
+            near(frame.quaternion.map((value) => value * sign), theirs.frames[index].quaternion, `${description.bodies[index]} orientation`);
+        });
     });
 }

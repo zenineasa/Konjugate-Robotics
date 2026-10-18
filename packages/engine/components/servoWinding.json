@@ -1,0 +1,29 @@
+{
+    "copyright": "Copyright © 2026 Zenin Easa Panthakkalakath",
+    "id": "servoWinding",
+    "kind": "node",
+    "name": "Servo winding",
+    "description": "The winding of a smart servo's motor, as one heat capacity: it heats with the current the servo draws (the servo supply bundle) and cools to ambient through a thermal resistance. The defaults are assumed (a servo's datasheet seldom gives them): set them from a measurement where there is one.",
+    "domains": ["thermal"],
+    "shape": "cylinder",
+    "color": "#b46a4c",
+    "states": [
+        { "symbol": "windingTemperature", "label": "Winding temperature", "initialValue": 293.15, "unit": "K" }
+    ],
+    "sharedParameters": [
+        { "key": "thermalCapacitance", "name": "Winding thermal capacitance (assumed)", "symbol": "thermalCapacitance", "value": 10, "unit": "J/K", "scope": "instance" },
+        { "key": "thermalResistance", "name": "Thermal resistance to ambient (assumed)", "symbol": "thermalResistance", "value": 15, "unit": "K/W", "scope": "instance" },
+        { "key": "ambientTemperature", "name": "Ambient temperature", "symbol": "ambientTemperature", "value": 293.15, "unit": "K", "scope": "instance" }
+    ],
+    "sourceTerms": [
+        {
+            "state": "windingTemperature",
+            "expression": "-\\frac{\\mathrm{windingTemperature} - \\mathrm{ambientTemperature}}{\\mathrm{thermalResistance} \\cdot \\mathrm{thermalCapacitance}}",
+            "parameters": [
+                { "name": "Ambient temperature", "symbol": "ambientTemperature", "shared": "ambientTemperature" },
+                { "name": "Thermal resistance to ambient", "symbol": "thermalResistance", "shared": "thermalResistance" },
+                { "name": "Winding thermal capacitance", "symbol": "thermalCapacitance", "shared": "thermalCapacitance" }
+            ]
+        }
+    ]
+}

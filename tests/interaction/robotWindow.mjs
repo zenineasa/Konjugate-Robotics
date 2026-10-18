@@ -8,6 +8,9 @@
 //   - used, its six joints are listed, each with its own servo; one is set free, one given a setpoint
 //   - built, the mechanism is in the canvas: the project carries the robot with its licence and commit, and its
 //     servos' setpoints are live shared parameters, the one set in the window at its value
+//   - built again with its pick-and-place move, its servos as their datasheet gives them, a battery and a payload:
+//     the canvas has the battery, a winding for each servo, the move as each setpoint's schedule, each servo held to
+//     its datasheet's torque, and the payload as a slider
 //   - run in the app (with this repository's Python, which has MuJoCo, as the providers' Python) and shown in Pose
 //     Visualizer, once a naming convention for poses by quaternion is made: each of its seven links is a body of the
 //     one mechanism node, drawn with its own mesh at its true size, where the run put it
@@ -171,12 +174,34 @@ try {
         assert.ok(setpoints.every(({ mode }) => mode === 'live'), 'Each servo\'s setpoint is a live slider.');
         assert.equal(setpoints.find(({ symbol }) => symbol === 'elbowSetpoint').value, 1.2);
         assert.ok(!mechanism.implementation.bindings.some(({ key }) => key === 'wristRollSetpoint'), 'The joint set free has no setpoint.');
-        // 4. Run in the app, and shown in Pose Visualizer.
+        // 4. Will these servos do it? Built again with the move, the servos' datasheet, a battery and a payload.
+        await toolbox.check('#useMove');
+        await toolbox.check('#useServo');
+        await toolbox.check('#useSupply');
+        await toolbox.check('#usePayload');
+        assert.equal(await toolbox.inputValue('#runTime'), '9', 'The run is the move\'s length and a second more.');
+        await toolbox.click('#buildButton');
+        await toolbox.waitForFunction(() => /now in the canvas\..*following the move/.test(document.querySelector('#buildStatus')?.textContent ?? ''), null, { timeout: 60000 }).catch(fail);
+        assert.match(await toolbox.locator('#buildStatus').textContent(), /held to the Feetech STS3215.*1\.91 N·m at stall/);
+        let demo = null;
+        for (let attempt = 0; attempt < 100; attempt += 1) {
+            demo = await project.evaluate(() => window.__debugProject?.serialize());
+            if (demo?.nodes?.some(({ name }) => name === 'Battery')) break;
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        }
+        assert.ok(demo.nodes.some(({ name }) => name === 'Battery'), 'The canvas has the battery.');
+        assert.equal(demo.nodes.filter(({ name }) => / winding$/.test(name)).length, 5, 'A winding for each of the five servos.');
+        const shared = (symbol) => demo.sharedParameters.find((parameter) => parameter.symbol === symbol);
+        assert.ok(shared('elbowSetpoint')?.schedule?.samples?.length > 2, 'The elbow\'s setpoint follows the move.');
+        assert.ok(Math.abs(shared('pitchServoTorqueLimit')?.value - 1.9123) < 1e-3, 'The shoulder\'s servo is held to its datasheet.');
+        assert.equal(shared('fixedJawMassWithPayload')?.mode, 'live', 'The payload is a slider.');
+
+        // 5. Run in the app, and shown in Pose Visualizer.
         await project.bringToFront();
         await project.waitForFunction(() => !document.querySelector('#runButton').disabled, null, { timeout: 30000 });
         await project.click('#runButton');
         await project.waitForFunction(() => document.querySelector('#runLaunchDialog').open, null, { timeout: 10000 });
-        await project.evaluate(() => { document.querySelector('#runTargetTime').value = '1'; document.querySelector('#startRun').click(); });
+        await project.evaluate(() => { document.querySelector('#runTargetTime').value = '9'; document.querySelector('#startRun').click(); });
         await project.waitForFunction(() => document.querySelector('.resultMode b')?.textContent === 'Results', null, { timeout: 120000 });
         const poseTool = '.addonTool[data-addon-id="konjugate.poseVisualizer"][data-command-id="openPoseVisualizer"]:not([hidden])';
         // Found and clicked as Konjugate's own tests do: the toolstrip may hold it out of sight.

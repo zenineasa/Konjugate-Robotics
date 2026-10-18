@@ -17,6 +17,14 @@
 
 const upperFirst = (text) => text[0].toUpperCase() + text.slice(1);
 
+// The time binding the node editor adds to every equation, `t` (or `t2`, ... if `t` is taken), for a host whose
+// helpers do not include it (an importer is given only the equation validator and binding reconciler).
+function timeBinding(usedSymbols = new Set(), preferred = 't') {
+    let symbol = preferred;
+    for (let suffix = 2; usedSymbols.has(symbol); suffix += 1) symbol = `${preferred}${suffix}`;
+    return { kind: 'time', symbol, label: `${symbol} (time)` };
+}
+
 // The largest id anywhere in a document: every persistent entity's `id` shares one id space.
 function largestId(value) {
     if (Array.isArray(value)) return value.reduce((largest, item) => Math.max(largest, largestId(item)), 0);
@@ -27,7 +35,7 @@ function largestId(value) {
 export class DocumentBuilder {
     // `templates` is a Map of component templates by id; `helpers` are Konjugate's equation helpers.
     constructor(document, templates, helpers) {
-        if (!helpers?.validateEquationLatex || !helpers?.timeBinding) throw new Error('DocumentBuilder needs Konjugate\'s equation helpers.');
+        if (!helpers?.validateEquationLatex) throw new Error('DocumentBuilder needs Konjugate\'s equation helpers.');
         this.document = document;
         document.nodes ??= [];
         document.edges ??= [];
@@ -92,7 +100,7 @@ export class DocumentBuilder {
                 ...node.states.map((state) => ({ kind: 'state', nodeId: node.id, stateId: state.id, symbol: state.symbol })),
                 ...parameters.map((parameter) => ({ kind: 'parameter', parameterId: parameter.id, symbol: parameter.symbol }))
             ];
-            bindings.push(this.helpers.timeBinding(new Set(bindings.map((binding) => binding.symbol))));
+            bindings.push((this.helpers.timeBinding ?? timeBinding)(new Set(bindings.map((binding) => binding.symbol))));
             const validation = this.helpers.validateEquationLatex(term.expression, bindings);
             if (!validation.valid) throw new Error(`${node.name} ${term.state}: ${validation.errors.join(' ')}`);
             const output = node.states.find((state) => state.symbol === term.state);
@@ -135,7 +143,7 @@ export class DocumentBuilder {
             }
             const parameters = (edge.parameters ?? []).map((parameter) => this.parameter(parameter, scope));
             bindings.push(...parameters.map((parameter) => ({ kind: 'parameter', parameterId: parameter.id, symbol: parameter.symbol })));
-            bindings.push(this.helpers.timeBinding(new Set(bindings.map((binding) => binding.symbol))));
+            bindings.push((this.helpers.timeBinding ?? timeBinding)(new Set(bindings.map((binding) => binding.symbol))));
             const validation = this.helpers.validateEquationLatex(edge.latex, bindings);
             if (!validation.valid) throw new Error(`${template.name} / ${edge.name}: ${validation.errors.join(' ')}`);
             const sourceState = stateFor('source', edge.ports.source);

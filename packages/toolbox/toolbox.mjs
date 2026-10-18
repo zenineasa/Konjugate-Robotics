@@ -8,6 +8,8 @@
 
 import { robots, robotByFolder, storedName } from './lib/catalog.mjs';
 import { latestCommit, licenceName, modelFiles, rawUrl, repository } from './lib/menagerie.mjs';
+import { moves } from './lib/moves.mjs';
+import { servoById } from './lib/servos.mjs';
 
 const api = window.konjugateLauncher;
 const importerId = 'robot';
@@ -269,6 +271,51 @@ function renderJoints() {
     }));
     $('#stepJoints').hidden = false;
     $('#stepBuild').hidden = false;
+    renderServoOptions();
+}
+
+// ---- will these servos do it? ------------------------------------------------------------------------------------
+
+// The robot's move and its servos' datasheet, where the toolbox has them: offered beside the build.
+const robotMove = () => Object.entries(moves[state.selected] ?? {})[0] ?? null;
+const robotServo = () => servoById(robotByFolder(state.selected)?.servo);
+
+function renderServoOptions() {
+    const move = robotMove();
+    const servo = robotServo();
+    $('#servoOptions').hidden = !move && !servo;
+    $('#moveOption').hidden = !move;
+    if (move) $('#moveLabel').textContent = `${move[1].name}: ${move[1].what}`;
+    $('#servoLabel').textContent = servo
+        ? `Servos as their datasheet gives them: ${servo.name}, drawing current for their torque, held to ${servo.stallTorque.toFixed(2)} N·m at stall`
+        : 'No datasheet for this robot\'s servos yet';
+    $('#useServo').disabled = !servo;
+    const servoOn = $('#useServo').checked && Boolean(servo);
+    for (const id of ['useSupply', 'supplyVoltage', 'supplyCapacity', 'usePayload', 'payloadMass']) $(`#${id}`).disabled = !servoOn;
+    $('#servoNote').textContent = servoOn
+        ? 'The windings\' resistance is worked out from the datasheet; their heat capacity and resistance to ambient are assumed. The payload is added to the gripper\'s own mass.'
+        : '';
+}
+
+for (const id of ['useMove', 'useServo', 'useSupply', 'usePayload', 'supplyVoltage', 'supplyCapacity', 'payloadMass']) {
+    $(`#${id}`).addEventListener('change', () => {
+        // A move runs for its length and a second more, unless a run length has been set since.
+        if (id === 'useMove' && $('#useMove').checked && robotMove()) $('#runTime').value = String(robotMove()[1].keyframes.at(-1)[0] + 1);
+        renderServoOptions();
+        keepSessionSoon();
+    });
+}
+
+// The importer's options for what is ticked.
+function servoBuildOptions() {
+    const servoOn = $('#useServo').checked && Boolean(robotServo());
+    return {
+        folder: state.selected,
+        ...($('#useMove').checked && robotMove() ? { move: robotMove()[0] } : {}),
+        ...(servoOn ? { servo: robotByFolder(state.selected).servo } : {}),
+        ...(servoOn && $('#useSupply').checked ? { supply: { voltage: Number($('#supplyVoltage').value) || 7.4, capacity: (Number($('#supplyCapacity').value) || 2) * 3600 } } : {}),
+        ...(servoOn && $('#usePayload').checked ? { payload: { body: robotByFolder(state.selected).gripper, mass: Number($('#payloadMass').value) || 0 } } : {})
+    };
 }
 
 // ---- building it into the canvas -------------------------------------------------------------------------------
@@ -296,11 +343,13 @@ $('#buildButton').addEventListener('click', async () => {
             joints: [...state.joints].map(([name, choice]) => ({ name, ...choice })),
             provenance: provenance(folder),
             timeStep: Number($('#timeStep').value) || 0.01,
-            runTime: Number($('#runTime').value) || 10
+            runTime: Number($('#runTime').value) || 10,
+            ...servoBuildOptions()
         }));
         if (!answer.imported) throw new Error(answer.report?.errors?.join(' ') || 'The robot could not be built.');
         await call(api.openInCanvas(null, { focus: true, silent: true, session: sessionState() }));
-        show('#buildStatus', notice('ok', `${answer.report.summary}, now in the canvas. Its servos' setpoints are live sliders there.`),
+        show('#buildStatus', notice('ok', `${answer.report.summary}, now in the canvas. Its servos' setpoints are live sliders there${$('#useMove').checked ? ', following the move until a slider is moved' : ''}.`),
+            ...(answer.report.notes ?? []).map((text) => notice('', text)),
             ...(answer.report.warnings ?? []).map((text) => notice('warning', text)));
     } catch (error) {
         show('#buildStatus', notice('error', error.message));
@@ -314,7 +363,9 @@ $('#buildButton').addEventListener('click', async () => {
 function sessionState() {
     return {
         version: 1, robot: state.selected, commit: state.stored.get(state.selected)?.commit ?? null,
-        joints: Object.fromEntries(state.joints), name: $('#modelName').value, timeStep: $('#timeStep').value, runTime: $('#runTime').value
+        joints: Object.fromEntries(state.joints), name: $('#modelName').value, timeStep: $('#timeStep').value, runTime: $('#runTime').value,
+        options: Object.fromEntries(['useMove', 'useServo', 'useSupply', 'usePayload', 'supplyVoltage', 'supplyCapacity', 'payloadMass']
+            .map((id) => [id, $(`#${id}`).type === 'checkbox' ? $(`#${id}`).checked : $(`#${id}`).value]))
     };
 }
 
@@ -331,6 +382,11 @@ async function restore() {
     if (!session?.robot) return;
     $('#timeStep').value = session.timeStep ?? '0.01';
     $('#runTime').value = session.runTime ?? '10';
+    for (const [id, value] of Object.entries(session.options ?? {})) {
+        const input = document.getElementById(id);
+        if (!input) continue;
+        if (input.type === 'checkbox') input.checked = Boolean(value); else input.value = String(value);
+    }
     const kept = state.stored.get(session.robot);
     if (!kept) {
         show('#robotStatus', notice('warning', `This project was built from ${robotByFolder(session.robot)?.name ?? session.robot} (Menagerie at ${shortCommit(session.commit ?? '')}), which is not on this computer. The project carries its copy; download it here to change how it is built.`));

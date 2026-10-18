@@ -9,8 +9,9 @@
 //   from a shared parameter, live with a slider) or `torqueFrom: { nodeId, stateId }` (another node's state, such as a
 //   motor's, read from the step's snapshot);
 // - servo: driven by the model's own position actuator on the joint (a servo's inner loop, run by MuJoCo at its own
-//   timestep) to a setpoint, `setpoint` or `setpointFrom` in the same two ways; the node also gets the torque the servo
-//   applies, as a state;
+//   timestep) to a setpoint, `setpoint` (which may follow a stored schedule, a move) or `setpointFrom` in the same two
+//   ways; the node also gets the torque the servo applies, as a state, and with `servoCurrent: { torqueConstant,
+//   idleCurrent }` (N·m per A at its output, A) the current it draws, each constant a shared parameter;
 // - free: neither, and any actuator the model has on the joint is switched off, so nothing drives it that the model
 //   does not say.
 // The provider reads a torque or setpoint at the start of each substep.
@@ -62,9 +63,15 @@ const poseParts = ['X', 'Y', 'Z', 'Qw', 'Qx', 'Qy', 'Qz'];
 const poseLabels = ['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz'];
 
 // The unit of each quantity of MuJoCo's model a parameter may set, for a hinge (a slide's damping is N·s/m).
-const parameterUnits = { bodyMass: 'kg', jointDamping: 'N·m·s/rad', jointFrictionloss: 'N·m', jointArmature: 'kg·m²' };
+const parameterUnits = {
+    bodyMass: 'kg', jointDamping: 'N·m·s/rad', jointFrictionloss: 'N·m', jointArmature: 'kg·m²',
+    servoTorqueLimit: 'N·m', servoTorqueConstant: 'N·m/A', servoIdleCurrent: 'A'
+};
 
-const units = { hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m', setpoint: 'rad', command: 'rad', servoTorque: 'N·m' }, slide: { position: 'm', speed: 'm/s', effort: 'N', setpoint: 'm', command: 'm', servoTorque: 'N' } };
+const units = {
+    hinge: { position: 'rad', speed: 'rad/s', effort: 'N·m', setpoint: 'rad', command: 'rad', servoTorque: 'N·m', servoCurrent: 'A' },
+    slide: { position: 'm', speed: 'm/s', effort: 'N', setpoint: 'm', command: 'm', servoTorque: 'N', servoCurrent: 'A' }
+};
 
 // Places one mechanism's node (and the shared parameters its joints' torques come from) into `document`, taking ids
 // from `id()`. `mechanism` is { name, mjcf or model, joints: [{ name, kind: 'hinge' | 'slide', initialPosition,
@@ -114,14 +121,20 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
         const own = joint.torque ?? joint.setpoint;
         const input = own ? state(role, mode === 'servo' ? 'setpoint command' : kind === 'slide' ? 'force' : 'torque') : null;
         const servoTorque = mode === 'servo' ? state('servoTorque', kind === 'slide' ? 'servo force' : 'servo torque') : null;
-        return { ...joint, kind, key, mode, role, own, input, from: joint.torqueFrom ?? joint.setpointFrom, position, speed, servoTorque };
+        if (joint.servoCurrent && mode !== 'servo') throw new Error(`Joint ${joint.name} is given a servo's current but is not in servo mode.`);
+        // The datasheet's constants, apart from the state of the current they give.
+        const servoConstants = joint.servoCurrent ?? null;
+        const servoCurrent = servoConstants ? state('servoCurrent', 'servo current') : null;
+        return { ...joint, kind, key, mode, role, own, input, from: joint.torqueFrom ?? joint.setpointFrom, position, speed, servoTorque, servoCurrent, servoConstants };
     });
     for (const joint of joints.filter(({ own }) => own)) {
         const symbol = `${joint.key}${joint.mode === 'servo' ? 'Setpoint' : joint.kind === 'slide' ? 'Force' : 'Torque'}`;
         const live = Boolean(joint.own.control);
         const shared = {
             id: id(), name: `${joint.name} ${joint.mode === 'servo' ? 'setpoint' : joint.kind === 'slide' ? 'force' : 'torque'}`, symbol, value: joint.own.value ?? 0,
-            unit: units[joint.kind][joint.mode === 'servo' ? 'setpoint' : 'effort'], mode: live ? 'live' : 'constant', ...(live ? { control: { ...joint.own.control } } : {})
+            unit: units[joint.kind][joint.mode === 'servo' ? 'setpoint' : 'effort'], mode: live ? 'live' : 'constant', ...(live ? { control: { ...joint.own.control } } : {}),
+            // A move, as a stored schedule: { interpolation: 'linear' | 'hold', samples: [[time, value], ...] }.
+            ...(joint.own.schedule ? { schedule: structuredClone(joint.own.schedule) } : {})
         };
         sharedParameters.push(shared);
         const parameter = { id: id(), name: shared.name, symbol, value: shared.value, unit: shared.unit, mode: shared.mode, ...(live ? { control: { ...shared.control } } : {}), sharedParameterId: shared.id };
@@ -147,7 +160,7 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
                 licence: mechanism.model.licence ?? null
             }
         }),
-        joints: joints.map(({ name, key, initialPosition = 0, initialSpeed = 0, mode }) => ({ name, key, initialPosition, initialSpeed, mode })),
+        joints: joints.map(({ name, key, initialPosition = 0, initialSpeed = 0, mode, servoCurrent }) => ({ name, key, initialPosition, initialSpeed, mode, current: Boolean(servoCurrent) })),
         parameters: []
     };
     const inputKey = (joint) => `${joint.key}${joint.mode === 'servo' ? 'Setpoint' : 'Effort'}`;
@@ -159,7 +172,8 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
         outputs: joints.flatMap((joint) => [
             { key: `${joint.key}Position`, stateId: joint.position.id, setsValue: true },
             { key: `${joint.key}Speed`, stateId: joint.speed.id, setsValue: true },
-            ...(joint.servoTorque ? [{ key: `${joint.key}ServoTorque`, stateId: joint.servoTorque.id, setsValue: true }] : [])
+            ...(joint.servoTorque ? [{ key: `${joint.key}ServoTorque`, stateId: joint.servoTorque.id, setsValue: true }] : []),
+            ...(joint.servoCurrent ? [{ key: `${joint.key}ServoCurrent`, stateId: joint.servoCurrent.id, setsValue: true }] : [])
         ])
     };
     // Each body to report, by its name in the model, with its place at the reference pose (describeModel's frames) as
@@ -185,8 +199,18 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
         }
     }
 
+    // A servo's current reads its torque constant and idle current, each a shared parameter of its own.
+    const servoParameters = joints.filter(({ servoConstants }) => servoConstants).flatMap((joint) => {
+        if (!(joint.servoConstants.torqueConstant > 0) || !(joint.servoConstants.idleCurrent >= 0)) {
+            throw new Error(`Joint ${joint.name}'s servo needs a positive torque constant and an idle current of zero or more.`);
+        }
+        return [
+            { name: `${joint.name} servo torque constant`, kind: 'servoTorqueConstant', target: joint.name, value: joint.servoConstants.torqueConstant },
+            { name: `${joint.name} servo idle current`, kind: 'servoIdleCurrent', target: joint.name, value: joint.servoConstants.idleCurrent }
+        ];
+    });
     const parameters = new Map();
-    for (const parameter of mechanism.parameters ?? []) {
+    for (const parameter of [...(mechanism.parameters ?? []), ...servoParameters]) {
         if (!parameterUnits[parameter.kind]) throw new Error(`Parameter ${parameter.name} sets ${parameter.kind}, which the mechanism does not know.`);
         const key = jointKey(parameter.name, keys);
         let shared = parameter.sharedParameterId === undefined ? null : sharedParameters.find(({ id: candidate }) => candidate === parameter.sharedParameterId);
@@ -207,7 +231,7 @@ export function placeMechanism(document, id, mechanism, { template, helpers }) {
     }
     node.implementation.source = providerSource(template, configuration);
     (document.nodes ??= []).push(node);
-    return { node, parameters, bodies, joints: new Map(joints.map(({ name, mode, position, speed, input, servoTorque }) => [name, { mode, position, speed, input, servoTorque }])) };
+    return { node, parameters, bodies, joints: new Map(joints.map(({ name, mode, position, speed, input, servoTorque, servoCurrent }) => [name, { mode, position, speed, input, servoTorque, servoCurrent }])) };
 }
 
 // A run configuration for `document`, made its active one. Time is in seconds.

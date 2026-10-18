@@ -41,3 +41,14 @@ export function placeJointMotor(builder, { name, values = {}, step }) {
 export function connectJointDrive(builder, { battery, motor, mechanism, speed, name, values = {} }) {
     return builder.applyBundle('jointDrive', { battery, motor: motor.node, joint: { node: mechanism, ports: { speed: speed.id } } }, { scope: motor.scope, name, values });
 }
+
+// A servo's winding and its supply (packages/engine/components/servoWinding.json and servoSupply.json): the winding
+// heats with the current a servo joint reports (`current`, its state on `mechanism`), and the battery loses it.
+// `values` override the winding's and the supply's parameters by key (resistance, thermalCapacitance,
+// thermalResistance, ambientTemperature, capacity).
+export function placeServoSupply(builder, { battery, mechanism, current, name, values = {} }) {
+    const scope = new Map();
+    const winding = builder.placeNode('servoWinding', { name: `${name} winding`, values, scope });
+    builder.applyBundle('servoSupply', { battery, winding, joint: { node: mechanism, ports: { current: current.id } } }, { scope, name, values });
+    return { winding };
+}

@@ -12,6 +12,11 @@ Each joint is in one of three modes:
 An actuator the model has on a joint in torque or free mode is switched off, so nothing drives a joint that the
 mechanism does not say drives it.
 
+A servo joint may report the current its servo draws, as a state for a battery and a winding's heat to read: its idle
+current and its torque over its torque constant, the servo's torque at its output per amp, both shared parameters
+(kinds servoIdleCurrent and servoTorqueConstant), so a datasheet's figures can be given, changed or fitted. A servo's
+torque limit is a parameter too (servoTorqueLimit, the actuator's force range in MuJoCo's model).
+
 The bodies named in the configuration report their place in the world as states too: a position (x, y, z, in metres,
 z up) and an orientation (a unit quaternion w, x, y, z), so a result shows where each part of the robot was.
 
@@ -93,6 +98,8 @@ class MechanismNode(NodeProvider):
                     self._model.actuator_biasprm[actuator][:] = 0.0
             self._joints.append({
                 "key": joint["key"],
+                "name": joint["name"],
+                "current": bool(joint.get("current")) and mode == "servo",
                 "mode": mode,
                 "actuator": actuators[0] if mode == "servo" else None,
                 "qpos": int(self._model.jnt_qposadr[index]),
@@ -101,6 +108,15 @@ class MechanismNode(NodeProvider):
             self._data.qpos[self._joints[-1]["qpos"]] = float(joint.get("initialPosition", 0.0))
             self._data.qvel[self._joints[-1]["dof"]] = float(joint.get("initialSpeed", 0.0))
         self._parameters = [self._parameter(parameter) for parameter in self._configuration.get("parameters", [])]
+        # A servo's current needs its torque constant and its idle current, each a parameter.
+        for joint in self._joints:
+            if not joint["current"]:
+                continue
+            for kind in ("servoTorqueConstant", "servoIdleCurrent"):
+                matches = [parameter for parameter in self._parameters if parameter["kind"] == kind and parameter["joint"] == joint["name"]]
+                if len(matches) != 1:
+                    raise ValueError(f"Joint {joint['name']} reports its servo's current, so it needs one {kind} parameter; it has {len(matches)}.")
+                joint[kind] = matches[0]["key"]
         self._bodies = []
         for body in self._configuration.get("bodies", []):
             index = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, body["name"])
@@ -126,6 +142,11 @@ class MechanismNode(NodeProvider):
             if index < 0:
                 raise ValueError(f"The mechanism has no joint named {target}.")
             return {"key": parameter["key"], "kind": kind, "index": int(self._model.jnt_dofadr[index])}
+        if kind in ("servoTorqueLimit", "servoTorqueConstant", "servoIdleCurrent"):
+            joint = next((candidate for candidate in self._joints if candidate["name"] == target and candidate["mode"] == "servo"), None)
+            if joint is None:
+                raise ValueError(f"Parameter {parameter['key']} is of joint {target}'s servo, but {target} is not a joint in servo mode.")
+            return {"key": parameter["key"], "kind": kind, "index": joint["actuator"], "joint": target}
         raise ValueError(f"Parameter {parameter['key']} sets {kind}, which the mechanism does not know.")
 
     # Sets each parameter's quantity in MuJoCo's model to its value, where it differs; True if a mass or armature changed.
@@ -136,6 +157,17 @@ class MechanismNode(NodeProvider):
             if not math.isfinite(value) or (parameter["kind"] == "bodyMass" and not value > 0):
                 raise RuntimeError(f"Parameter {parameter['key']} was given {value} at {start} s.")
             index = parameter["index"]
+            if parameter["kind"] in ("servoTorqueConstant", "servoIdleCurrent"):
+                # The provider's own, read when a servo's current is worked out.
+                if parameter["kind"] == "servoTorqueConstant" and not value > 0:
+                    raise RuntimeError(f"Parameter {parameter['key']} was given {value} at {start} s; a torque constant is positive.")
+                continue
+            if parameter["kind"] == "servoTorqueLimit":
+                if not value > 0:
+                    raise RuntimeError(f"Parameter {parameter['key']} was given {value} at {start} s; a torque limit is positive.")
+                self._model.actuator_forcelimited[index] = 1
+                self._model.actuator_forcerange[index] = [-value, value]
+                continue
             if parameter["kind"] == "bodyMass":
                 if self._model.body_mass[index] != value:
                     self._model.body_inertia[index] *= value / self._model.body_mass[index]
@@ -165,7 +197,8 @@ class MechanismNode(NodeProvider):
             [port for joint in self._joints for port in (
                 ScalarPort(f"{joint['key']}Position", "Position", ""),
                 ScalarPort(f"{joint['key']}Speed", "Speed", ""),
-            ) + ((ScalarPort(f"{joint['key']}ServoTorque", "Torque the servo applies", ""),) if joint["mode"] == "servo" else ())]
+            ) + ((ScalarPort(f"{joint['key']}ServoTorque", "Torque the servo applies", ""),) if joint["mode"] == "servo" else ())
+              + ((ScalarPort(f"{joint['key']}ServoCurrent", "Current the servo draws", ""),) if joint["current"] else ())]
             + [ScalarPort(f"{body['key']}{part}", f"Body {part}", "") for body in self._bodies for part in _POSE_PARTS],
         )
 
@@ -211,7 +244,11 @@ class MechanismNode(NodeProvider):
             outputs.add_gradient(f"{joint['key']}Position", float(self._data.qpos[joint["qpos"]]))
             outputs.add_gradient(f"{joint['key']}Speed", float(self._data.qvel[joint["dof"]]))
             if joint["mode"] == "servo":
-                outputs.add_gradient(f"{joint['key']}ServoTorque", float(self._data.actuator_force[joint["actuator"]]))
+                torque = float(self._data.actuator_force[joint["actuator"]])
+                outputs.add_gradient(f"{joint['key']}ServoTorque", torque)
+                if joint["current"]:
+                    current = inputs[joint["servoIdleCurrent"]] + abs(torque) / inputs[joint["servoTorqueConstant"]]
+                    outputs.add_gradient(f"{joint['key']}ServoCurrent", current)
         for body in self._bodies:
             pose = [*self._data.xpos[body["index"]], *self._data.xquat[body["index"]]]
             for part, value in zip(_POSE_PARTS, pose):

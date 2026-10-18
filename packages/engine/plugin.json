@@ -5,7 +5,29 @@
     "version": "0.1.0",
     "apiVersion": 1,
     "contributes": [
-        { "kind": "component", "componentId": "jointMotor", "apiVersion": 1, "entry": "components/jointMotor.json" },
-        { "kind": "component", "componentId": "jointDrive", "apiVersion": 1, "entry": "components/jointDrive.json" }
+        {
+            "kind": "component",
+            "componentId": "jointMotor",
+            "apiVersion": 1,
+            "entry": "components/jointMotor.json"
+        },
+        {
+            "kind": "component",
+            "componentId": "jointDrive",
+            "apiVersion": 1,
+            "entry": "components/jointDrive.json"
+        },
+        {
+            "kind": "component",
+            "componentId": "servoWinding",
+            "apiVersion": 1,
+            "entry": "components/servoWinding.json"
+        },
+        {
+            "kind": "component",
+            "componentId": "servoSupply",
+            "apiVersion": 1,
+            "entry": "components/servoSupply.json"
+        }
     ]
 }

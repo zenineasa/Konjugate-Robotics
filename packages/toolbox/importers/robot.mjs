@@ -7,11 +7,17 @@
 // - describe: what the model says of itself (its joints, the servos on them, its bodies) and its licence, for the
 //   window to show and to choose each joint's mode by;
 // - build: a mechanism from the joint modes chosen, carrying the model with its licence and where it came from
-//   (lib/mechanismModel.mjs), as a project document.
+//   (lib/mechanismModel.mjs), as a project document. And, as asked: a move for its servos (`move`, lib/moves.mjs);
+//   its servos' current, held to their datasheet's torque (`servo`, lib/servos.mjs); a battery and the servos'
+//   windings (`supply`: { voltage, capacity }); a payload on a body (`payload`: { body, mass }).
 
 import { pathOfStoredName } from '../lib/catalog.mjs';
-import { bodyShapes, describeModel } from '../lib/mjcf.mjs';
+import { DocumentBuilder } from '../lib/documentBuilder.mjs';
+import { placeServoSupply } from '../lib/driveModel.mjs';
+import { bodyFramesAt, bodyShapes, describeModel } from '../lib/mjcf.mjs';
 import { addRunConfiguration, emptyDocument, placeMechanism, splitModelFiles } from '../lib/mechanismModel.mjs';
+import { jointSchedule, moveFor } from '../lib/moves.mjs';
+import { servoById } from '../lib/servos.mjs';
 
 const failure = (message) => ({ ok: false, report: { errors: [message], warnings: [] } });
 
@@ -47,6 +53,12 @@ export default async function importRobot({ files, helpers, options = {} }) {
     // floating base, say) is MuJoCo's alone.
     const chosen = new Map((options.joints ?? []).map((joint) => [joint.name, joint]));
     const warnings = [];
+    const notes = [];
+    const move = options.move ? moveFor(options.folder, options.move) : null;
+    if (options.move && !move) return failure(`There is no move "${options.move}" for this robot.`);
+    const servo = options.servo ? servoById(options.servo) : null;
+    if (options.servo && !servo) return failure(`There is no servo "${options.servo}".`);
+    if (options.supply && !servo) return failure('A supply needs the servos\' datasheet, to know the current they draw.');
     const joints = description.joints.filter(({ kind, name }) => (kind === 'hinge' || kind === 'slide') && name).map((joint) => {
         const choice = chosen.get(joint.name) ?? { mode: 'free' };
         const range = joint.range ?? (joint.kind === 'hinge' ? [-Math.PI, Math.PI] : [-1, 1]);
@@ -59,7 +71,13 @@ export default async function importRobot({ files, helpers, options = {} }) {
                 return base;
             }
             const value = Math.min(Math.max(Number(choice.value ?? joint.initialPosition), range[0]), range[1]);
-            return { ...base, setpoint: { value, control } };
+            // A move plays as the setpoint's schedule, and the joint starts where the move does.
+            const moved = move ? jointSchedule(move, joint.name) : null;
+            return {
+                ...base, ...(moved ? { initialPosition: moved.start } : {}),
+                setpoint: { value: moved ? moved.start : value, control, ...(moved ? { schedule: moved.schedule } : {}) },
+                ...(servo ? { servoCurrent: { torqueConstant: servo.torqueConstant, idleCurrent: servo.idleCurrent } } : {})
+            };
         }
         if (choice.mode === 'torque') return { ...base, torque: { value: Number(choice.value ?? 0) } };
         return base;
@@ -78,21 +96,55 @@ export default async function importRobot({ files, helpers, options = {} }) {
     const document = emptyDocument();
     let nextId = 1;
     const id = () => nextId++;
+    // Each body starts where its joints do.
+    const frames = bodyFramesAt(description, Object.fromEntries(joints.map(({ name, initialPosition }) => [name, initialPosition])));
+    const servoJoints = joints.filter(({ setpoint }) => setpoint);
+    const parameters = [];
+    if (servo) {
+        for (const joint of servoJoints) parameters.push({ name: `${joint.name} servo torque limit`, kind: 'servoTorqueLimit', target: joint.name, value: servo.stallTorque });
+        notes.push(`Each servo is held to the ${servo.name}'s ${servo.stallTorque.toFixed(2)} N·m at stall, from its datasheet; the model's own limit is not used.`);
+    }
+    if (options.payload) {
+        const index = description.bodies.indexOf(options.payload.body);
+        const own = index >= 0 ? description.tree[index].mass : null;
+        if (own === null) return failure(`A payload goes on a body whose mass the model gives; ${options.payload.body} has none given.`);
+        parameters.push({
+            name: `${options.payload.body} mass with payload`, kind: 'bodyMass', target: options.payload.body, value: own + options.payload.mass,
+            control: { minimum: own, maximum: own + 1, step: 0.01 }
+        });
+        notes.push(`The payload is ${options.payload.mass} kg added to ${options.payload.body}'s own ${own} kg, at its centre of mass: an approximation of a payload held in the gripper.`);
+    }
+    let placed;
     try {
-        placeMechanism(document, id, {
-            name: options.name ?? 'Robot', joints,
+        placed = placeMechanism(document, id, {
+            name: options.name ?? 'Robot', joints, parameters,
             // Every named body reports where it is, and carries how it looks, for Pose Visualizer to show the robot moving.
-            bodies: description.bodies.map((name, index) => ({ name, frame: description.frames[index], shape: shapes.get(name) ?? null })).filter(({ name }) => name),
+            bodies: description.bodies.map((name, index) => ({ name, frame: frames[index], shape: shapes.get(name) ?? null })).filter(({ name }) => name),
             model: { main, files: run, provenance: options.provenance ?? null, licence: decodeText(notices.LICENSE) }
         }, { template, helpers });
     } catch (error) {
         return failure(error.message);
     }
-    addRunConfiguration(document, id, { globalTimeStep: options.timeStep ?? 0.01, targetTime: options.runTime ?? 10 });
+    if (options.supply) {
+        // A battery, and each servo's winding heated by its current and drawing on the battery.
+        const templates = new Map();
+        for (const name of ['battery', 'servoWinding', 'servoSupply']) templates.set(name, await helpers.readPackageJson(`engine/components/${name}.json`));
+        const builder = new DocumentBuilder(document, templates, helpers);
+        const battery = builder.placeNode('battery', { name: 'Battery', initialValues: { voltage: options.supply.voltage ?? servo.voltage } });
+        for (const joint of servoJoints) {
+            placeServoSupply(builder, {
+                battery, mechanism: placed.node, current: placed.joints.get(joint.name).servoCurrent, name: joint.name,
+                values: { resistance: servo.windingResistance, capacity: options.supply.capacity ?? 7200 }
+            });
+        }
+        nextId = builder.nextId;
+        notes.push(`The windings' resistance (${servo.windingResistance} Ω) is worked out from the datasheet; their heat capacity and their resistance to ambient are assumed.`);
+    }
+    addRunConfiguration(document, id, { globalTimeStep: options.timeStep ?? 0.01, targetTime: options.runTime ?? (move ? move.keyframes.at(-1)[0] + 1 : 10) });
     const drivenCount = joints.filter((joint) => joint.setpoint || joint.torque).length;
     return {
         ok: true, document,
         data: { step: 'build', joints: joints.length, driven: drivenCount },
-        report: { errors: [], warnings, summary: `${options.name ?? 'The robot'}: ${joints.length} joints, ${drivenCount} driven` }
+        report: { errors: [], warnings, notes, summary: `${options.name ?? 'The robot'}: ${joints.length} joints, ${drivenCount} driven` }
     };
 }

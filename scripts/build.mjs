@@ -49,6 +49,8 @@ toolboxFiles['engine/mechanismProvider.json'] = Buffer.from(JSON.stringify({
 for (const contribution of pluginManifest.contributes) {
     toolboxFiles[`engine/components/${contribution.componentId}.json`] = await readFile(join(engineDirectory, contribution.entry));
 }
+// Konjugate's own battery, for the importer to place a robot's supply with (an importer reads only its own package).
+toolboxFiles['engine/components/battery.json'] = await readFile(konjugateModule(join('assets', 'componentLibrary', 'battery.json')));
 const toolboxTarget = join(outputDirectory, `${toolboxManifest.addonId}-${version}.kja`);
 await writeFile(toolboxTarget, createPackageArchive({
     packageManifest: {
