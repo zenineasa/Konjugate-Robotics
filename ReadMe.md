@@ -2,6 +2,8 @@
 
 Draw a robot, and get a [Konjugate](https://github.com/zenineasa/Konjugate) model of it. A simple CAD-like window: place solids, click a point on one solid and a point on another to join them, say how they join and what drives each joint, and press Build. In the canvas, **each solid is a node and each joint is an edge between two solids**, so the robot can be wired to motors, batteries, controllers and anything else Konjugate models, then run, driven with sliders, forked, fitted and optimised. The robot moves by its joints' own equations (Featherstone's articulated-body method, split along the joints), which Konjugate's engine runs like any other: nothing outside the graph solves it, and every equation can be read and edited on its edge in the canvas.
 
+![A cart sliding on a rail with two pendulums hanging from it, drawn in the Robotics window's 3D view](screenshots/konjugate.robotics.webp)
+
 ## Status
 
 Early development; where it is going and why: [docs/direction.md](docs/direction.md). What works today:
@@ -10,6 +12,16 @@ Early development; where it is going and why: [docs/direction.md](docs/direction
 - **Build into the canvas.** The Ground, a node per solid (its joint's speed, position, acceleration and torque; its pose as `x`, `y`, `z`, `roll`, `pitch`, `yaw` and a rotation matrix; its energy; its shape at true size) and an edge per joint carrying the joint's equations, with its settings as parameters (the drive's torque or setpoint a live slider). Each solid's mass is a shared parameter. Pose Visualizer shows the robot moving.
 - **Checked** against an independent Newton-Euler solution of the same drawing, agreeing to within 1e-9, and against MuJoCo run on its own where it is installed.
 - **Not yet:** ball joints, closed loops (a four-bar linkage) and solids joined to nothing can be drawn but not built, and Build says so; contact; motors and batteries wired from the window; imported parts (STL, STEP, MJCF, URDF); keyframed moves. See the milestones in [docs/direction.md](docs/direction.md).
+
+## Installing
+
+The toolbox needs Konjugate 1.2.0 or newer (`minimumKonjugateVersion` in `package.json`), plus the features listed under `requires` in `packages/toolbox/addon.json`. With an older Konjugate it installs but shows no Robotics button. A released toolbox is signed and listed in Konjugate's registry (`registry/konjugate.robotics.json`), so it installs from **Extensions → Discover** inside Konjugate. To try the current source instead, see [Building from source](#building-from-source).
+
+## Documentation
+
+- [docs/direction.md](docs/direction.md): where the toolbox is going and why, how a drawing becomes nodes and edges, and the milestones.
+- [docs/interaction.md](docs/interaction.md): how the window behaves for newcomers, regular users and power users, with every action's button, gesture and key.
+- [AGENTS.md](AGENTS.md): a map of the code and the conventions for working in this repository.
 
 ## Running a robot
 
@@ -23,7 +35,7 @@ This repository builds against a sibling checkout of Konjugate (`KONJUGATE_DIR` 
 npm run build            # out/konjugate.robotics.toolbox-<version>.kja
 npm run install:dev      # builds and installs it into your local Konjugate, removing the retired Robotics Engine plugin
 npm test                 # unit tests
-npm run test:window      # the window in a plain browser, as a Windows or Linux user and as a Mac user
+npm run test:window      # the window in a plain browser (Playwright from the Konjugate checkout), as a Windows or Linux user and as a Mac user
 npm run test:engine      # drawn robots through Konjugate's engine, against a Newton-Euler reference
 npm run setup:python     # optional: .venv with MuJoCo (needs uv), so test:engine also compares with MuJoCo alone
 ```
