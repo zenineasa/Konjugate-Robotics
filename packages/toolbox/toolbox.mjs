@@ -300,8 +300,8 @@ function renderChecks() {
         ...warnings.map((item) => ({ ...item, level: 'warning' })),
         ...notes.map((item) => ({ ...item, level: 'note' }))
     ];
-    // What the drawing may hold but Build cannot simulate yet: ball joints, loops and solids joined to nothing.
-    // Each says why it cannot be built, in place of what the drawing would otherwise say of that solid or joint.
+    // What the drawing may hold but Build cannot simulate yet: a loop closed by a fixed joint, and a second loop.
+    // Each says why it cannot be built, in place of what the drawing would otherwise say of that joint.
     const limits = errors.length ? [] : simulationLimits(drawing());
     const limited = new Set(limits.map(({ id }) => id));
     items.splice(0, items.length, ...limits.map((item) => ({ ...item, level: 'error' })), ...items.filter((item) => item.level === 'error' || !limited.has(item.id)));
@@ -406,6 +406,7 @@ function jointInspector(joint) {
     const loop = built.loops.some(({ id }) => id === joint.id);
     const linear = joint.kind === 'slider';
     const moving = joint.kind === 'hinge' || joint.kind === 'slider';
+    const ball = joint.kind === 'ball';
     const unit = linear ? 'mm' : '°';
     const show = (value) => (linear ? toMillimetres(value) : toDegrees(value));
     const anchor = parentFrame.point;
@@ -429,7 +430,7 @@ function jointInspector(joint) {
     return `<h3>${escapeHtml(joint.name)}</h3>
         ${field('Name', `<input type="text" name="name" value="${escapeHtml(joint.name)}" spellcheck="false">`)}
         ${field('Kind', `<select name="kind">${jointKinds.map((kind) => `<option value="${kind}"${kind === joint.kind ? ' selected' : ''}>${jointLabels[kind]}</option>`).join('')}</select>`)}
-        <p class="note">Joins <strong>${escapeHtml(nameOf(parentFrame.solid))}</strong> (its point and axis) to <strong>${escapeHtml(nameOf(childFrame.solid))}</strong>.${loop ? ' It closes a loop, which Build cannot simulate yet: remove it or another joint of the loop to build.' : ''}</p>
+        <p class="note">Joins <strong>${escapeHtml(nameOf(parentFrame.solid))}</strong> (its point and axis) to <strong>${escapeHtml(nameOf(childFrame.solid))}</strong>.${loop ? ' It closes a loop: Build holds its two solids together at its point with a force of its own, shown on the relationship in the canvas.' : ''}</p>
         <h2>Point and axis</h2>
         <div class="fieldRow"><span>Point</span>${['x', 'y', 'z'].map((name, index) => `<label>${name}${numberInput(`anchor.${index}`, toMillimetres(anchor[index]), { step: 1 })}</label>`).join('')}</div>
         <div class="fieldRow"><span>Axis</span>${['x', 'y', 'z'].map((name, index) => `<label>${name}${numberInput(`axis.${index}`, Math.round(axis[index] * 1000) / 1000, { step: 0.1 })}</label>`).join('')}</div>
@@ -445,6 +446,11 @@ function jointInspector(joint) {
         ${field('Friction', numberInput('friction', joint.friction, { min: 0 }), linear ? 'N' : 'N·m')}
         ${field('Armature', numberInput('armature', joint.armature, { min: 0, title: 'The inertia of what turns with the joint inside it, such as a motor\'s rotor through its gearbox' }), linear ? 'kg' : 'kg·m²')}
         ${driveFields.join('')}` : ''}
+        ${ball && !loop ? `<h2>Motion</h2>
+        ${field('Damping', numberInput('damping', joint.damping, { min: 0 }), 'N·m·s/rad')}
+        ${field('Friction', numberInput('friction', joint.friction, { min: 0 }), 'N·m')}
+        ${field('Armature', numberInput('armature', joint.armature, { min: 0, title: 'The inertia of what turns with the joint inside it' }), 'kg·m²')}
+        <p class="note">It turns freely about its point every way, damped and rubbed on each axis alike; nothing drives it yet.</p>` : ''}
         <div class="buttons"><button type="button" class="tool" data-action="delete">Delete joint</button></div>`;
 }
 

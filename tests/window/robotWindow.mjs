@@ -111,9 +111,9 @@ try {
     await page.click('#viewport', { position: { x: 30, y: 30 } });
     await page.keyboard.press('f');
     await shot('02-two-solids');
-    // Joined to nothing, the solids cannot be built yet, and the checks say so in place of a mere warning.
-    assert.match(await page.textContent('#checksList'), /Base is not joined to the Ground; a solid that floats freely cannot be simulated yet/);
-    assert.equal(await page.isDisabled('#buildButton'), true);
+    // Joined to nothing, the solids would fall freely, and the checks say so; they still build, each on a free joint.
+    assert.match(await page.textContent('#checksList'), /Base is not joined to the Ground, so it falls freely/);
+    assert.equal(await page.isDisabled('#buildButton'), false);
 
     // 3. Fix the base to the Ground: Join as fixed, click the floor, then the base's top (it turns over onto the floor).
     await page.selectOption('#joinKind', 'fixed');
@@ -199,20 +199,41 @@ try {
     await page.waitForFunction(() => window.roboticsWindow?.drawing().solids.length === 2);
     assert.equal(await page.inputValue('#robotName'), 'Robot');
 
+    // 11. A closed loop and ball joints build too: the four-bar's last pin closes its loop, and a ball joint's card has
+    // its damping, friction and armature but no drive.
+    await page.selectOption('#exampleSelect', 'fourBar');
+    await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Four-bar linkage');
+    assert.match(await page.textContent('#checksList'), /Closing pin closes a loop: Build holds its two solids together at its point/);
+    await page.click('#partsTree li:has-text("Closing pin")');
+    assert.match(await page.textContent('#inspector'), /It closes a loop: Build holds its two solids together at its point/);
+    await page.click('#buildButton');
+    await page.waitForFunction(() => window.__bridge.built?.edges?.some(({ name }) => name === 'Closing pin'));
+    const linkage = await page.evaluate(() => window.__bridge.built);
+    await page.selectOption('#exampleSelect', 'ballPendulum');
+    await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Ball-joint pendulum');
+    assert.match(await page.textContent('#checksList'), /Ready to build/);
+    await page.click('#partsTree li:has-text("Shoulder")');
+    const card = await page.textContent('#inspector');
+    assert.match(card, /Damping/);
+    assert.doesNotMatch(card, /Driven by/);
+    await shot('06-ball');
+
     assert.deepEqual(problems, [], `the page reported problems: ${problems.join(' | ')}`);
 
-    // 11. Konjugate's engine accepts the model, when there is a build of it.
+    // 12. Konjugate's engine accepts the models, when there is a build of it.
     const engine = process.env.KONJUGATE_ENGINE_PATH ?? konjugateModule(join('out', 'engine', process.platform === 'win32' ? 'konjugateEngine.exe' : 'konjugateEngine'));
     if (existsSync(engine)) {
         const { encodeProjectFile } = await import(pathToFileURL(konjugateModule('src/projectFile.mjs')));
         const { decodeValidationReport } = await import(pathToFileURL(konjugateModule('src/reportProtocol.mjs')));
         const directory = join(tmpdir(), `robotics-window-${process.pid}`);
         await mkdir(directory, { recursive: true });
-        await writeFile(join(directory, 'robot.kjt'), await encodeProjectFile(JSON.stringify(document)));
-        spawnSync(engine, ['validate', join(directory, 'robot.kjt'), '--report', join(directory, 'robot.report')]);
-        const report = decodeValidationReport(await readFile(join(directory, 'robot.report')));
-        assert.equal(report.valid, true, JSON.stringify(report.issues));
-        console.log('The engine accepts the model the window built.');
+        for (const [name, built] of [['robot', document], ['linkage', linkage]]) {
+            await writeFile(join(directory, `${name}.kjt`), await encodeProjectFile(JSON.stringify(built)));
+            spawnSync(engine, ['validate', join(directory, `${name}.kjt`), '--report', join(directory, `${name}.report`)]);
+            const report = decodeValidationReport(await readFile(join(directory, `${name}.report`)));
+            assert.equal(report.valid, true, `${name}: ${JSON.stringify(report.issues)}`);
+        }
+        console.log('The engine accepts the models the window built.');
     } else {
         console.log(`No engine at ${engine}: the built model was not validated.`);
     }

@@ -15,7 +15,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { exampleDrawing, examples } from '../../packages/toolbox/lib/examples.mjs';
-import { massOf, reverseJoint, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
+import { addFrameAt, addJoint, addSolid, createDrawing, massOf, reverseJoint, structure, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
+import { between, fromAxisAngle, scale } from '../../packages/toolbox/lib/math.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
 import { buildModel } from '../../packages/toolbox/lib/modelBuilder.mjs';
 import { konjugateModule } from '../../scripts/konjugatePaths.mjs';
@@ -30,12 +31,28 @@ const solidNamed = (drawing, name) => drawing.solids.find((solid) => solid.name 
 const coordinate = (joint) => (joint.kind === 'slider' ? 'jointPosition' : 'jointAngle');
 const withoutMujoco = await mujocoMissing();
 
-// Runs `drawing` in the engine and in the Newton-Euler reference; every moving joint and every solid's centre agree.
+// A quaternion's rotation matrix, row by row.
+const matrixOf = ([w, x, y, z]) => [
+    [w * w + x * x - y * y - z * z, 2 * (x * y - w * z), 2 * (x * z + w * y)],
+    [2 * (x * y + w * z), w * w - x * x + y * y - z * z, 2 * (y * z - w * x)],
+    [2 * (x * z - w * y), 2 * (y * z + w * x), w * w - x * x - y * y + z * z]
+];
+
+// Runs `drawing` in the engine and in the Newton-Euler reference; every moving joint's coordinates (a ball's turn too)
+// and every solid's centre and rotation agree.
 async function matchesReference(name, drawing, carried, runTime = 3, document = build(drawing, runTime)) {
     const run = await runDocument(directory, name, document);
     const reference = simulate(drawing, run.times);
     for (const [jointName, solidName] of Object.entries(carried)) {
         const joint = jointNamed(drawing, jointName);
+        if (joint.kind === 'ball') {
+            ['jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ'].forEach((symbol, index) => {
+                const values = run.series(`${solidName}.${symbol}`);
+                const difference = largestDifference(values, reference[joint.id].map((turn) => turn[index]));
+                assert.ok(difference < 1e-9, `${name}: ${jointName}'s ${symbol} differs from the reference by ${difference}.`);
+            });
+            continue;
+        }
         const values = run.series(`${solidName}.${coordinate(joint)}`);
         assert.ok(largestDifference(values, reference[joint.id]) < 1e-9, `${name}: ${jointName} differs from the reference by ${largestDifference(values, reference[joint.id])}.`);
     }
@@ -45,14 +62,20 @@ async function matchesReference(name, drawing, carried, runTime = 3, document = 
             const expected = reference[solid.id].map((place) => place[axis]);
             assert.ok(largestDifference(values, expected) < 1e-9, `${name}: ${solid.name}'s ${symbol} differs from the reference by ${largestDifference(values, expected)} m.`);
         }
+        const matrices = reference.rotations[solid.id].map(matrixOf);
+        for (const row of [0, 1, 2]) for (const column of [0, 1, 2]) {
+            const values = run.series(`${solid.name}.r${row + 1}${column + 1}`);
+            const difference = largestDifference(values, matrices.map((matrix) => matrix[row][column]));
+            assert.ok(difference < 1e-9, `${name}: ${solid.name}'s rotation r${row + 1}${column + 1} differs from the reference by ${difference}.`);
+        }
     }
-    return run;
+    return { run, reference };
 }
 
 test('a drawn pendulum swings as the Newton-Euler reference swings it, and keeps its energy', async () => {
     let drawing = exampleDrawing('pendulum');
     drawing = updateJoint(drawing, jointNamed(drawing, 'Pivot').id, { damping: 0 });
-    const run = await matchesReference('pendulum', drawing, { Pivot: 'Arm' }, 4);
+    const { run } = await matchesReference('pendulum', drawing, { Pivot: 'Arm' }, 4);
     const heights = run.series('Arm.z');
     assert.ok(Math.min(...heights) < solidNamed(drawing, 'Arm').position[2] - 0.05, 'Let go level, the arm should swing down.');
     // Undamped, its energy stays within a tenth of a percent of where it started (the step's own error).
@@ -75,7 +98,7 @@ test('a joint\'s torque, a live parameter of its edge, reaches the joint: m g L 
 
 test('servos hold a drawn two-link arm at its setpoints, moving as the reference moves it', async () => {
     const drawing = exampleDrawing('twoLinkArm');
-    const run = await matchesReference('arm', drawing, { Waist: 'Turret', Shoulder: 'Upper arm', Elbow: 'Forearm' });
+    const { run } = await matchesReference('arm', drawing, { Waist: 'Turret', Shoulder: 'Upper arm', Elbow: 'Forearm' });
     const elbow = run.series('Forearm.jointAngle').at(-1);
     assert.ok(Math.abs(elbow - 0.5) < 0.01, `The elbow should settle near its 0.5 rad setpoint, not ${elbow}.`);
 });
@@ -83,12 +106,12 @@ test('servos hold a drawn two-link arm at its setpoints, moving as the reference
 test('a cart on a slider carries two pendulums, a branch of the tree each, as the reference does', async () => {
     const drawing = exampleDrawing('cartPendulums');
     const carried = { Track: 'Cart', 'Front swing': 'Front pendulum', 'Back swing': 'Back pendulum' };
-    const run = await matchesReference('cart', drawing, carried);
+    const { run } = await matchesReference('cart', drawing, carried);
     const back = run.series('Back pendulum.jointAngle');
     assert.ok(Math.max(...back.map(Math.abs)) > 0.1, 'The cart starting off should set the hanging pendulum swinging.');
     // The front swing joint read the other way round (its point and axis on the pendulum): the same robot, the same motion.
     const reversed = reverseJoint(drawing, jointNamed(drawing, 'Front swing').id);
-    const again = await matchesReference('cartReversed', reversed, carried);
+    const { run: again } = await matchesReference('cartReversed', reversed, carried);
     assert.ok(largestDifference(again.series('Front pendulum.x'), run.series('Front pendulum.x')) < 1e-12);
 });
 
@@ -97,7 +120,7 @@ test('an arm with a gripper turns at its waist and closes its fingers, held up a
     const carried = {
         Waist: 'Turret', Shoulder: 'Upper arm', Elbow: 'Forearm', Wrist: 'Hand', 'Left finger slide': 'Left finger', 'Right finger slide': 'Right finger'
     };
-    const run = await matchesReference('gripper', drawing, carried);
+    const { run } = await matchesReference('gripper', drawing, carried);
     const waist = run.series('Turret.jointAngle').at(-1);
     assert.ok(Math.abs(waist - 0.8) < 0.02, `The waist should turn to its 0.8 rad setpoint, not ${waist}.`);
     for (const [joint, solid] of [['Shoulder', 'Upper arm'], ['Elbow', 'Forearm'], ['Wrist', 'Hand']]) {
@@ -110,6 +133,99 @@ test('an arm with a gripper turns at its waist and closes its fingers, held up a
     }
     const gap = (index) => Math.hypot(...['x', 'y', 'z'].map((axis) => run.series(`Left finger.${axis}`).at(index) - run.series(`Right finger.${axis}`).at(index)));
     assert.ok(gap(-1) < gap(0) - 0.025, `The fingers should close towards each other, from ${gap(0)} m apart to ${gap(-1)} m.`);
+});
+
+test('two links on ball joints swing and twist in three dimensions as the reference swings them, losing energy only to their damping', async () => {
+    const drawing = exampleDrawing('ballPendulum');
+    // Over a second: two linked spherical pendulums are chaotic, so rounding grows on longer runs.
+    const { run } = await matchesReference('ball', drawing, { Shoulder: 'Upper link', Elbow: 'Lower link' }, 1);
+    // Let go out of line, the lower link leaves every plane through the shoulder: its centre's three coordinates all move.
+    for (const axis of ['x', 'y', 'z']) {
+        const values = run.series(`Lower link.${axis}`);
+        assert.ok(Math.max(...values) - Math.min(...values) > 0.02, `The lower link should move along ${axis}.`);
+    }
+    // Its quaternions keep unit length to within the step's error; its energy only falls (damped) beyond that error.
+    const turn = ['W', 'X', 'Y', 'Z'].map((axis) => run.series(`Upper link.jointTurn${axis}`));
+    const lengths = turn[0].map((_, index) => Math.hypot(...turn.map((series) => series[index])));
+    assert.ok(Math.max(...lengths.map((value) => Math.abs(value - 1))) < 0.01, 'The turn drifted from unit length.');
+    const energy = run.times.map((_, index) => ['Upper link', 'Lower link'].reduce((sum, name) => sum + run.series(`${name}.kineticEnergy`)[index] + run.series(`${name}.potentialEnergy`)[index], 0));
+    const swing = Math.max(...run.series('Lower link.kineticEnergy'));
+    assert.ok(Math.max(...energy) - energy[0] < 0.02 * swing, `Its energy rose by ${Math.max(...energy) - energy[0]} J.`);
+});
+
+// A body joined to nothing, with an arm hinged to it that a constant torque turns: they fall together, the body turning
+// back against the arm.
+function floatingDrawing() {
+    let drawing = createDrawing('Floating');
+    let added = addSolid(drawing, 'box', { name: 'Body', size: { x: 0.2, y: 0.12, z: 0.08 }, position: [0, 0, 1] });
+    drawing = updateSolid(added.drawing, added.id, { rotation: fromAxisAngle([0.3, 0.2, 1], 0.4) });
+    const body = added.id;
+    const from = [0.1, 0, 1.05];
+    const to = [0.3, 0.05, 1.1];
+    const along = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    added = addSolid(drawing, 'capsule', { name: 'Arm', size: { radius: 0.015, length: Math.hypot(...along) }, position: scale([from[0] + to[0], from[1] + to[1], from[2] + to[2]], 0.5) });
+    drawing = updateSolid(added.drawing, added.id, { rotation: between([0, 0, 1], along) });
+    const arm = added.id;
+    const onBody = addFrameAt(drawing, body, from, [0, 1, 0]);
+    const onArm = addFrameAt(onBody.drawing, arm, from, [0, -1, 0]);
+    const joined = addJoint(onArm.drawing, onBody.id, onArm.id, { kind: 'hinge', mate: false, name: 'Shoulder' });
+    return updateJoint(joined.drawing, joined.id, { damping: 0.001, drive: { mode: 'torque', torque: 0.02 } });
+}
+
+test('a body joined to nothing falls on a free joint, turning back as its arm turns, as the reference has it', async () => {
+    const drawing = floatingDrawing();
+    const { run } = await matchesReference('floating', drawing, { Shoulder: 'Arm' }, 1);
+    assert.equal(build(drawing, 1).edges.find(({ name }) => name === 'Body floating').source.nodeId, build(drawing, 1).nodes.find(({ name }) => name === 'Ground').id);
+    // Their centre of mass falls as g falls it, to within half a percent (the step's own error), and goes nowhere
+    // sideways.
+    const masses = drawing.solids.map(massOf);
+    const total = masses[0] + masses[1];
+    const centre = (axis, index) => drawing.solids.reduce((sum, solid, k) => sum + masses[k] * run.series(`${solid.name}.${axis}`)[index], 0) / total;
+    const last = run.times.length - 1;
+    const time = run.times[last];
+    const fallen = centre('z', 0) - centre('z', last);
+    assert.ok(Math.abs(fallen - 0.5 * 9.81 * time * time) < 5e-3 * fallen, `The centre of mass fell ${fallen} m, not as gravity alone falls it.`);
+    for (const axis of ['x', 'y']) assert.ok(Math.abs(centre(axis, last) - centre(axis, 0)) < 1e-3, `The centre of mass moved ${centre(axis, last) - centre(axis, 0)} m along ${axis}.`);
+    // The arm turned one way about the shoulder, so the body turned the other way about its own axis there.
+    assert.ok(run.series('Arm.jointAngle')[last] > 1, 'The torque should turn the arm.');
+    assert.ok(Math.abs(run.series('Body.w2')[last]) > 0.1 || Math.abs(run.series('Body.w1')[last]) > 0.1, 'The body should turn back against the arm.');
+});
+
+test('a four-bar linkage, a loop closed by its last pin, turns as the reference turns it, its pin held together', async () => {
+    const drawing = exampleDrawing('fourBar');
+    const carried = { 'Crank pivot': 'Crank', 'Rocker pivot': 'Rocker', 'Coupler pin': 'Coupler' };
+    const { run } = await matchesReference('fourBar', drawing, carried, 3);
+    assert.equal(structure(drawing).loops[0].name, 'Closing pin');
+    // The crank goes all the way round, the rocker only rocks, and the pin's two halves stay within a twentieth of a
+    // millimetre of each other, closing to nothing when the linkage slows.
+    assert.ok(run.series('Crank.jointAngle').at(-1) > 2 * Math.PI, 'The crank should turn all the way round.');
+    const rocker = run.series('Rocker.jointAngle');
+    assert.ok(Math.max(...rocker) - Math.min(...rocker) > 0.3 && Math.max(...rocker.map(Math.abs)) < 1.5, 'The rocker should rock back and forth.');
+    const gap = run.series('Rocker.closureGap');
+    assert.ok(Math.max(...gap) < 5e-5, `The pin opened by ${Math.max(...gap)} m.`);
+    assert.ok(Math.max(...run.series('Rocker.closureForce3').map(Math.abs)) > 0.01, 'The pin should carry a force.');
+    // The force that closes it is out of the linkage's plane by nothing: the other pins already hold that.
+    assert.ok(Math.max(...run.series('Rocker.closureForce2').map(Math.abs)) < 1e-6, 'The pin should need no force out of the plane.');
+});
+
+test('an arm pinned to the Ground at both ends, a loop through the Ground, holds still', async () => {
+    let drawing = exampleDrawing('pendulum');
+    const arm = solidNamed(drawing, 'Arm').id;
+    drawing = updateJoint(drawing, jointNamed(drawing, 'Pivot').id, { damping: 0 });
+    let frame = addFrameAt(drawing, 'ground', [0.2, 0.035, 0.18], [0, 1, 0]);
+    const onGround = frame.id;
+    frame = addFrameAt(frame.drawing, arm, [0.2, 0.035, 0.18], [0, -1, 0]);
+    drawing = addJoint(frame.drawing, onGround, frame.id, { kind: 'hinge', mate: false, name: 'Pin' }).drawing;
+    // Walked from the Ground, the arm hangs from the new pin, and the pivot closes the loop.
+    assert.equal(structure(drawing).loops[0].name, 'Pivot');
+    const { run } = await matchesReference('pinned', drawing, { Pin: 'Arm' }, 1);
+    for (const axis of ['x', 'y', 'z']) {
+        const values = run.series(`Arm.${axis}`);
+        assert.ok(Math.max(...values) - Math.min(...values) < 1e-6, `Held at both ends, the arm should not move along ${axis}.`);
+    }
+    // The pivot holds half the arm's weight.
+    const holding = run.series('Arm.closureForce3').at(-1);
+    assert.ok(Math.abs(Math.abs(holding) - massOf(solidNamed(drawing, 'Arm')) * 9.81 / 2) < 1e-3, `The pivot should hold half the arm's weight, not ${holding} N.`);
 });
 
 test('friction, armature, a torque drive and every shape reach the motion as drawn', async () => {
@@ -143,15 +259,22 @@ test('a joint stops at its limit', async () => {
     assert.ok(Math.abs(angles.at(-1) - 0.4) < 0.02, `It should rest against its limit, not at ${angles.at(-1)} rad.`);
 });
 
-test('a drawn robot resumed from a checkpoint carries on exactly as the run that never stopped', async () => {
-    const drawing = exampleDrawing('cartPendulums');
-    const whole = await runDocument(directory, 'whole', build(drawing, 2));
-    const checkpoint = whole.result.checkpoints.find((candidate) => Math.abs(candidate.time - 1) < 1e-9);
-    assert.ok(checkpoint, 'The run kept no checkpoint at 1 s.');
-    const resumed = await runDocument(directory, 'resumed', build(drawing, 2), { startCheckpoint: checkpoint });
-    for (const key of ['Cart.jointPosition', 'Front pendulum.jointAngle', 'Back pendulum.yaw']) {
-        const original = new Map(whole.times.map((time, index) => [time.toFixed(6), whole.series(key)[index]]));
-        resumed.times.forEach((time, index) => assert.equal(resumed.series(key)[index], original.get(time.toFixed(6)), `${key} at ${time} s.`));
+test('a drawn robot resumed from a checkpoint carries on exactly as the run that never stopped, a closed loop and ball joints too', async () => {
+    const cases = [
+        ['cartPendulums', ['Cart.jointPosition', 'Front pendulum.jointAngle', 'Back pendulum.yaw']],
+        ['fourBar', ['Crank.jointAngle', 'Rocker.closureForce1', 'Coupler.yaw']],
+        ['ballPendulum', ['Lower link.jointTurnX', 'Upper link.jointSpeed2']]
+    ];
+    for (const [id, keys] of cases) {
+        const drawing = exampleDrawing(id);
+        const whole = await runDocument(directory, `${id}Whole`, build(drawing, 2));
+        const checkpoint = whole.result.checkpoints.find((candidate) => Math.abs(candidate.time - 1) < 1e-9);
+        assert.ok(checkpoint, `${id}: the run kept no checkpoint at 1 s.`);
+        const resumed = await runDocument(directory, `${id}Resumed`, build(drawing, 2), { startCheckpoint: checkpoint });
+        for (const key of keys) {
+            const original = new Map(whole.times.map((time, index) => [time.toFixed(6), whole.series(key)[index]]));
+            resumed.times.forEach((time, index) => assert.equal(resumed.series(key)[index], original.get(time.toFixed(6)), `${id}: ${key} at ${time} s.`));
+        }
     }
 });
 
@@ -198,8 +321,9 @@ test('every equation a build writes reads back in the canvas as the same express
     };
     let seed = 3;
     const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 1.6 - 0.8;
-    for (const { id } of examples) {
-        for (const edge of buildModel(exampleDrawing(id)).document.edges) {
+    // Every example, and a solid joined to nothing (its free joint's six axes solved through L D Lᵀ).
+    for (const [id, drawing] of [...examples.map(({ id: exampleId }) => [exampleId, exampleDrawing(exampleId)]), ['floating', floatingDrawing()]]) {
+        for (const edge of buildModel(drawing).document.edges) {
             const { bindings, definitions, outputs } = edge.equationModel;
             const readable = bindings.map(({ symbol }) => ({ symbol }));
             const values = new Map(bindings.map(({ symbol }) => [symbol, random()]));

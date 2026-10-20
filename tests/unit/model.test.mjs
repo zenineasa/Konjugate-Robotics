@@ -110,24 +110,43 @@ test('add and multiply take lists of terms, but keep an expression whole', () =>
     assert.deepEqual(add(1, 2), 3);
 });
 
-test('what Build cannot simulate yet is said plainly: a ball joint, a loop, a solid joined to nothing', () => {
-    let drawing = exampleDrawing('pendulum');
-    const arm = drawing.solids.find(({ name }) => name === 'Arm').id;
-    assert.deepEqual(simulationLimits(drawing), []);
-    // Its far end pinned to the Ground as well: a loop.
-    let frame = addFrameAt(drawing, 'ground', [0.2, 0.035, 0.18], [0, 1, 0]);
-    drawing = frame.drawing;
-    const groundFrame = frame.id;
-    frame = addFrameAt(drawing, arm, [0.2, 0.035, 0.18], [0, -1, 0]);
-    const looped = addJoint(frame.drawing, groundFrame, frame.id, { kind: 'hinge', mate: false, name: 'Pin' }).drawing;
-    // Which of the loop's joints closes it is the one the tree from the Ground reaches last.
-    assert.match(simulationLimits(looped)[0].message, /^(Pin|Pivot) closes a loop, which cannot be simulated yet/);
-    assert.throws(() => buildModel(looped), /closes a loop/);
+test('a ball joint, a solid joined to nothing and one closed loop build; a fixed joint closing a loop, or a second loop, is said plainly', () => {
     const pendulum = exampleDrawing('pendulum');
+    const arm = pendulum.solids.find(({ name }) => name === 'Arm').id;
+    assert.deepEqual(simulationLimits(pendulum), []);
+    // A ball: three speeds and a turn on the arm's node, integrated speeds first.
     const ball = updateJoint(pendulum, pendulum.joints.find(({ name }) => name === 'Pivot').id, { kind: 'ball' });
-    assert.match(simulationLimits(ball)[0].message, /ball joints cannot be simulated yet/);
+    const ballModel = buildModel(ball).document;
+    const armNode = ballModel.nodes.find(({ name }) => name === 'Arm');
+    assert.deepEqual(armNode.states.slice(0, 7).map(({ symbol }) => symbol), ['jointSpeed1', 'jointSpeed2', 'jointSpeed3', 'jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ']);
+    assert.deepEqual(armNode.sourceTerms.map(({ state }) => state), ['jointSpeed1', 'jointSpeed2', 'jointSpeed3', 'jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ']);
+    // Joined to nothing: a free joint from the Ground, a relationship like any other.
     const floating = { ...pendulum, joints: [], frames: [] };
-    assert.equal(simulationLimits(floating).length, 2);
+    const floatingModel = buildModel(floating).document;
+    assert.deepEqual(floatingModel.edges.map(({ name }) => name), ['Post floating', 'Arm floating']);
+    assert.deepEqual(floatingModel.nodes.find(({ name }) => name === 'Post').sourceTerms.map(({ state }) => state),
+        ['w1', 'w2', 'w3', 'v1', 'v2', 'v3', 'x', 'y', 'z', 'turnW', 'turnX', 'turnY', 'turnZ']);
+    // Its far end pinned to the Ground as well: a loop, closed by a relationship of its own.
+    let frame = addFrameAt(pendulum, 'ground', [0.2, 0.035, 0.18], [0, 1, 0]);
+    const groundFrame = frame.id;
+    frame = addFrameAt(frame.drawing, arm, [0.2, 0.035, 0.18], [0, -1, 0]);
+    const looped = addJoint(frame.drawing, groundFrame, frame.id, { kind: 'hinge', mate: false, name: 'Pin' }).drawing;
+    assert.deepEqual(simulationLimits(looped), []);
+    const loopModel = buildModel(looped).document;
+    assert.deepEqual(loopModel.edges.map(({ name }) => name).sort(), ['Mount', 'Pin', 'Pivot']);
+    assert.ok(loopModel.nodes.find(({ name }) => name === 'Arm').states.some(({ symbol }) => symbol === 'closureForce1'));
+    // Which of the loop's joints closes it is the one the tree from the Ground reaches last.
+    const closing = structure(looped).loops[0];
+    assert.match(simulationLimits(updateJoint(looped, closing.id, { kind: 'fixed' }))[0].message, /closes a loop as a fixed joint, which cannot be simulated yet/);
+    // A second loop: the four-bar's crank pinned to its rocker as well.
+    const fourBar = exampleDrawing('fourBar');
+    const [crank, rocker] = ['Crank', 'Rocker'].map((name) => fourBar.solids.find((solid) => solid.name === name).id);
+    frame = addFrameAt(fourBar, crank, [0.03, 0, 0.25], [0, 1, 0]);
+    const onCrank = frame.id;
+    frame = addFrameAt(frame.drawing, rocker, [0.03, 0, 0.25], [0, -1, 0]);
+    const twice = addJoint(frame.drawing, onCrank, frame.id, { kind: 'hinge', mate: false, name: 'Second pin' }).drawing;
+    assert.match(simulationLimits(twice)[0].message, /closes a second loop; one loop can be simulated so far/);
+    assert.throws(() => buildModel(twice), /second loop/);
 });
 
 test('a drawing with an error is not built, and says why', () => {
@@ -140,12 +159,17 @@ test('the importer builds from the window\'s drawing, and opens a drawing from a
     assert.equal(built.ok, true);
     assert.match(built.report.summary, /Cart and pendulums: 4 solids and 4 joints/);
     assert.equal(built.document.runConfigurations[0].globalTimeStep, 0.001);
-    const refusedLoop = await importDrawing({ options: { step: 'build', drawing: { ...exampleDrawing('pendulum'), joints: [] , frames: [] } } });
-    assert.match(refusedLoop.report.errors[0], /not joined to the Ground/);
+    const floating = await importDrawing({ options: { step: 'build', drawing: { ...exampleDrawing('pendulum'), joints: [], frames: [] } } });
+    assert.equal(floating.ok, true);
+    assert.match(floating.report.warnings.join(' '), /Post is not joined to the Ground, so it falls freely/);
+    const pendulum = exampleDrawing('pendulum');
+    const fixedPivot = updateJoint(pendulum, pendulum.joints.find(({ name }) => name === 'Pivot').id, { kind: 'fixed' });
+    const refused = await importDrawing({ options: { step: 'build', drawing: { ...fixedPivot, solids: [], frames: [], joints: [] } } });
+    assert.match(refused.report.errors[0], /Add a solid to start/);
     const opened = await importDrawing({ files: [{ role: 'drawing', name: 'arm.json', text: JSON.stringify(exampleDrawing('pendulum')) }], options: { step: 'open' } });
     assert.equal(opened.data.drawing.name, 'Pendulum');
-    const refused = await importDrawing({ files: [{ role: 'drawing', name: 'x.json', text: '{}' }], options: { step: 'open' } });
-    assert.match(refused.report.errors[0], /x\.json is not a drawing this window can open/);
+    const unreadable = await importDrawing({ files: [{ role: 'drawing', name: 'x.json', text: '{}' }], options: { step: 'open' } });
+    assert.match(unreadable.report.errors[0], /x\.json is not a drawing this window can open/);
 });
 
 test('shapes: volumes, outward normals, snap points on the surface, and closed meshes', () => {

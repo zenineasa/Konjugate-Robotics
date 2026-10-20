@@ -404,7 +404,7 @@ export function checkDrawing(drawing) {
     const built = structure(drawing);
     for (const joint of built.loops) {
         if (joint.kind === 'slider') errors.push({ id: joint.id, message: `${joint.name}: a slider cannot close a loop yet. Make it a hinge, a ball or fixed, or remove another joint of the loop.` });
-        else notes.push({ id: joint.id, message: `${joint.name} closes a loop: it holds its two solids together at its point${joint.kind === 'fixed' ? ', fixed' : ''}, and turns freely.` });
+        else if (joint.kind !== 'fixed') notes.push({ id: joint.id, message: `${joint.name} closes a loop: Build holds its two solids together at its point, free to turn there${joint.kind === 'hinge' ? ' (about its axis when the loop\'s other joints turn about the same axis, as in a planar linkage)' : ''}.` });
         if (joint.drive?.mode && joint.drive.mode !== 'free') errors.push({ id: joint.id, message: `${joint.name} closes a loop, so it cannot be driven; drive another joint of the loop.` });
     }
     for (const root of built.roots) {

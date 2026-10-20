@@ -61,6 +61,7 @@ export const sin = unary('Sin', Math.sin);
 export const cos = unary('Cos', Math.cos);
 export const tanh = unary('Tanh', Math.tanh);
 export const asin = unary('Arcsin', Math.asin);
+export const sqrt = unary('Sqrt', Math.sqrt);
 export const atan2 = (y, x) => (isNumber(y) && isNumber(x) ? round(Math.atan2(y, x)) : ['Arctan2', y, x]);
 export const min = (a, b) => ['Min', a, b];
 export const max = (a, b) => ['Max', a, b];
@@ -125,6 +126,7 @@ export function toLatex(expression) {
     case 'Multiply': return operands.map(factor).join('\\cdot ');
     case 'Negate': return `-${factor(operands[0])}`;
     case 'Divide': return `\\frac{${toLatex(operands[0])}}{${toLatex(operands[1])}}`;
+    case 'Sqrt': return `\\sqrt{${toLatex(operands[0])}}`;
     case 'Which': {
         const rows = [];
         for (let index = 0; index < operands.length; index += 2) rows.push(`${toLatex(operands[index + 1])}&${toLatex(operands[index])}`);
@@ -168,6 +170,7 @@ export function evaluate(expression, values) {
     case 'Cos': return Math.cos(value[0]);
     case 'Tanh': return Math.tanh(value[0]);
     case 'Arcsin': return Math.asin(value[0]);
+    case 'Sqrt': return Math.sqrt(value[0]);
     case 'Arctan2': return Math.atan2(value[0], value[1]);
     case 'Min': return Math.min(value[0], value[1]);
     case 'Max': return Math.max(value[0], value[1]);

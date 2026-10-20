@@ -1,8 +1,8 @@
 /* Copyright © 2026 Zenin Easa Panthakkalakath */
 
 // Drawings to start from, built with the same operations a user's clicks make (lib/drawing.mjs), so each is a drawing
-// like any other: a pendulum, a two-link arm on a turning waist, a cart on a rail carrying two pendulums, and an arm
-// reaching out with a two-finger gripper.
+// like any other: a pendulum, a two-link arm on a turning waist, a cart on a rail carrying two pendulums, an arm
+// reaching out with a two-finger gripper, a four-bar linkage (a closed loop) and a pendulum on two ball joints.
 
 import { addFrameAt, addJoint, addSolid, createDrawing, updateJoint, updateSolid } from './drawing.mjs';
 import { add, between, length, normalize, scale, subtract } from './math.mjs';
@@ -11,7 +11,9 @@ export const examples = Object.freeze([
     { id: 'pendulum', name: 'Pendulum', description: 'An arm on a post, free to swing: let it go and watch it fall and swing back.' },
     { id: 'twoLinkArm', name: 'Two-link arm', description: 'A waist, a shoulder and an elbow, each held by a servo at its setpoint: move the sliders in the canvas.' },
     { id: 'cartPendulums', name: 'Cart and pendulums', description: 'A servo slides a cart along a rail; the two pendulums hanging from it swing as it starts and stops.' },
-    { id: 'gripperArm', name: 'Arm with gripper', description: 'A waist, a shoulder, an elbow and a wrist reach out with a two-finger gripper, each held by a servo: run it and the arm turns while the fingers close.' }
+    { id: 'gripperArm', name: 'Arm with gripper', description: 'A waist, a shoulder, an elbow and a wrist reach out with a two-finger gripper, each held by a servo: run it and the arm turns while the fingers close.' },
+    { id: 'fourBar', name: 'Four-bar linkage', description: 'A crank, a coupler and a rocker on a base, the coupler pinned to the rocker to close the loop: a steady torque turns the crank round and the rocker rocks.' },
+    { id: 'ballPendulum', name: 'Ball-joint pendulum', description: 'Two links hanging from ball joints, let go out of line with each other, so they swing and twist in three dimensions.' }
 ]);
 
 // Places a solid, then turns and moves it to `position` and `rotation`.
@@ -172,6 +174,57 @@ export function exampleDrawing(id) {
             });
         }
         return drawing;
+    }
+    if (id === 'fourBar') {
+        let drawing = createDrawing('Four-bar linkage');
+        let result = place(drawing, 'box', { name: 'Base', size: { x: 0.26, y: 0.02, z: 0.02 }, position: [0.1, -0.03, 0.2], color: '#5f6f80' });
+        drawing = result.drawing;
+        const base = result.id;
+        drawing = join(drawing, 'ground', base, [0.1, -0.03, 0.19], [0, 0, 1], 'fixed', 'Mount').drawing;
+        // A crank-rocker: the crank (60 mm) is the shortest link, beside the base's 200 mm, so it turns all the way round
+        // while the 150 mm rocker rocks.
+        const crankPivot = [0, 0, 0.2];
+        const rockerPivot = [0.2, 0, 0.2];
+        const crankPin = add(crankPivot, scale([Math.cos(1.05), 0, Math.sin(1.05)], 0.06));
+        const rockerPin = add(rockerPivot, scale([Math.cos(1.75), 0, Math.sin(1.75)], 0.15));
+        result = rod(drawing, { name: 'Crank', from: crankPivot, to: crankPin, radius: 0.008, color: '#d08b4a' });
+        drawing = result.drawing;
+        const crank = result.id;
+        result = join(drawing, base, crank, crankPivot, [0, 1, 0], 'hinge', 'Crank pivot');
+        drawing = updateJoint(result.drawing, result.id, { damping: 0.01, drive: { mode: 'torque', torque: 0.05 } });
+        result = rod(drawing, { name: 'Rocker', from: rockerPivot, to: rockerPin, radius: 0.008, color: '#6aa86a' });
+        drawing = result.drawing;
+        const rocker = result.id;
+        result = join(drawing, base, rocker, rockerPivot, [0, 1, 0], 'hinge', 'Rocker pivot');
+        drawing = updateJoint(result.drawing, result.id, { damping: 0.0005 });
+        result = rod(drawing, { name: 'Coupler', from: crankPin, to: rockerPin, radius: 0.008, color: '#5b8db8' });
+        drawing = result.drawing;
+        const coupler = result.id;
+        result = join(drawing, crank, coupler, crankPin, [0, 1, 0], 'hinge', 'Coupler pin');
+        drawing = updateJoint(result.drawing, result.id, { damping: 0.0005 });
+        // The last joint closes the loop: Build holds the coupler's end to the rocker's.
+        return join(drawing, coupler, rocker, rockerPin, [0, 1, 0], 'hinge', 'Closing pin').drawing;
+    }
+    if (id === 'ballPendulum') {
+        let drawing = createDrawing('Ball-joint pendulum');
+        let result = place(drawing, 'box', { name: 'Post', size: { x: 0.04, y: 0.04, z: 0.3 }, position: [0, 0, 0.15], color: '#7d8fa3' });
+        drawing = result.drawing;
+        const post = result.id;
+        drawing = join(drawing, 'ground', post, [0, 0, 0], [0, 0, 1], 'fixed', 'Mount').drawing;
+        // The upper link leans out one way, the lower one another, so the two swing out of any one plane.
+        const top = [0, 0, 0.3];
+        const middle = [0.12, 0.05, 0.22];
+        const end = [0.15, 0.17, 0.12];
+        result = rod(drawing, { name: 'Upper link', from: top, to: middle, radius: 0.012, color: '#d08b4a' });
+        drawing = result.drawing;
+        const upper = result.id;
+        result = join(drawing, post, upper, top, [0, 0, 1], 'ball', 'Shoulder');
+        drawing = updateJoint(result.drawing, result.id, { damping: 0.0005 });
+        result = beam(drawing, { name: 'Lower link', from: middle, to: end, width: 0.02, depth: 0.05, color: '#5b8db8' });
+        drawing = result.drawing;
+        const lower = result.id;
+        result = join(drawing, upper, lower, middle, [0, 0, 1], 'ball', 'Elbow');
+        return updateJoint(result.drawing, result.id, { damping: 0.0005, friction: 0.0002 });
     }
     throw new Error(`There is no example "${id}".`);
 }
