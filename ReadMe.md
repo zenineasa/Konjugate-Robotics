@@ -1,6 +1,6 @@
 # Konjugate Robotics Toolbox
 
-Draw a robot, and get a [Konjugate](https://github.com/zenineasa/Konjugate) model of it. A simple CAD-like window: place solids, click a point on one solid and a point on another to join them, say how they join and what drives each joint, and press Build. In the canvas, **each solid is a node and each joint is an edge between two solids**, so the robot can be wired to motors, batteries, controllers and anything else Konjugate models, then run, driven with sliders, forked, fitted and optimised. The robot moves by its joints' own equations (Featherstone's articulated-body method, split along the joints), which Konjugate's engine runs like any other: nothing outside the graph solves it, and every equation can be read on its edge.
+Draw a robot, and get a [Konjugate](https://github.com/zenineasa/Konjugate) model of it. A simple CAD-like window: place solids, click a point on one solid and a point on another to join them, say how they join and what drives each joint, and press Build. In the canvas, **each solid is a node and each joint is an edge between two solids**, so the robot can be wired to motors, batteries, controllers and anything else Konjugate models, then run, driven with sliders, forked, fitted and optimised. The robot moves by its joints' own equations (Featherstone's articulated-body method, split along the joints), which Konjugate's engine runs like any other: nothing outside the graph solves it, and every equation can be read and edited on its edge in the canvas.
 
 ## Status
 
@@ -17,11 +17,11 @@ Build, then run the model in the canvas. Nothing else is needed: no Python, no s
 
 ## Building from source
 
-This repository builds against a sibling checkout of Konjugate (`KONJUGATE_DIR` overrides that), with its engine built for the engine tests:
+This repository builds against a sibling checkout of Konjugate (`KONJUGATE_DIR` overrides that), with its engine built for the engine tests. Konjugate loads the toolbox only when it is at least `minimumKonjugateVersion` in `package.json`; `install:dev` warns when the checkout is older, since the toolbox is then installed but has no button:
 
 ```
 npm run build            # out/konjugate.robotics.toolbox-<version>.kja
-npm run install:dev      # builds and installs it into your local Konjugate
+npm run install:dev      # builds and installs it into your local Konjugate, removing the retired Robotics Engine plugin
 npm test                 # unit tests
 npm run test:window      # the window in a plain browser, as a Windows or Linux user and as a Mac user
 npm run test:engine      # drawn robots through Konjugate's engine, against a Newton-Euler reference

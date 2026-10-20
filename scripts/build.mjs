@@ -3,7 +3,7 @@
 // Builds the Robotics Toolbox add-on into out/ (konjugate.robotics.toolbox-<version>.kja): the window and its importer.
 // What it builds runs on Konjugate's engine alone, so there is no plugin or provider to ship with it.
 
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { konjugateModule, roboticsRoot } from './konjugatePaths.mjs';
@@ -34,3 +34,12 @@ await writeFile(toolboxTarget, createPackageArchive({
     files: toolboxFiles
 }));
 console.log(`Built ${toolboxTarget}`);
+
+// Archives of packages this repository no longer builds (the Robotics Engine plugin, retired) are removed from out/, so
+// nothing installs or signs them by mistake. Earlier builds of the toolbox itself are kept.
+for (const name of await readdir(outputDirectory)) {
+    if (/\.(kja|kjp)$/.test(name) && !name.startsWith(`${toolboxManifest.addonId}-`)) {
+        await rm(join(outputDirectory, name), { force: true });
+        console.log(`Removed out/${name}, a package this repository no longer builds`);
+    }
+}

@@ -81,46 +81,56 @@ export const cross = (a, b) => [
     subtract(multiply(a[0], b[1]), multiply(a[1], b[0]))
 ];
 
-// ---- LaTeX, for reading in the canvas -------------------------------------------------------------------------------
+// ---- LaTeX, for reading and editing in the canvas -------------------------------------------------------------------
+// Written as Konjugate's canvas writes MathJSON (its equationModel.mjs, mathJsonToLatex), so the canvas reads it back as
+// the same expression and a user can edit any equation Build wrote: a symbol of one letter as itself, a longer one
+// upright, a number in plain digits or as a power of ten, products with \cdot, the two-argument arctangent as
+// \arctan(y, x).
 
-const precedence = { Add: 1, Negate: 2, Multiply: 3, Divide: 3 };
+const latexFunctions = {
+    Sin: '\\sin', Cos: '\\cos', Tanh: '\\tanh', Arcsin: '\\arcsin', Min: '\\min', Max: '\\max', Arctan2: '\\arctan'
+};
+const latexComparisons = { Less: '<', Greater: '>' };
 
-function symbolLatex(name) {
-    // "ia14" reads as ia_{14}, "parentR12" as parentR_{12}.
-    const match = /^([A-Za-z]+?)(\d+)$/.exec(name);
-    const base = match ? match[1] : name;
-    const text = base.length > 1 ? `\\mathrm{${base}}` : base;
-    return match ? `${text}_{${match[2]}}` : text;
+function numberLatex(value) {
+    const text = String(value);
+    if (!/e/i.test(text)) return text;
+    const [mantissa, exponent] = value.toExponential().split('e');
+    return `${mantissa}\\times10^{${Number(exponent)}}`;
 }
 
-export function toLatex(expression, parent = 0) {
-    if (isNumber(expression)) {
-        const text = String(round(expression));
-        return expression < 0 && parent > 1 ? `(${text})` : text;
+const parenthesize = (text) => `\\left(${text}\\right)`;
+const isNegative = (expression) => (isNumber(expression) && expression < 0) || (Array.isArray(expression) && expression[0] === 'Negate');
+
+export function toLatex(expression) {
+    if (isNumber(expression)) return numberLatex(expression);
+    if (typeof expression === 'string') {
+        if (expression === 'True') return '\\text{otherwise}';
+        return expression.length === 1 ? expression : `\\mathrm{${expression}}`;
     }
-    if (typeof expression === 'string') return expression === 'True' ? '\\text{otherwise}' : symbolLatex(expression);
-    const [operator, ...args] = expression;
-    const wrap = (text, own) => (own < parent ? `\\left(${text}\\right)` : text);
+    const [operator, ...operands] = expression;
+    const factor = (operand) => {
+        const text = toLatex(operand);
+        return isNegative(operand) || (Array.isArray(operand) && operand[0] === 'Add') ? parenthesize(text) : text;
+    };
+    if (latexFunctions[operator]) return `${latexFunctions[operator]}${parenthesize(operands.map(toLatex).join(','))}`;
+    if (latexComparisons[operator]) return operands.map(toLatex).join(latexComparisons[operator]);
     switch (operator) {
-    case 'Add': return wrap(args.map((arg, index) => {
-        const text = toLatex(arg, 1);
-        return index && !text.startsWith('-') ? `+${text}` : text;
-    }).join(''), 1);
-    case 'Multiply': return wrap(args.map((arg) => toLatex(arg, 3)).join('\\,'), 3);
-    case 'Negate': return wrap(`-${toLatex(args[0], 3)}`, 2);
-    case 'Divide': return `\\frac{${toLatex(args[0])}}{${toLatex(args[1])}}`;
-    case 'Sin': case 'Cos': case 'Tanh': return `\\${operator.toLowerCase()}\\left(${toLatex(args[0])}\\right)`;
-    case 'Arcsin': return `\\arcsin\\left(${toLatex(args[0])}\\right)`;
-    case 'Arctan2': return `\\operatorname{atan2}\\left(${toLatex(args[0])},${toLatex(args[1])}\\right)`;
-    case 'Min': case 'Max': return `\\${operator.toLowerCase()}\\left(${toLatex(args[0])},${toLatex(args[1])}\\right)`;
-    case 'Greater': return `${toLatex(args[0])}>${toLatex(args[1])}`;
-    case 'Less': return `${toLatex(args[0])}<${toLatex(args[1])}`;
+    case 'Add': return operands.map((operand, index) => {
+        if (index === 0) return toLatex(operand);
+        if (isNumber(operand) && operand < 0) return numberLatex(operand);
+        if (Array.isArray(operand) && operand[0] === 'Negate') return `-${factor(operand[1])}`;
+        return `+${toLatex(operand)}`;
+    }).join('');
+    case 'Multiply': return operands.map(factor).join('\\cdot ');
+    case 'Negate': return `-${factor(operands[0])}`;
+    case 'Divide': return `\\frac{${toLatex(operands[0])}}{${toLatex(operands[1])}}`;
     case 'Which': {
         const rows = [];
-        for (let index = 0; index < args.length; index += 2) rows.push(`${toLatex(args[index + 1])} & ${toLatex(args[index])}`);
+        for (let index = 0; index < operands.length; index += 2) rows.push(`${toLatex(operands[index + 1])}&${toLatex(operands[index])}`);
         return `\\begin{cases}${rows.join('\\\\')}\\end{cases}`;
     }
-    default: return `\\operatorname{${operator}}\\left(${args.map((arg) => toLatex(arg)).join(',')}\\right)`;
+    default: throw new Error(`The operation ${operator} cannot be written as LaTeX.`);
     }
 }
 

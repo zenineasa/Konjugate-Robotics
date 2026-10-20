@@ -10,6 +10,7 @@
 
 import assert from 'node:assert/strict';
 import { mkdtemp } from 'node:fs/promises';
+import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -17,6 +18,7 @@ import { exampleDrawing } from '../../packages/toolbox/lib/examples.mjs';
 import { massOf, reverseJoint, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
 import { buildModel } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { konjugateModule } from '../../scripts/konjugatePaths.mjs';
 import { mujocoMissing, runDocument, runReference } from './harness.mjs';
 import { simulate } from './newtonEuler.mjs';
 
@@ -150,6 +152,45 @@ test('MuJoCo on its own swings the same pendulum and holds the same arm, to with
             const difference = largestDifference(values, reference[joint.id]);
             console.log(`${id} ${joint.name}: Konjugate and MuJoCo differ by up to ${difference.toExponential(2)}.`);
             assert.ok(difference < mujocoBound, `${id}: ${joint.name} differs from MuJoCo alone by ${difference}.`);
+        }
+    }
+});
+
+// Every equation Build writes can be edited by a user in the canvas: its LaTeX reads back, in Konjugate's own parser, as
+// an expression giving the same value as the MathJSON the engine runs.
+test('every equation a build writes reads back in the canvas as the same expression', async () => {
+    const { validateEquationLatex } = await import(pathToFileURL(konjugateModule('src/equationModel.mjs')));
+    const evaluate = (expression, values) => {
+        if (typeof expression === 'number') return expression;
+        if (typeof expression === 'string') return expression === 'True' ? 1 : values.get(expression);
+        const [operator, ...operands] = expression;
+        if (operator === 'Which') {
+            for (let index = 0; index < operands.length; index += 2) if (evaluate(operands[index], values)) return evaluate(operands[index + 1], values);
+            return Number.NaN;
+        }
+        const v = operands.map((operand) => evaluate(operand, values));
+        return {
+            Add: () => v.reduce((a, b) => a + b, 0), Multiply: () => v.reduce((a, b) => a * b, 1), Negate: () => -v[0], Subtract: () => v[0] - v[1],
+            Divide: () => v[0] / v[1], Power: () => v[0] ** v[1], Sqrt: () => Math.sqrt(v[0]), Sin: () => Math.sin(v[0]), Cos: () => Math.cos(v[0]),
+            Tanh: () => Math.tanh(v[0]), Arcsin: () => Math.asin(v[0]), Arctan2: () => Math.atan2(v[0], v[1]), Min: () => Math.min(...v), Max: () => Math.max(...v),
+            Less: () => Number(v[0] < v[1]), Greater: () => Number(v[0] > v[1]), LessEqual: () => Number(v[0] <= v[1]), GreaterEqual: () => Number(v[0] >= v[1])
+        }[operator]();
+    };
+    let seed = 3;
+    const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 1.6 - 0.8;
+    for (const id of ['pendulum', 'twoLinkArm', 'cartPendulums']) {
+        for (const edge of buildModel(exampleDrawing(id)).document.edges) {
+            const { bindings, definitions, outputs } = edge.equationModel;
+            const readable = bindings.map(({ symbol }) => ({ symbol }));
+            const values = new Map(bindings.map(({ symbol }) => [symbol, random()]));
+            for (const item of [...definitions, ...outputs]) {
+                const validation = validateEquationLatex(item.latex, readable);
+                assert.equal(validation.valid, true, `${id}, ${edge.name}: ${item.latex} ${validation.errors.join(' ')}`);
+                const expected = evaluate(item.mathJson, values);
+                const actual = evaluate(validation.mathJson, values);
+                assert.ok(Math.abs(expected - actual) <= 1e-9 * Math.max(1, Math.abs(expected)), `${id}, ${edge.name}: ${item.latex} gives ${actual}, not ${expected}.`);
+                if (item.symbol) { readable.push({ symbol: item.symbol }); values.set(item.symbol, expected); }
+            }
         }
     }
 });
