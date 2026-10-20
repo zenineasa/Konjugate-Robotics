@@ -94,7 +94,6 @@ const stateNames = {
     jointSpeed1: 'Joint angular velocity x', jointSpeed2: 'Joint angular velocity y', jointSpeed3: 'Joint angular velocity z',
     jointTurnW: 'Joint turn w', jointTurnX: 'Joint turn x', jointTurnY: 'Joint turn y', jointTurnZ: 'Joint turn z',
     turnW: 'Turn w', turnX: 'Turn x', turnY: 'Turn y', turnZ: 'Turn z',
-    closureForce1: 'Closure force x', closureForce2: 'Closure force y', closureForce3: 'Closure force z', closureGap: 'Closure gap',
     kineticEnergy: 'Kinetic energy', potentialEnergy: 'Potential energy'
 };
 const stateName = (symbol) => stateNames[symbol]
@@ -102,28 +101,43 @@ const stateName = (symbol) => stateNames[symbol]
         : symbol.startsWith('ia') ? `Articulated inertia ${symbol.slice(2)}` : symbol.startsWith('pa') ? `Articulated bias force ${symbol.slice(2)}`
             : symbol.startsWith('lp') ? `Loop bias sensitivity ${symbol.slice(2)}` : symbol.startsWith('la') ? `Loop acceleration sensitivity ${symbol.slice(2)}`
                 : symbol.startsWith('dp') ? `Loop bias change ${symbol.slice(2)}` : symbol.startsWith('da') ? `Loop acceleration change ${symbol.slice(2)}`
+                    : symbol.startsWith('kr') ? `Loop coupling ${symbol.slice(2)}` : symbol.startsWith('kb') ? `Loop wanted acceleration ${symbol.slice(2)}`
+                        : symbol.startsWith('lam') ? `Loop force ${symbol.slice(3)}`
                     : symbol.startsWith('a') ? `Spatial acceleration ${symbol.slice(1)}` : symbol.startsWith('r') ? `Rotation ${symbol.slice(1)}` : symbol);
 
-// The loop's sensitivities: a 6 by 3 matrix each (how a solid's bias force, or its acceleration, moves with the force
-// that closes the loop), and the changes that force makes.
-const sensitivitySymbols = (prefix) => [1, 2, 3, 4, 5, 6].map((row) => [1, 2, 3].map((column) => `${prefix}${row}${column}`));
-const loopBiasSymbols = sensitivitySymbols('lp');
-const loopAccelerationSymbols = sensitivitySymbols('la');
+// The loops' sensitivities: a 6 by R matrix each (how a solid's bias force, or its acceleration, moves with the R
+// components of the forces that close the loops), the changes those forces make, and what is gathered to find them: the
+// R by R coupling K (how each loop's held motion moves with each component), the accelerations wanted, and the forces.
+const sensitivitySymbols = (prefix, count) => [1, 2, 3, 4, 5, 6].map((row) => Array.from({ length: count }, (_, column) => `${prefix}${row}c${column + 1}`));
+const couplingSymbols = (count) => Array.from({ length: count }, (_, row) => Array.from({ length: count }, (__, column) => `kr${row + 1}c${column + 1}`));
+const wantedSymbols = (count) => Array.from({ length: count }, (_, row) => `kb${row + 1}`);
+const forceSymbols = (count) => Array.from({ length: count }, (_, row) => `lam${row + 1}`);
+// What a joint closing a loop holds, by kind: its point (three linear rows) or the turn about its axes (angular rows),
+// along the first solid's frame axes t1, t2 and n (n the joint's axis). A ball holds its point; a hinge its point and its
+// axis; a slider its axis's line and the turn; a fixed joint everything.
+const closureRows = {
+    ball: [['linear', 0], ['linear', 1], ['linear', 2]],
+    hinge: [['linear', 0], ['linear', 1], ['linear', 2], ['angular', 0], ['angular', 1]],
+    slider: [['linear', 0], ['linear', 1], ['angular', 0], ['angular', 1], ['angular', 2]],
+    fixed: [['linear', 0], ['linear', 1], ['linear', 2], ['angular', 0], ['angular', 1], ['angular', 2]]
+};
+
+// Two unit directions square to `n` and to each other, so (t1, t2, n) is a right-handed frame.
+export function closureFrame(n) {
+    const smallest = [0, 1, 2].reduce((best, axis) => (Math.abs(n[axis]) < Math.abs(n[best]) ? axis : best), 0);
+    const t1 = normalize(cross3(n, [0, 1, 2].map((axis) => (axis === smallest ? 1 : 0))));
+    return [t1, cross3(n, t1), n];
+}
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const biasChangeSymbols = ['dp1', 'dp2', 'dp3', 'dp4', 'dp5', 'dp6'];
 const accelerationChangeSymbols = ['da1', 'da2', 'da3', 'da4', 'da5', 'da6'];
 const turnSymbols = { ball: ['jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ'], free: ['turnW', 'turnX', 'turnY', 'turnZ'] };
 const degreesOfFreedom = { hinge: 1, slider: 1, ball: 3, free: 6, fixed: 0 };
 
-// The reasons a drawing cannot be simulated yet by this builder (beyond checkDrawing's), each { id, message }.
-export function simulationLimits(drawing) {
-    const built = structure(drawing);
-    const limits = [];
-    const [first, ...others] = built.loops;
-    if (first?.kind === 'fixed') limits.push({ id: first.id, message: `${first.name} closes a loop as a fixed joint, which cannot be simulated yet; make it a hinge or a ball, or remove another joint of the loop.` });
-    for (const joint of others) {
-        limits.push({ id: joint.id, message: `${joint.name} closes a second loop; one loop can be simulated so far. Remove it or another joint of its loop.` });
-    }
-    return limits;
+// The reasons a drawing cannot be simulated yet by this builder (beyond checkDrawing's), each { id, message }: none, now
+// that every kind of joint can close a loop and a robot may have any number of them; kept for what comes next.
+export function simulationLimits() {
+    return [];
 }
 
 // A unit quaternion's rotation matrix (rows), from a quaternion that may have drifted from unit length: each entry over
@@ -192,17 +206,29 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
         return [solidId, built.parentJoint.get(solidId) ?? { joint: { id: `free:${solidId}`, kind: 'free', name: `${solid.name} floating` }, parent: groundId, child: solidId }];
     }));
 
-    // ---- the loop, if the drawing closes one ---------------------------------------------------------------------------
-    // The solids from each of its two ends back towards the Ground (`path`) carry its sensitivities; every solid below
-    // one of them (`affected`) moves with the force that closes it.
-    const [closing] = built.loops;
-    const loop = closing ? { joint: closing, ends: [closing.parent, closing.child].map((frameId) => frameById(drawing, frameId)) } : null;
+    // ---- the loops the drawing closes -------------------------------------------------------------------------------
+    // Each closing joint holds some rows of motion (closureRows), R in all. The solids from each loop's two ends back
+    // towards the Ground (`path`) carry the sensitivities; every solid below one of them (`affected`) moves with the
+    // forces; and from each loop's holder (its second end, or its first when the second is the Ground) back to the
+    // Ground (`gather`), what finds the forces is gathered into the Ground and the forces handed back.
+    const loopKeys = new Set();
+    let offset = 0;
+    const loops = built.loops.map((joint) => {
+        const ends = [joint.parent, joint.child].map((frameId) => frameById(drawing, frameId));
+        const rows = closureRows[joint.kind];
+        const loop = { joint, ends, rows, offset, key: camelKey(joint.name, loopKeys, 'loop'), holderId: ends[1].solid === groundId ? ends[0].solid : ends[1].solid };
+        offset += rows.length;
+        return loop;
+    });
+    const R = offset;
     const path = new Set();
     const affected = new Set();
-    if (loop) {
+    const gather = new Set();
+    for (const loop of loops) {
         for (const { solid } of loop.ends) for (let at = solid; at !== groundId; at = parentOf.get(at).parent) path.add(at);
-        for (const { id: solidId } of order) if (path.has(solidId) || affected.has(parentOf.get(solidId).parent)) affected.add(solidId);
+        for (let at = loop.holderId; at !== groundId; at = parentOf.get(at).parent) gather.add(at);
     }
+    for (const { id: solidId } of order) if (path.has(solidId) || affected.has(parentOf.get(solidId).parent)) affected.add(solidId);
 
     // ---- nodes ---------------------------------------------------------------------------------------------------
     const nodes = new Map();
@@ -240,6 +266,10 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
     velocityStates(ground);
     // Holding still under gravity is, in these terms, accelerating upward at g.
     accelerationSymbols.forEach((symbol, index) => addState(ground, symbol, index === 5 ? gravity : 0, index < 3 ? 'rad/s²' : 'm/s²'));
+    if (R) {
+        couplingSymbols(R).flat().forEach((symbol) => addState(ground, symbol, 0));
+        wantedSymbols(R).forEach((symbol) => addState(ground, symbol, 0));
+    }
     nodes.set(groundId, ground);
 
     const rows = new Map();
@@ -297,21 +327,29 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
         symmetric.forEach(([row, column]) => addState(node, inertiaSymbol(row, column), 0));
         biasSymbols.forEach((symbol) => addState(node, symbol, 0));
         if (path.has(solidId)) {
-            loopBiasSymbols.flat().forEach((symbol) => addState(node, symbol, 0));
-            loopAccelerationSymbols.flat().forEach((symbol) => addState(node, symbol, 0));
+            sensitivitySymbols('lp', R).flat().forEach((symbol) => addState(node, symbol, 0));
+            sensitivitySymbols('la', R).flat().forEach((symbol) => addState(node, symbol, 0));
             biasChangeSymbols.forEach((symbol) => addState(node, symbol, 0));
         }
         if (affected.has(solidId)) accelerationChangeSymbols.forEach((symbol) => addState(node, symbol, 0));
+        if (gather.has(solidId)) {
+            couplingSymbols(R).flat().forEach((symbol) => addState(node, symbol, 0));
+            wantedSymbols(R).forEach((symbol) => addState(node, symbol, 0));
+            forceSymbols(R).forEach((symbol) => addState(node, symbol, 0, ''));
+        }
         addState(node, 'kineticEnergy', 0, 'J');
         addState(node, 'potentialEnergy', 0, 'J');
         nodes.set(solid.id, node);
     }
-    if (loop) {
-        // The force that closes the loop, and the gap it closes, on the solid at its second end (or its first, when the
-        // second is the Ground).
-        const holder = nodes.get(loop.ends[1].solid === groundId ? loop.ends[0].solid : loop.ends[1].solid);
-        [1, 2, 3].forEach((axis) => addState(holder, `closureForce${axis}`, 0, 'N'));
-        addState(holder, 'closureGap', 0, 'm');
+    for (const loop of loops) {
+        // The force and moment the closing joint puts on its holder, and the gap and twist left, on the holder.
+        const holder = nodes.get(loop.holderId);
+        const angular = loop.rows.some(([type]) => type === 'angular');
+        const named = (symbol, name, unit) => { addState(holder, symbol, 0, unit).name = `${loop.joint.name} ${name}`; };
+        ['x', 'y', 'z'].forEach((axis, index) => named(`${loop.key}Force${index + 1}`, `force ${axis}`, 'N'));
+        if (angular) ['x', 'y', 'z'].forEach((axis, index) => named(`${loop.key}Moment${index + 1}`, `moment ${axis}`, 'N·m'));
+        named(`${loop.key}Gap`, 'gap', 'm');
+        if (angular) named(`${loop.key}Twist`, 'twist', 'rad');
         loop.holder = holder;
     }
     document.nodes.push(...nodes.values());
@@ -329,10 +367,10 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
     // ---- each joint, a relationship --------------------------------------------------------------------------------------
     for (const { id: childId } of order) {
         const { joint, parent: parentId } = parentOf.get(childId);
-        const roles = { onPath: path.has(childId), affected: affected.has(childId), parentAffected: affected.has(parentId) };
+        const roles = { onPath: path.has(childId), affected: affected.has(childId), parentAffected: affected.has(parentId), gathers: gather.has(childId), R, timeStep };
         document.edges.push(jointRelationship(drawing, joint, nodes.get(parentId), nodes.get(childId), parentId, childId, masses.get(childId), id, roles));
     }
-    if (loop) document.edges.push(closingRelationship(drawing, loop, nodes, path, id, timeStep));
+    for (const loop of loops) document.edges.push(closingRelationship(drawing, loop, nodes, path, R, id, timeStep));
     for (const node of document.nodes) delete node.bySymbol;
 
     const runConfigurationId = id();
@@ -438,7 +476,7 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     const linearUnits = { position: 'm', damping: 'N·s/m', friction: 'N', armature: 'kg', effort: 'N', stiffness: 'N/m' };
     const angularUnits = { position: 'rad', damping: 'N·m·s/rad', friction: 'N·m', armature: 'kg·m²', effort: 'N·m', stiffness: 'N·m/rad' };
     const units = slider ? linearUnits : angularUnits;
-    const drive = (hinge || slider) ? joint.drive ?? { mode: 'free' } : { mode: 'free' };
+    const drive = (hinge || slider || ball) ? joint.drive ?? { mode: 'free' } : { mode: 'free' };
     const range = (value, floor, minimum = null) => {
         const reach = Math.max(floor, Math.abs(value) * 2);
         return { minimum: round(Math.min(minimum ?? -reach, value)), maximum: round(Math.max(reach, value)), step: round(reach / 100) };
@@ -447,12 +485,25 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         parameter('damping', 'Damping', joint.damping ?? 0, units.damping, range(joint.damping ?? 0, slider ? 50 : 0.5, 0));
         parameter('friction', 'Friction', joint.friction ?? 0, units.friction, range(joint.friction ?? 0, slider ? 5 : 0.5, 0));
         parameter('armature', 'Armature', joint.armature ?? 0, units.armature);
+        parameter('step', 'Time step', roles.timeStep, 's');
         if (joint.limits && !ball) {
             parameter('lower', 'Lower limit', joint.limits.lower, units.position);
             parameter('upper', 'Upper limit', joint.limits.upper, units.position);
         }
-        if (drive.mode === 'torque') parameter('torque', slider ? 'Force' : 'Torque', drive.torque ?? 0, units.effort, range(drive.torque ?? 0, hinge ? 2 : 50));
-        if (drive.mode === 'servo') {
+        if (ball) {
+            // A ball's limit is its most turn from where it is drawn; its drive a torque about each of its parent's axes,
+            // or a servo turning it to a setpoint given as a turn vector (its axis, its length the angle).
+            if (joint.limits) parameter('mostTurn', 'Most turn', joint.limits.upper, 'rad');
+            const vector = (value) => [0, 1, 2].map((axis) => (Array.isArray(value) ? Number(value[axis]) || 0 : 0));
+            if (drive.mode === 'torque') vector(drive.torque).forEach((value, axis) => parameter(`torque${axis + 1}`, `Torque ${'xyz'[axis]}`, value, units.effort, range(value, 2)));
+            if (drive.mode === 'servo') {
+                vector(drive.setpoint).forEach((value, axis) => parameter(`setpoint${axis + 1}`, `Setpoint turn ${'xyz'[axis]}`, value, 'rad', { minimum: round(-Math.PI), maximum: round(Math.PI), step: round(Math.PI / 200) }));
+                parameter('stiffness', 'Servo stiffness', drive.gain, units.stiffness);
+                const limit = drive.torqueLimit;
+                parameter('torqueLimit', 'Servo torque limit', limit, units.effort, { minimum: round(limit / 100), maximum: round(limit * 3), step: round(limit / 100) });
+            }
+        } else if (drive.mode === 'torque') parameter('torque', slider ? 'Force' : 'Torque', drive.torque ?? 0, units.effort, range(drive.torque ?? 0, hinge ? 2 : 50));
+        if (drive.mode === 'servo' && !ball) {
             const travel = joint.limits ?? (hinge ? { lower: -Math.PI, upper: Math.PI } : { lower: -0.5, upper: 0.5 });
             const setpoint = Math.min(Math.max(drive.setpoint ?? 0, travel.lower), travel.upper);
             parameter('setpoint', 'Setpoint', setpoint, units.position, { minimum: round(travel.lower), maximum: round(travel.upper), step: round((travel.upper - travel.lower) / 400) });
@@ -580,13 +631,34 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     toChild('kineticEnergy', E.multiply(0.5, E.dot(velocity, momentum)));
     toChild('potentialEnergy', E.multiply(mass, gravity, centre[2]));
 
-    // The loop's states this relationship reads and passes on.
+    // The loops' states this relationship reads and passes on.
+    const loopBiasSymbols = sensitivitySymbols('lp', roles.R);
+    const loopAccelerationSymbols = sensitivitySymbols('la', roles.R);
+    const loopColumns = Array.from({ length: roles.R }, (_, column) => column);
     const loopBias = roles.onPath ? loopBiasSymbols.map((row) => row.map((symbol) => bind(childNode, 'target', symbol, 'c'))) : null;
     const biasChange = roles.onPath ? biasChangeSymbols.map((symbol) => bind(childNode, 'target', symbol, 'c')) : [0, 0, 0, 0, 0, 0];
     const parentOnPath = roles.onPath && !parentIsGround;
     const parentLoopAcceleration = parentOnPath ? loopAccelerationSymbols.map((row) => row.map((symbol) => bind(parentNode, 'source', symbol, 'p'))) : null;
     const parentAccelerationChange = roles.parentAffected ? accelerationChangeSymbols.map((symbol) => bind(parentNode, 'source', symbol, 'p')) : [0, 0, 0, 0, 0, 0];
     const columnOf = (matrix, column) => matrix.map((row) => row[column]);
+    // What finds the loops' forces is passed in towards the Ground and gathered there; on a solid hanging from the
+    // Ground, the forces are found from it (K + εI, by its L D Lᵀ factors) and handed out again, one solid to the next.
+    const passGathered = () => {
+        if (!roles.gathers) return;
+        const coupling = couplingSymbols(roles.R);
+        coupling.flat().forEach((symbol) => toParent(symbol, bind(childNode, 'target', symbol, 'c')));
+        wantedSymbols(roles.R).forEach((symbol) => toParent(symbol, bind(childNode, 'target', symbol, 'c')));
+        if (!parentIsGround) {
+            forceSymbols(roles.R).forEach((symbol) => toChild(symbol, bind(parentNode, 'source', symbol, 'p')));
+            return;
+        }
+        parameter('compliance', 'Loop compliance', closure.compliance, 'm/(s²·N)');
+        bindings.push({ symbol: 'compliance', kind: 'parameter', parameterId: parameters.at(-1).id });
+        const K = coupling.map((row, i) => row.map((symbol, j) => (j > i ? null : E.add(bind(parentNode, 'source', symbol, 'p'), i === j ? 'compliance' : 0))));
+        const solveLoops = symmetricSolver(define, 'kl', K.map((row, i) => row.map((_, j) => K[Math.max(i, j)][Math.min(i, j)])));
+        const forces = solveLoops(wantedSymbols(roles.R).map((symbol) => bind(parentNode, 'source', symbol, 'p')), 'lm');
+        forceSymbols(roles.R).forEach((symbol, index) => toChild(symbol, forces[index]));
+    };
 
     // The articulated inertia and bias force the child has (its own and what its children pass up), as bound.
     const articulatedRow = (row) => [1, 2, 3, 4, 5, 6].map((column) => IA(row, column));
@@ -605,14 +677,16 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
             loopAccelerationSymbols.forEach((row, r) => row.forEach((symbol, column) => toChild(symbol, parentOnPath ? parentLoopAcceleration[r][column] : 0)));
         }
         if (roles.affected) accelerationChangeSymbols.forEach((symbol, index) => toChild(symbol, parentAccelerationChange[index]));
+        passGathered();
         return relationshipEdge();
     }
 
-    // U = IA S, and D = Sᵀ U plus the armature on each axis.
+    // U = IA S, and D = Sᵀ U plus the armature on each axis, and the damping times the time step: the damping taken at
+    // the step's end speed (implicitly, as MuJoCo takes it), so a heavily damped light link stays stable.
     const projected = motions.map((motion, k) => defineAll(dof === 1 ? 'u' : `u${k + 1}r`, [1, 2, 3, 4, 5, 6].map((row) => E.dot(articulatedRow(row), motion))));
     const D = motions.map((motion, i) => projected.map((column, j) => {
         const entry = E.dot(motion, column);
-        return i === j && !free ? E.add(entry, 'armature') : entry;
+        return i === j && !free ? E.add(entry, 'armature', E.multiply('damping', 'step')) : entry;
     }));
     let solve;
     if (dof === 1) {
@@ -647,7 +721,39 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         forces = [define('tau', E.add(driveTorque, E.negate(E.multiply('damping', qd)), E.negate(E.multiply('friction', E.tanh(E.multiply(100, qd)))), limitTorque))];
         toChild('jointTorque', driveTorque);
     } else if (ball) {
-        forces = speeds.map((speed, k) => define(`tau${k + 1}`, E.add(E.negate(E.multiply('damping', speed)), E.negate(E.multiply('friction', E.tanh(E.multiply(100, speed)))))));
+        const [w, x, y, z] = turnSymbols.ball.map((symbol) => bind(childNode, 'target', symbol, 'c'));
+        let driveTorque = [0, 0, 0];
+        if (drive.mode === 'torque') driveTorque = ['torque1', 'torque2', 'torque3'];
+        if (drive.mode === 'servo') {
+            // The setpoint's quaternion d, the turn left to make (q ⊗ d*), and a torque of the stiffness times its sine
+            // about its axis (the stiffness times the angle, for a small turn), held to the servo's most torque.
+            const setpoint = ['setpoint1', 'setpoint2', 'setpoint3'];
+            const angle = define('sa', E.sqrt(E.dot(setpoint, setpoint)));
+            const factor = define('sf', E.cases([[E.greater(angle, 1e-9), E.divide(E.sin(E.multiply(0.5, angle)), angle)]], 0.5));
+            const dw = define('sw', E.cos(E.multiply(0.5, angle)));
+            const d = defineAll('sd', setpoint.map((value) => E.multiply(value, factor)));
+            const v = [x, y, z];
+            const ew = define('ew', E.add(E.multiply(w, dw), E.dot(v, d)));
+            const across = E.cross(v, d);
+            const ev = defineAll('ev', [0, 1, 2].map((axis) => E.subtract(E.subtract(E.multiply(dw, v[axis]), E.multiply(w, d[axis])), across[axis])));
+            const raw = defineAll('sr', ev.map((value) => E.multiply(-2, 'stiffness', ew, value)));
+            const held = define('sk', E.min(1, E.divide('torqueLimit', E.max(E.sqrt(E.dot(raw, raw)), 1e-12))));
+            driveTorque = defineAll('servo', raw.map((value) => E.multiply(value, held)));
+        }
+        let limitTorque = [0, 0, 0];
+        if (joint.limits) {
+            // Beyond its most turn, a stiff spring and damper back towards it along the turn's axis, through the joint's
+            // effective inertia D (so every way it turns is held alike, a thin link's spin as its swing).
+            const along = define('tv', E.max(E.sqrt(E.add(E.multiply(x, x), E.multiply(y, y), E.multiply(z, z))), 1e-12));
+            const scalar = define('tsw', E.max(E.sqrt(E.multiply(w, w)), 1e-12));
+            const turned = define('tth', E.multiply(2, E.atan2(along, scalar)));
+            const beyond = define('tb', E.cases([[E.greater(turned, 'mostTurn'), 1]], 0));
+            const push = defineAll('tu', [x, y, z].map((value, axis) => E.multiply(beyond, E.add(
+                E.multiply(10000, E.subtract(turned, 'mostTurn'), E.divide(E.multiply(value, w), E.multiply(along, scalar))), E.multiply(200, speeds[axis])))));
+            const entry = (i, j) => `dd${Math.min(i, j) + 1}${Math.max(i, j) + 1}`;
+            limitTorque = [0, 1, 2].map((i) => define(`tl${i + 1}`, E.negate(E.add([0, 1, 2].map((j) => E.multiply(entry(i, j), push[j]))))));
+        }
+        forces = speeds.map((speed, k) => define(`tau${k + 1}`, E.add(driveTorque[k], E.negate(E.multiply('damping', speed)), E.negate(E.multiply('friction', E.tanh(E.multiply(100, speed)))), limitTorque[k])));
     } else {
         forces = speeds.map(() => 0);
     }
@@ -691,14 +797,14 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     // is known, the change it makes (inward, then outward), added to the joint's acceleration.
     let accelerationChange = [0];
     if (roles.onPath) {
-        const passed = [0, 1, 2].map((column) => solve(motionTimes(columnOf(loopBias, column)), `pp${column + 1}`));
+        const passed = loopColumns.map((column) => solve(motionTimes(columnOf(loopBias, column)), `pp${column + 1}`));
         if (parentOnPath) {
             loopBiasSymbols.forEach((row, r) => row.forEach((symbol, column) => toParent(symbol,
                 E.subtract(loopBias[r][column], projectedAlong(passed[column])[r]))));
             const passedChange = solve(motionTimes(biasChange), 'pc');
             biasChangeSymbols.forEach((symbol, index) => toParent(symbol, E.subtract(biasChange[index], projectedAlong(passedChange)[index])));
         }
-        [0, 1, 2].forEach((column) => {
+        loopColumns.forEach((column) => {
             const parentColumn = parentOnPath ? columnOf(parentLoopAcceleration, column) : [0, 0, 0, 0, 0, 0];
             const moved = solve(motionTimes(columnOf(loopBias, column)).map((value, k) => E.add(value, E.dot(projected[k], parentColumn))), `pa${column + 1}`);
             loopAccelerationSymbols.forEach((row, r) => toChild(row[column], E.subtract(parentColumn[r], along(moved)[r])));
@@ -711,6 +817,7 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     const total = jointAcceleration.map((value, k) => (roles.affected ? E.add(value, accelerationChange[k]) : value));
     if (dof === 1) toChild('jointAcceleration', total[0]);
     else total.forEach((value, k) => toChild(`jointAcceleration${k + 1}`, value));
+    passGathered();
     return relationshipEdge();
 
     function relationshipEdge() {
@@ -725,18 +832,22 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     }
 }
 
-// The joint that closes the loop: a relationship between its two solids (either may be the Ground) holding its two
-// frames' points together. It gives each end's bias force its share of the closing force (-Lᵀ on the first end, +Lᵀ on
-// the second, where L takes a solid's spatial acceleration to its point's), reads back how each end's acceleration moves
-// with that force (K = L₁ A₁ - L₂ A₂), solves (K + εI) λ = -2 ω ė - ω² e - (p̈₁ - p̈₂) for it, and hands each end the
-// change it makes to its bias force.
-function closingRelationship(drawing, loop, nodes, path, id, timeStep) {
-    const { bindings, outputs, bind, define, defineAll, output, pruned } = equations();
-    const parameters = [
-        { id: id(), name: 'Closure rate', symbol: 'rate', value: round(closureRate(timeStep)), unit: '1/s', mode: 'constant' },
-        { id: id(), name: 'Closure compliance', symbol: 'compliance', value: closure.compliance, unit: 'm/(s²·N)', mode: 'constant' }
-    ];
+// A joint that closes a loop: a relationship between its two solids (either may be the Ground) holding what its kind
+// holds (closureRows), each row a component along the first solid's frame axes a: a linear row the velocity of the
+// second solid's point at the first's point p, relative to the first's (a · (Δv + Δω × p)), an angular row the relative
+// angular velocity (a · Δω), Δ the second's spatial velocity less the first's. As G Δ. It
+// - gives each end's bias force its share of those rows' forces (+Gᵀ on the first end, -Gᵀ on the second, as the
+//   forces push the second solid by +Gᵀ λ);
+// - reads how each end's acceleration moves with every loop's forces, and hands its holder its rows of K = G (A₂ - A₁)
+//   and of the acceleration wanted, -Ġ Δ - 2 ω c - ω² e - G (â₂ - â₁) (c = G Δ its rows' rates, e their gaps and
+//   twists), which the tree gathers into the Ground and solves there;
+// - reads its own forces back from its holder, and hands each end the change they make to its bias force.
+function closingRelationship(drawing, loop, nodes, path, R, id, timeStep) {
+    const { bindings, outputs, bind, define, defineAll, defineMatrix, output, pruned } = equations();
+    const parameters = [{ id: id(), name: 'Closure rate', symbol: 'rate', value: round(closureRate(timeStep)), unit: '1/s', mode: 'constant' }];
     for (const created of parameters) bindings.push({ symbol: created.symbol, kind: 'parameter', parameterId: created.id });
+    const loopAccelerationSymbols = sensitivitySymbols('la', R);
+    const loopBiasSymbols = sensitivitySymbols('lp', R);
     const ends = loop.ends.map((frame, index) => {
         const node = nodes.get(frame.solid);
         const role = index === 0 ? 'source' : 'target';
@@ -748,52 +859,88 @@ function closingRelationship(drawing, loop, nodes, path, id, timeStep) {
         const acceleration = accelerationSymbols.map((symbol) => bind(node, role, symbol, prefix));
         const sensitivity = onPath ? loopAccelerationSymbols.map((row) => row.map((symbol) => bind(node, role, symbol, prefix))) : null;
         const tag = index === 0 ? 'e' : 'f';
-        // The point, how fast it moves (v + ω × p) and how fast that changes (a + α × p + ω × its velocity).
         const point = defineAll(`${tag}p`, E.matrixVector(rotation, frame.point.map(round)).map((value, axis) => E.add(centre[axis], value)));
-        const pointVelocity = defineAll(`${tag}v`, velocity.slice(3).map((value, axis) => E.add(value, E.cross(velocity.slice(0, 3), point)[axis])));
-        const pointAcceleration = defineAll(`${tag}a`, acceleration.slice(3).map((value, axis) => E.add(value, E.cross(acceleration.slice(0, 3), point)[axis], E.cross(velocity.slice(0, 3), pointVelocity)[axis])));
-        return { node, role, onPath, point, pointVelocity, pointAcceleration, sensitivity, sign: index === 0 ? -1 : 1 };
+        return { node, role, prefix, onPath, rotation, velocity, acceleration, sensitivity, point, sign: index === 0 ? 1 : -1, solid: frame.solid };
     });
-    // L's rows for a point p: [-skew(p) | I], so L â = a + α × p.
-    const skew = (p) => [[0, E.negate(p[2]), p[1]], [p[2], 0, E.negate(p[0])], [E.negate(p[1]), p[0], 0]];
-    const L = (p, row) => [...skew(p)[row].map((value) => E.negate(value)), ...[0, 1, 2].map((axis) => (axis === row ? 1 : 0))];
-    // Each end's own share of how its bias force moves with λ: ∓ Lᵀ = ∓ [skew(p); I].
-    for (const end of ends) {
-        if (!end.onPath) continue;
-        loopBiasSymbols.forEach((row, r) => row.forEach((symbol, column) => {
-            const entry = r < 3 ? skew(end.point)[r][column] : (r - 3 === column ? 1 : 0);
-            output(end.node, end.role, symbol, E.multiply(end.sign, entry));
-        }));
-    }
-    const K = [0, 1, 2].map((row) => [0, 1, 2].map((column) => define(`k${row + 1}${column + 1}`, E.add(ends.map((end) => (end.onPath
-        ? E.multiply(-end.sign, E.dot(L(end.point, row), end.sensitivity.map((line) => line[column])))
-        : 0)), row === column ? 'compliance' : 0))));
-    const gap = defineAll('gap', [0, 1, 2].map((axis) => E.subtract(ends[0].point[axis], ends[1].point[axis])));
-    const rate = defineAll('gr', [0, 1, 2].map((axis) => E.subtract(ends[0].pointVelocity[axis], ends[1].pointVelocity[axis])));
-    const wanted = defineAll('want', [0, 1, 2].map((axis) => E.subtract(
-        E.negate(E.add(E.multiply(2, 'rate', rate[axis]), E.multiply('rate', 'rate', gap[axis]))),
-        E.subtract(ends[0].pointAcceleration[axis], ends[1].pointAcceleration[axis]))));
-    // λ by Cramer's rule.
-    const determinant = define('kdet', E.add(
-        E.multiply(K[0][0], E.subtract(E.multiply(K[1][1], K[2][2]), E.multiply(K[1][2], K[2][1]))),
-        E.negate(E.multiply(K[0][1], E.subtract(E.multiply(K[1][0], K[2][2]), E.multiply(K[1][2], K[2][0])))),
-        E.multiply(K[0][2], E.subtract(E.multiply(K[1][0], K[2][1]), E.multiply(K[1][1], K[2][0])))));
-    const replaced = (column) => K.map((row, r) => row.map((value, c) => (c === column ? wanted[r] : value)));
-    const det3 = (m) => E.add(
-        E.multiply(m[0][0], E.subtract(E.multiply(m[1][1], m[2][2]), E.multiply(m[1][2], m[2][1]))),
-        E.negate(E.multiply(m[0][1], E.subtract(E.multiply(m[1][0], m[2][2]), E.multiply(m[1][2], m[2][0])))),
-        E.multiply(m[0][2], E.subtract(E.multiply(m[1][0], m[2][1]), E.multiply(m[1][1], m[2][0]))));
-    const force = defineAll('lam', [0, 1, 2].map((column) => E.divide(det3(replaced(column)), determinant)));
-    // Each end's bias force changes by ∓ Lᵀ λ = ∓ [p × λ; λ].
-    for (const end of ends) {
-        if (!end.onPath) continue;
-        const moment = E.cross(end.point, force);
-        biasChangeSymbols.forEach((symbol, index) => output(end.node, end.role, symbol, E.multiply(end.sign, index < 3 ? moment[index] : force[index - 3])));
-    }
-    const holder = ends.find((end) => end.node === loop.holder);
-    [1, 2, 3].forEach((axis) => output(holder.node, holder.role, `closureForce${axis}`, force[axis - 1]));
-    output(holder.node, holder.role, 'closureGap', E.sqrt(E.dot(gap, gap)));
     const [first, second] = ends;
+    // The first solid's frame axes, in the world, and its point.
+    const axisLocal = loop.ends[0].axis;
+    const frameAxes = closureFrame(normalize(axisLocal)).map((axis, index) => defineAll(`ax${index + 1}`, E.matrixVector(first.rotation, axis.map(round))));
+    const p = first.point;
+    const relative = (of) => [0, 1, 2, 3, 4, 5].map((index) => E.subtract(of(second)[index], of(first)[index]));
+    const dv = defineAll('dv', relative((end) => end.velocity));
+    const da = defineAll('dq', relative((end) => end.acceleration));
+    const omega = first.velocity.slice(0, 3);
+    const pointRate = defineAll('prt', first.velocity.slice(3).map((value, axis) => E.add(value, E.cross(omega, p)[axis])));
+    // The second solid's turn from where the drawing has it relative to the first: Q = R₂ (R₁ R₀)ᵀ, and its small-angle
+    // vector ½ vee(Q - Qᵀ).
+    const angular = loop.rows.some(([type]) => type === 'angular');
+    let twist = null;
+    if (angular) {
+        const firstPose = poseOf(drawing, loop.ends[0].solid);
+        const secondPose = poseOf(drawing, loop.ends[1].solid);
+        const rest = rotationMatrix(multiplyQuaternions(conjugate(firstPose.rotation), secondPose.rotation)).map((row) => row.map(round));
+        const wanted = defineMatrix('rw', E.matrixMatrix(first.rotation, rest));
+        const Q = [0, 1, 2].map((i) => [0, 1, 2].map((j) => E.dot(second.rotation[i], wanted[j])));
+        twist = defineAll('tw', [E.multiply(0.5, E.subtract(Q[2][1], Q[1][2])), E.multiply(0.5, E.subtract(Q[0][2], Q[2][0])), E.multiply(0.5, E.subtract(Q[1][0], Q[0][1]))]);
+    }
+    const linearAt = (vector) => [0, 1, 2].map((axis) => E.add(vector[3 + axis], E.cross(vector.slice(0, 3), p)[axis]));
+    const relativeAtPoint = defineAll('dvp', linearAt(dv));
+    const gap = defineAll('gp', [0, 1, 2].map((axis) => E.subtract(second.point[axis], p[axis])));
+    // Each row: its G (6), its rate c, Ġ Δ, G (â₂ - â₁) and its gap or twist e.
+    const rows = loop.rows.map(([type, axisIndex], index) => {
+        const a = frameAxes[axisIndex];
+        const spin = E.cross(omega, a);
+        const tag = `r${index + 1}`;
+        if (type === 'angular') {
+            return {
+                type, a,
+                G: [...a, 0, 0, 0],
+                rate: define(`${tag}c`, E.dot(a, dv.slice(0, 3))),
+                drift: define(`${tag}g`, E.dot(spin, dv.slice(0, 3))),
+                accel: define(`${tag}a`, E.dot(a, da.slice(0, 3))),
+                error: define(`${tag}e`, E.dot(a, twist))
+            };
+        }
+        return {
+            type, a,
+            G: [...E.cross(p, a), ...a],
+            rate: define(`${tag}c`, E.dot(a, relativeAtPoint)),
+            drift: define(`${tag}g`, E.add(E.dot(spin, relativeAtPoint), E.dot(a, E.cross(dv.slice(0, 3), pointRate)))),
+            accel: define(`${tag}a`, E.dot(a, linearAt(da))),
+            error: define(`${tag}e`, E.dot(a, gap))
+        };
+    }).map((row, k) => ({ ...row, G: row.G.map((value, index) => define(`g${k + 1}x${index + 1}`, value)) }));
+    // Each end's own share of how its bias force moves with this loop's forces: +Gᵀ on the first, -Gᵀ on the second.
+    for (const end of ends) {
+        if (!end.onPath) continue;
+        rows.forEach((row, k) => loopBiasSymbols.forEach((line, r) => output(end.node, end.role, line[loop.offset + k], E.multiply(end.sign, row.G[r]))));
+    }
+    // This loop's rows of K and of the wanted acceleration, to its holder.
+    const holder = ends.find((end) => end.solid === loop.holderId);
+    const coupling = couplingSymbols(R);
+    rows.forEach((row, k) => {
+        for (let column = 0; column < R; column += 1) {
+            const moved = E.add(ends.map((end) => (end.onPath ? E.multiply(-end.sign, E.dot(row.G, end.sensitivity.map((line) => line[column]))) : 0)));
+            output(holder.node, holder.role, coupling[loop.offset + k][column], moved);
+        }
+        output(holder.node, holder.role, wantedSymbols(R)[loop.offset + k], E.negate(E.add(row.drift, E.multiply(2, 'rate', row.rate), E.multiply('rate', 'rate', row.error), row.accel)));
+    });
+    // Its forces, as the Ground found them, back from its holder: each end's bias force changes by ±Gᵀ λ.
+    const forces = rows.map((_, k) => bind(holder.node, holder.role, forceSymbols(R)[loop.offset + k], holder.prefix));
+    for (const end of ends) {
+        if (!end.onPath) continue;
+        biasChangeSymbols.forEach((symbol, index) => output(end.node, end.role, symbol, E.multiply(end.sign, E.add(rows.map((row, k) => E.multiply(row.G[index], forces[k]))))));
+    }
+    // What the second solid is pushed by: the linear rows' force at the point, the angular rows' moment; and the gap
+    // and twist left.
+    const along = (type) => [0, 1, 2].map((axis) => E.add(rows.map((row, k) => (row.type === type ? E.multiply(row.a[axis], forces[k]) : 0))));
+    const report = holder === second ? 1 : -1;
+    along('linear').forEach((value, axis) => output(holder.node, holder.role, `${loop.key}Force${axis + 1}`, E.multiply(report, value)));
+    if (angular) along('angular').forEach((value, axis) => output(holder.node, holder.role, `${loop.key}Moment${axis + 1}`, E.multiply(report, value)));
+    const sizeOf = (type) => E.sqrt(E.add(rows.map((row) => (row.type === type ? E.multiply(row.error, row.error) : 0))));
+    output(holder.node, holder.role, `${loop.key}Gap`, sizeOf('linear'));
+    if (angular) output(holder.node, holder.role, `${loop.key}Twist`, sizeOf('angular'));
     return {
         id: id(), name: loop.joint.name, directionality: 'directed',
         source: { nodeId: first.node.id }, target: { nodeId: second.node.id },

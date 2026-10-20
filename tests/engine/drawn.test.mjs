@@ -40,7 +40,7 @@ const matrixOf = ([w, x, y, z]) => [
 
 // Runs `drawing` in the engine and in the Newton-Euler reference; every moving joint's coordinates (a ball's turn too)
 // and every solid's centre and rotation agree.
-async function matchesReference(name, drawing, carried, runTime = 3, document = build(drawing, runTime)) {
+async function matchesReference(name, drawing, carried, runTime = 3, document = build(drawing, runTime), tolerance = 1e-9) {
     const run = await runDocument(directory, name, document);
     const reference = simulate(drawing, run.times);
     for (const [jointName, solidName] of Object.entries(carried)) {
@@ -49,24 +49,24 @@ async function matchesReference(name, drawing, carried, runTime = 3, document = 
             ['jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ'].forEach((symbol, index) => {
                 const values = run.series(`${solidName}.${symbol}`);
                 const difference = largestDifference(values, reference[joint.id].map((turn) => turn[index]));
-                assert.ok(difference < 1e-9, `${name}: ${jointName}'s ${symbol} differs from the reference by ${difference}.`);
+                assert.ok(difference < tolerance, `${name}: ${jointName}'s ${symbol} differs from the reference by ${difference}.`);
             });
             continue;
         }
         const values = run.series(`${solidName}.${coordinate(joint)}`);
-        assert.ok(largestDifference(values, reference[joint.id]) < 1e-9, `${name}: ${jointName} differs from the reference by ${largestDifference(values, reference[joint.id])}.`);
+        assert.ok(largestDifference(values, reference[joint.id]) < tolerance, `${name}: ${jointName} differs from the reference by ${largestDifference(values, reference[joint.id])}.`);
     }
     for (const solid of drawing.solids) {
         for (const [axis, symbol] of ['x', 'y', 'z'].entries()) {
             const values = run.series(`${solid.name}.${symbol}`);
             const expected = reference[solid.id].map((place) => place[axis]);
-            assert.ok(largestDifference(values, expected) < 1e-9, `${name}: ${solid.name}'s ${symbol} differs from the reference by ${largestDifference(values, expected)} m.`);
+            assert.ok(largestDifference(values, expected) < tolerance, `${name}: ${solid.name}'s ${symbol} differs from the reference by ${largestDifference(values, expected)} m.`);
         }
         const matrices = reference.rotations[solid.id].map(matrixOf);
         for (const row of [0, 1, 2]) for (const column of [0, 1, 2]) {
             const values = run.series(`${solid.name}.r${row + 1}${column + 1}`);
             const difference = largestDifference(values, matrices.map((matrix) => matrix[row][column]));
-            assert.ok(difference < 1e-9, `${name}: ${solid.name}'s rotation r${row + 1}${column + 1} differs from the reference by ${difference}.`);
+            assert.ok(difference < tolerance, `${name}: ${solid.name}'s rotation r${row + 1}${column + 1} differs from the reference by ${difference}.`);
         }
     }
     return { run, reference };
@@ -201,11 +201,11 @@ test('a four-bar linkage, a loop closed by its last pin, turns as the reference 
     assert.ok(run.series('Crank.jointAngle').at(-1) > 2 * Math.PI, 'The crank should turn all the way round.');
     const rocker = run.series('Rocker.jointAngle');
     assert.ok(Math.max(...rocker) - Math.min(...rocker) > 0.3 && Math.max(...rocker.map(Math.abs)) < 1.5, 'The rocker should rock back and forth.');
-    const gap = run.series('Rocker.closureGap');
+    const gap = run.series('Rocker.closingPinGap');
     assert.ok(Math.max(...gap) < 5e-5, `The pin opened by ${Math.max(...gap)} m.`);
-    assert.ok(Math.max(...run.series('Rocker.closureForce3').map(Math.abs)) > 0.01, 'The pin should carry a force.');
+    assert.ok(Math.max(...run.series('Rocker.closingPinForce3').map(Math.abs)) > 0.01, 'The pin should carry a force.');
     // The force that closes it is out of the linkage's plane by nothing: the other pins already hold that.
-    assert.ok(Math.max(...run.series('Rocker.closureForce2').map(Math.abs)) < 1e-6, 'The pin should need no force out of the plane.');
+    assert.ok(Math.max(...run.series('Rocker.closingPinForce2').map(Math.abs)) < 1e-6, 'The pin should need no force out of the plane.');
 });
 
 test('an arm pinned to the Ground at both ends, a loop through the Ground, holds still', async () => {
@@ -224,8 +224,132 @@ test('an arm pinned to the Ground at both ends, a loop through the Ground, holds
         assert.ok(Math.max(...values) - Math.min(...values) < 1e-6, `Held at both ends, the arm should not move along ${axis}.`);
     }
     // The pivot holds half the arm's weight.
-    const holding = run.series('Arm.closureForce3').at(-1);
+    const holding = run.series('Arm.pivotForce3').at(-1);
     assert.ok(Math.abs(Math.abs(holding) - massOf(solidNamed(drawing, 'Arm')) * 9.81 / 2) < 1e-3, `The pivot should hold half the arm's weight, not ${holding} N.`);
+});
+
+// Drawing helpers for the loops below, as a user's clicks make them.
+function placed(drawing, shape, { name, size, position, rotation }) {
+    const added = addSolid(drawing, shape, { name, size, position });
+    return { drawing: updateSolid(added.drawing, added.id, { position, ...(rotation ? { rotation } : {}) }), id: added.id };
+}
+function joined(drawing, parent, child, point, axis, kind, name) {
+    const onParent = addFrameAt(drawing, parent, point, axis);
+    const onChild = addFrameAt(onParent.drawing, child, point, scale(axis, -1));
+    return addJoint(onChild.drawing, onParent.id, onChild.id, { kind, mate: false, name });
+}
+function rodBetween(drawing, name, from, to, radius = 0.008) {
+    const along = [to[0] - from[0], to[1] - from[1], to[2] - from[2]];
+    return placed(drawing, 'capsule', { name, size: { radius, length: Math.hypot(...along) }, position: scale([from[0] + to[0], from[1] + to[1], from[2] + to[2]], 0.5), rotation: between([0, 0, 1], along) });
+}
+
+test('two loops in one robot, a four-bar and a dyad hung from its coupler, move as the reference moves them, together', async () => {
+    let drawing = exampleDrawing('fourBar');
+    const coupler = solidNamed(drawing, 'Coupler');
+    const base = solidNamed(drawing, 'Base').id;
+    const followerPivot = [0.34, 0, 0.2];
+    const followerPin = [0.33, 0, 0.36];
+    let result = rodBetween(drawing, 'Follower', followerPivot, followerPin);
+    drawing = joined(result.drawing, base, result.id, followerPivot, [0, 1, 0], 'hinge', 'Follower pivot').drawing;
+    const follower = result.id;
+    result = rodBetween(drawing, 'Link', coupler.position, followerPin);
+    drawing = joined(result.drawing, coupler.id, result.id, coupler.position, [0, 1, 0], 'hinge', 'Link pin').drawing;
+    drawing = joined(drawing, result.id, follower, followerPin, [0, 1, 0], 'hinge', 'Follower pin').drawing;
+    assert.equal(structure(drawing).loops.length, 2);
+    const { run, reference } = await matchesReference('sixBar', drawing, { 'Crank pivot': 'Crank', 'Rocker pivot': 'Rocker', 'Follower pivot': 'Follower' }, 2);
+    assert.ok(Math.max(...reference.gaps) < 5e-5, `A pin opened by ${Math.max(...reference.gaps)} m.`);
+    assert.ok(run.series('Crank.jointAngle').at(-1) > Math.PI, 'The crank should turn.');
+    const follows = run.series('Follower.jointAngle');
+    assert.ok(Math.max(...follows) - Math.min(...follows) > 0.1, 'The second loop should move with the first.');
+});
+
+test('a fixed joint closing a loop welds its solids: two arms on one axis, welded to a bar, swing as one', async () => {
+    let drawing = createDrawing('Welded arms');
+    let result = placed(drawing, 'box', { name: 'Post', size: { x: 0.04, y: 0.1, z: 0.3 }, position: [0, 0, 0.15] });
+    drawing = joined(result.drawing, 'ground', result.id, [0, 0, 0], [0, 0, 1], 'fixed', 'Mount').drawing;
+    const post = result.id;
+    const arms = [];
+    for (const [name, side] of [['Front arm', 0.04], ['Back arm', -0.04]]) {
+        result = rodBetween(drawing, name, [0, side, 0.28], [0.2, side, 0.2]);
+        drawing = joined(result.drawing, post, result.id, [0, side, 0.28], [0, 1, 0], 'hinge', `${name} pivot`).drawing;
+        arms.push(result.id);
+    }
+    result = placed(drawing, 'box', { name: 'Bar', size: { x: 0.02, y: 0.1, z: 0.02 }, position: [0.2, 0, 0.2] });
+    drawing = joined(result.drawing, arms[0], result.id, [0.2, 0.04, 0.2], [0, 1, 0], 'fixed', 'Front weld').drawing;
+    drawing = joined(drawing, result.id, arms[1], [0.2, -0.04, 0.2], [0, 1, 0], 'fixed', 'Back weld').drawing;
+    assert.equal(structure(drawing).loops[0].kind, 'fixed');
+    const { run } = await matchesReference('welded', drawing, { 'Front arm pivot': 'Front arm', 'Back arm pivot': 'Back arm' }, 1.5);
+    assert.ok(largestDifference(run.series('Front arm.jointAngle'), run.series('Back arm.jointAngle')) < 1e-6, 'Welded, the two arms should swing as one.');
+    assert.ok(Math.max(...run.series('Front arm.jointAngle')) > 0.5, 'They should swing.');
+    assert.ok(Math.max(...run.series('Back arm.backWeldTwist')) < 1e-6, 'The weld should not twist.');
+});
+
+test('a slider closing a loop keeps its block on its rail: a crank and connecting rod drive it back and forth', async () => {
+    const drawing = exampleDrawing('crankSlider');
+    assert.equal(structure(drawing).loops[0].name, 'Guide');
+    const { run } = await matchesReference('crankSlider', drawing, { 'Crank pivot': 'Crank', 'Crank pin': 'Connecting rod', 'Wrist pin': 'Block' }, 2);
+    for (const axis of ['y', 'z']) {
+        const values = run.series(`Block.${axis}`);
+        assert.ok(Math.max(...values) - Math.min(...values) < 1e-4, `The block should stay on the rail's line, not move ${Math.max(...values) - Math.min(...values)} m along ${axis}.`);
+    }
+    const along = run.series('Block.x');
+    assert.ok(Math.max(...along) - Math.min(...along) > 0.06, 'The block should travel along the rail, by twice the crank.');
+    assert.ok(Math.max(...run.series('Block.guideTwist')) < 1e-6, 'The block should not turn on its rail.');
+});
+
+test('a hinge closing a loop holds its axis, not just its point: an arm on a ball, pinned by a hinge across it, holds still', async () => {
+    const pinnedArm = (kind) => {
+        let drawing = createDrawing('Door');
+        let result = placed(drawing, 'box', { name: 'Post', size: { x: 0.02, y: 0.02, z: 0.3 }, position: [-0.01, 0, 0.15] });
+        drawing = joined(result.drawing, 'ground', result.id, [-0.01, 0, 0], [0, 0, 1], 'fixed', 'Mount').drawing;
+        const post = result.id;
+        // The bottom pin's own post, so the tree reaches the arm through the top one and the bottom pin closes the loop.
+        result = placed(drawing, 'box', { name: 'Second post', size: { x: 0.02, y: 0.02, z: 0.3 }, position: [0.21, 0, 0.15] });
+        drawing = joined(result.drawing, 'ground', result.id, [0.21, 0, 0], [0, 0, 1], 'fixed', 'Second mount').drawing;
+        const secondPost = result.id;
+        result = placed(drawing, 'box', { name: 'Arm', size: { x: 0.2, y: 0.06, z: 0.02 }, position: [0.1, 0.03, 0.29] });
+        const arm = result.id;
+        drawing = joined(result.drawing, post, arm, [0, 0, 0.3], [1, 0, 0], 'ball', 'Top').drawing;
+        // The hinge's axis runs across the line between the two points, so a hinge there stops the arm turning about that
+        // line, as a door's second hinge would if it were turned across the door.
+        return joined(drawing, secondPost, arm, [0.2, 0, 0.3], [0, 1, 0], kind, 'Bottom').drawing;
+    };
+    const held = pinnedArm('hinge');
+    assert.equal(structure(held).loops[0].name, 'Bottom');
+    const { run } = await matchesReference('heldDoor', held, { Top: 'Arm' }, 1);
+    assert.ok(Math.max(...run.series('Arm.z').map((value) => Math.abs(value - 0.29))) < 1e-6, 'Held by the hinge across it, the arm should not swing.');
+    const swinging = pinnedArm('ball');
+    // Two points held on one solid ask for no force along the line between them, which the compliance leaves to rounding:
+    // to within 1e-8.
+    const { run: free } = await matchesReference('swingingDoor', swinging, { Top: 'Arm' }, 1, build(swinging, 1), 1e-8);
+    assert.ok(Math.max(...free.series('Arm.z').map((value) => Math.abs(value - 0.29))) > 0.005, 'Held at two points only, the arm should swing about the line between them.');
+});
+
+test('a ball joint is driven: a torque turns it, a servo turns it to its setpoint, and its limit stops it at its most turn', async () => {
+    const base = exampleDrawing('ballPendulum');
+    const shoulder = jointNamed(base, 'Shoulder').id;
+    const elbow = jointNamed(base, 'Elbow').id;
+    const turnOf = (run) => {
+        const [w, x, y, z] = ['W', 'X', 'Y', 'Z'].map((axis) => run.series(`Upper link.jointTurn${axis}`));
+        return w.map((value, index) => {
+            const size = Math.hypot(x[index], y[index], z[index]);
+            const angle = 2 * Math.atan2(size, Math.abs(value));
+            return [x[index], y[index], z[index]].map((component) => (size ? (component / size) * angle * Math.sign(value || 1) : 0));
+        });
+    };
+    let drawing = updateJoint(base, shoulder, { damping: 0.03, drive: { mode: 'servo', setpoint: [0.3, -0.4, 0.2], gain: 40, torqueLimit: 5 } });
+    drawing = updateJoint(drawing, elbow, { damping: 0.02 });
+    const { run: servo } = await matchesReference('ballServo', drawing, { Shoulder: 'Upper link', Elbow: 'Lower link' }, 3);
+    const reached = turnOf(servo).at(-1);
+    assert.ok(Math.hypot(reached[0] - 0.3, reached[1] + 0.4, reached[2] - 0.2) < 0.02, `The servo should turn the link to its setpoint, not to ${reached}.`);
+    // Driven hard, the two links whirl, and rounding grows fast (they are chaotic): to within 1e-8 over half a second.
+    const torqued = updateJoint(base, shoulder, { drive: { mode: 'torque', torque: [0.01, -0.02, 0.015] } });
+    await matchesReference('ballTorque', torqued, { Shoulder: 'Upper link', Elbow: 'Lower link' }, 0.5, build(torqued, 0.5), 1e-8);
+    // The reference has no limits; the limit is checked by what it does.
+    const limited = updateJoint(base, shoulder, { limits: { lower: 0, upper: 0.3 } });
+    const stopped = await runDocument(directory, 'ballLimit', build(limited, 2));
+    const angles = turnOf(stopped).map((vector) => Math.hypot(...vector));
+    assert.ok(Math.max(...angles) > 0.28 && Math.max(...angles) < 0.34, `The limit should stop the turn at 0.3 rad, not ${Math.max(...angles)}.`);
 });
 
 test('friction, armature, a torque drive and every shape reach the motion as drawn', async () => {
@@ -262,7 +386,7 @@ test('a joint stops at its limit', async () => {
 test('a drawn robot resumed from a checkpoint carries on exactly as the run that never stopped, a closed loop and ball joints too', async () => {
     const cases = [
         ['cartPendulums', ['Cart.jointPosition', 'Front pendulum.jointAngle', 'Back pendulum.yaw']],
-        ['fourBar', ['Crank.jointAngle', 'Rocker.closureForce1', 'Coupler.yaw']],
+        ['fourBar', ['Crank.jointAngle', 'Rocker.closingPinForce1', 'Coupler.yaw']],
         ['ballPendulum', ['Lower link.jointTurnX', 'Upper link.jointSpeed2']]
     ];
     for (const [id, keys] of cases) {
@@ -296,6 +420,45 @@ test('MuJoCo on its own swings the same pendulum and holds the same arm, to with
             console.log(`${id} ${joint.name}: Konjugate and MuJoCo differ by up to ${difference.toExponential(2)}.`);
             assert.ok(difference < mujocoBound, `${id}: ${joint.name} differs from MuJoCo alone by ${difference}.`);
         }
+    }
+});
+
+// The same, for what MuJoCo can hold as Konjugate does: ball joints, a body joined to nothing (MuJoCo's free joint) and
+// loops closed by a pin or a weld (its connect and weld equalities, which it holds softly, so a little looser). Each
+// solid's centre is compared, every 10 ms.
+test('MuJoCo on its own moves ball joints, a body joined to nothing and closed loops as Konjugate does, to within a stated bound', { skip: withoutMujoco ?? false }, async () => {
+    const welded = (() => {
+        let drawing = createDrawing('Welded arms');
+        let result = placed(drawing, 'box', { name: 'Post', size: { x: 0.04, y: 0.1, z: 0.3 }, position: [0, 0, 0.15] });
+        drawing = joined(result.drawing, 'ground', result.id, [0, 0, 0], [0, 0, 1], 'fixed', 'Mount').drawing;
+        const post = result.id;
+        const arms = [];
+        for (const [name, side] of [['Front arm', 0.04], ['Back arm', -0.04]]) {
+            result = rodBetween(drawing, name, [0, side, 0.28], [0.2, side, 0.2]);
+            drawing = joined(result.drawing, post, result.id, [0, side, 0.28], [0, 1, 0], 'hinge', `${name} pivot`).drawing;
+            arms.push(result.id);
+        }
+        result = placed(drawing, 'box', { name: 'Bar', size: { x: 0.02, y: 0.1, z: 0.02 }, position: [0.2, 0, 0.2] });
+        drawing = joined(result.drawing, arms[0], result.id, [0.2, 0.04, 0.2], [0, 1, 0], 'fixed', 'Front weld').drawing;
+        return joined(drawing, result.id, arms[1], [0.2, -0.04, 0.2], [0, 1, 0], 'fixed', 'Back weld').drawing;
+    })();
+    const cases = [['ballPendulum', exampleDrawing('ballPendulum'), 1], ['floating', floatingDrawing(), 1], ['fourBar', exampleDrawing('fourBar'), 2], ['welded', welded, 1.5]];
+    for (const [id, drawing, runTime] of cases) {
+        const run = await runDocument(directory, `mujoco-${id}`, build(drawing, runTime));
+        // A torque drive is a force applied along its joint, held throughout.
+        const loopIds = new Set(structure(drawing).loops.map(({ id: jointId }) => jointId));
+        const torqued = drawing.joints.filter((joint) => !loopIds.has(joint.id) && (joint.kind === 'hinge' || joint.kind === 'slider') && joint.drive?.mode === 'torque');
+        const reference = await runReference(directory, {
+            mjcf: writeMjcf(drawing), joints: torqued.map(({ id: jointId }) => ({ name: jointId })),
+            forces: Object.fromEntries(torqued.map((joint) => [joint.id, joint.drive.torque])), controls: {},
+            bodies: drawing.solids.map(({ id: solidId }) => solidId), times: run.times
+        });
+        let worst = 0;
+        for (const solid of drawing.solids) {
+            for (const [axis, symbol] of ['x', 'y', 'z'].entries()) worst = Math.max(worst, largestDifference(run.series(`${solid.name}.${symbol}`), reference[solid.id].map((place) => place[axis])));
+        }
+        console.log(`${id}: Konjugate's and MuJoCo's solids are within ${(worst * 1000).toFixed(3)} mm of each other.`);
+        assert.ok(worst < mujocoBound, `${id}: a solid is ${worst} m from where MuJoCo alone has it.`);
     }
 });
 

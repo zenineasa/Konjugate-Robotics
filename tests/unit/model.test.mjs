@@ -30,6 +30,10 @@ test('the MJCF has a slider as a slide joint, and a solid joined to nothing floa
     const pendulum = exampleDrawing('pendulum');
     const floating = { ...pendulum, joints: [], frames: [] };
     assert.equal((writeMjcf(floating).match(/<freejoint\/>/g) ?? []).length, 2);
+    // A ball's limit is its most turn, MuJoCo's range from 0.
+    const limitedBall = updateJoint(pendulum, pendulum.joints.find(({ name }) => name === 'Pivot').id, { kind: 'ball' });
+    const ballJoint = limitedBall.joints.find(({ name }) => name === 'Pivot');
+    assert.match(writeMjcf(updateJoint(limitedBall, ballJoint.id, { limits: { lower: 0, upper: 0.3 } })), /type="ball" pos="[^"]*" limited="true" range="0 0.3"/);
 });
 
 test('the model: the Ground and a node per solid, a relationship per joint between the two solids it joins', () => {
@@ -110,7 +114,7 @@ test('add and multiply take lists of terms, but keep an expression whole', () =>
     assert.deepEqual(add(1, 2), 3);
 });
 
-test('a ball joint, a solid joined to nothing and one closed loop build; a fixed joint closing a loop, or a second loop, is said plainly', () => {
+test('ball joints, solids joined to nothing and loops closed by any joint, several to a robot, all build', () => {
     const pendulum = exampleDrawing('pendulum');
     const arm = pendulum.solids.find(({ name }) => name === 'Arm').id;
     assert.deepEqual(simulationLimits(pendulum), []);
@@ -134,10 +138,17 @@ test('a ball joint, a solid joined to nothing and one closed loop build; a fixed
     assert.deepEqual(simulationLimits(looped), []);
     const loopModel = buildModel(looped).document;
     assert.deepEqual(loopModel.edges.map(({ name }) => name).sort(), ['Mount', 'Pin', 'Pivot']);
-    assert.ok(loopModel.nodes.find(({ name }) => name === 'Arm').states.some(({ symbol }) => symbol === 'closureForce1'));
-    // Which of the loop's joints closes it is the one the tree from the Ground reaches last.
+    // Which of the loop's joints closes it is the one the tree from the Ground reaches last; its force, moment, gap and
+    // twist are states of the solid it holds.
     const closing = structure(looped).loops[0];
-    assert.match(simulationLimits(updateJoint(looped, closing.id, { kind: 'fixed' }))[0].message, /closes a loop as a fixed joint, which cannot be simulated yet/);
+    const holderStates = loopModel.nodes.find(({ name }) => name === 'Arm').states.map(({ symbol }) => symbol);
+    const key = camelKey(closing.name);
+    for (const suffix of ['Force1', 'Force3', 'Moment1', 'Gap', 'Twist']) assert.ok(holderStates.includes(`${key}${suffix}`), `${key}${suffix}`);
+    // Every kind of joint closes a loop, holding as many rows as it holds still: a ball 3, a hinge 5, a slider 5, fixed 6.
+    for (const [kind, rows] of [['ball', 3], ['hinge', 5], ['slider', 5], ['fixed', 6]]) {
+        const document = buildModel(updateJoint(looped, closing.id, { kind })).document;
+        assert.equal(document.nodes.find(({ name }) => name === 'Ground').states.filter(({ symbol }) => symbol.startsWith('kb')).length, rows, kind);
+    }
     // A second loop: the four-bar's crank pinned to its rocker as well.
     const fourBar = exampleDrawing('fourBar');
     const [crank, rocker] = ['Crank', 'Rocker'].map((name) => fourBar.solids.find((solid) => solid.name === name).id);
@@ -145,8 +156,9 @@ test('a ball joint, a solid joined to nothing and one closed loop build; a fixed
     const onCrank = frame.id;
     frame = addFrameAt(frame.drawing, rocker, [0.03, 0, 0.25], [0, -1, 0]);
     const twice = addJoint(frame.drawing, onCrank, frame.id, { kind: 'hinge', mate: false, name: 'Second pin' }).drawing;
-    assert.match(simulationLimits(twice)[0].message, /closes a second loop; one loop can be simulated so far/);
-    assert.throws(() => buildModel(twice), /second loop/);
+    assert.deepEqual(simulationLimits(twice), []);
+    assert.equal(structure(twice).loops.length, 2);
+    assert.equal(buildModel(twice).document.nodes.find(({ name }) => name === 'Ground').states.filter(({ symbol }) => symbol.startsWith('kb')).length, 10);
 });
 
 test('a drawing with an error is not built, and says why', () => {

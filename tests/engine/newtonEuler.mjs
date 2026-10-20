@@ -18,13 +18,16 @@
 // clamped to its limit; minus damping times speed and friction times tanh(100 speed), each axis of a ball on its own.
 // Joint limits are not modelled here, so drawings checked with it keep inside theirs.
 //
-// A joint that closes a loop holds its two frames' points together: the force λ there solves
-// (J M⁻¹ Jᵀ + εI) λ = -2 ω ė - ω² e - (J q̈₀ + J̇ q̇), where e is the gap between the points, J maps the joint speeds
-// to its rate, q̈₀ is the motion without the force, ω the closure's rate and ε its compliance; then q̈ = q̈₀ + M⁻¹ Jᵀ λ.
+// A joint that closes a loop holds what its kind holds, row by row along the first solid's frame axes (a ball its
+// point, a hinge its point and axis, a slider its axis's line and its turn, a fixed joint everything): each row's rate
+// c is the second solid's motion relative to the first's at the first's point, e its gap (or twist), and the forces λ of
+// every loop together solve (J M⁻¹ Jᵀ + εI) λ = -Ġ q̇-terms - 2 ω c - ω² e - J q̈₀, where J maps the joint speeds to
+// the rows' rates, q̈₀ is the motion without the forces, ω the closure's rate and ε its compliance; then
+// q̈ = q̈₀ + M⁻¹ Jᵀ λ.
 
 import { frameById, frameInWorld, groundId, massOf, poseOf, structure, treeOrder } from '../../packages/toolbox/lib/drawing.mjs';
 import { add, cross, dot, fromAxisAngle, multiply, normalize, rotate, scale, subtract } from '../../packages/toolbox/lib/math.mjs';
-import { closure, closureRate } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { closure, closureFrame, closureRate } from '../../packages/toolbox/lib/modelBuilder.mjs';
 
 export const gravity = 9.81;
 
@@ -232,71 +235,124 @@ export function jointTorque(joint, position, speed) {
     return torque - (joint.damping ?? 0) * speed - (joint.friction ?? 0) * Math.tanh(100 * speed);
 }
 
+// A ball's drive, about its parent's axes: a constant torque, or a servo turning it towards its setpoint (a turn
+// vector): the turn left to make is the quaternion q ⊗ d*, of angle θ about n, and the servo gives -stiffness sin θ n,
+// held to its most torque.
+function ballDrive(joint, turn) {
+    const drive = joint.drive ?? { mode: 'free' };
+    if (drive.mode === 'torque') return drive.torque;
+    if (drive.mode !== 'servo') return [0, 0, 0];
+    const angle = Math.hypot(...drive.setpoint);
+    const wanted = angle > 1e-9 ? [Math.cos(angle / 2), ...scale(drive.setpoint, Math.sin(angle / 2) / angle)] : [1, ...scale(drive.setpoint, 0.5)];
+    const left = multiply(turn, conjugate(wanted));
+    const torque = scale(left.slice(1), -2 * drive.gain * left[0]);
+    return scale(torque, Math.min(1, drive.torqueLimit / Math.max(Math.hypot(...torque), 1e-12)));
+}
+
 function appliedForces(bodies, q, qd) {
     return bodies.flatMap((body, i) => {
         const speeds = qd.slice(body.firstSpeed, body.firstSpeed + speedCount[body.kind]);
         if (body.kind === 'hinge' || body.kind === 'slider') return [jointTorque(body.joint, q[i][0], speeds[0])];
-        if (body.kind === 'ball') return speeds.map((speed) => -(body.joint.damping ?? 0) * speed - (body.joint.friction ?? 0) * Math.tanh(100 * speed));
+        if (body.kind === 'ball') {
+            const drive = ballDrive(body.joint, q[i]);
+            return speeds.map((speed, axis) => drive[axis] - (body.joint.damping ?? 0) * speed - (body.joint.friction ?? 0) * Math.tanh(100 * speed));
+        }
         return speeds.map(() => 0);
     });
 }
 
-// The loop a drawing closes, if any: the closing joint's two solids and its frames' points on each, in their own frames.
-export function loopOf(drawing, bodies) {
-    const [joint] = structure(drawing).loops;
-    if (!joint) return null;
-    const end = (frameId) => {
-        const frame = frameById(drawing, frameId);
-        return { body: bodies.findIndex(({ id }) => id === frame.solid), point: frame.point };
-    };
-    return { joint, a: end(joint.parent), b: end(joint.child) };
+// The rows each kind of closing joint holds: [linear or angular, which of the first solid's axes (t1, t2, n)].
+const closureRows = {
+    ball: [['linear', 0], ['linear', 1], ['linear', 2]],
+    hinge: [['linear', 0], ['linear', 1], ['linear', 2], ['angular', 0], ['angular', 1]],
+    slider: [['linear', 0], ['linear', 1], ['angular', 0], ['angular', 1], ['angular', 2]],
+    fixed: [['linear', 0], ['linear', 1], ['linear', 2], ['angular', 0], ['angular', 1], ['angular', 2]]
+};
+
+// The loops a drawing closes: each closing joint's two solids (-1 for the Ground), its frames' points on each in their
+// own frames, the first frame's axes, the rest turn of the second solid relative to the first, and its rows.
+export function loopsOf(drawing, bodies) {
+    return structure(drawing).loops.map((joint) => {
+        const [first, second] = [joint.parent, joint.child].map((frameId) => {
+            const frame = frameById(drawing, frameId);
+            return { body: bodies.findIndex(({ id }) => id === frame.solid), point: frame.point, rotation: poseOf(drawing, frame.solid).rotation };
+        });
+        return {
+            joint, first, second, rows: closureRows[joint.kind],
+            axes: closureFrame(normalize(frameById(drawing, joint.parent).axis)),
+            rest: multiply(conjugate(first.rotation), second.rotation)
+        };
+    });
 }
 
-// A point fixed in a solid (`body` -1 for the Ground): where it is, how fast it moves and how fast that changes.
-function pointMotion(end, poses, states, g) {
-    if (end.body === -1) return { position: end.point, velocity: [0, 0, 0], acceleration: [0, 0, g] };
-    const pose = poses[end.body];
-    const state = states[end.body];
-    const position = add(pose.position, rotate(pose.rotation, end.point));
-    const arm = subtract(position, state.centre);
+// A solid's pose and its spatial velocity and acceleration (angular, then at the world's origin); the Ground's is still.
+function spatialOf(index, poses, states) {
+    if (index === -1) return { rotation: [1, 0, 0, 0], position: [0, 0, 0], omega: [0, 0, 0], origin: [0, 0, 0], alpha: [0, 0, 0], originAcceleration: [0, 0, 0] };
+    const pose = poses[index];
+    const { omega, alpha, velocity, acceleration, centre } = states[index];
     return {
-        position,
-        velocity: add(state.velocity, cross(state.omega, arm)),
-        acceleration: add(state.acceleration, add(cross(state.alpha, arm), cross(state.omega, cross(state.omega, arm))))
+        rotation: pose.rotation, position: pose.position, omega, alpha,
+        origin: subtract(velocity, cross(omega, centre)),
+        originAcceleration: subtract(subtract(acceleration, cross(alpha, centre)), cross(omega, velocity))
     };
 }
 
-export function forwardDynamics(bodies, q, qd, loop = null, timeStep = 0.001) {
+// A loop's rows at speeds `qd` and accelerations `qdd` (no gravity): each row's rate, its Ġ Δ, its acceleration and its
+// gap or twist.
+function loopRows(loop, poses, states) {
+    const a = spatialOf(loop.first.body, poses, states);
+    const b = spatialOf(loop.second.body, poses, states);
+    const point = add(a.position, rotate(a.rotation, loop.first.point));
+    const otherPoint = add(b.position, rotate(b.rotation, loop.second.point));
+    const dOmega = subtract(b.omega, a.omega);
+    const dOrigin = subtract(b.origin, a.origin);
+    const dAlpha = subtract(b.alpha, a.alpha);
+    const dOriginAcceleration = subtract(b.originAcceleration, a.originAcceleration);
+    const atPoint = add(dOrigin, cross(dOmega, point));
+    const pointRate = add(a.origin, cross(a.omega, point));
+    // Q = R₂ (R₁ R₀)ᵀ, as a rotation; its small-angle vector is ½ vee(Q - Qᵀ), the vector part of its quaternion times
+    // its scalar part, twice.
+    const turn = multiply(b.rotation, conjugate(multiply(a.rotation, loop.rest)));
+    const twist = scale(turn.slice(1), 2 * turn[0]);
+    return loop.rows.map(([type, index]) => {
+        const axis = rotate(a.rotation, loop.axes[index]);
+        const spin = cross(a.omega, axis);
+        if (type === 'angular') return { rate: dot(axis, dOmega), drift: dot(spin, dOmega), acceleration: dot(axis, dAlpha), error: dot(axis, twist) };
+        return {
+            rate: dot(axis, atPoint),
+            drift: dot(spin, atPoint) + dot(axis, cross(dOmega, pointRate)),
+            acceleration: dot(axis, add(dOriginAcceleration, cross(dAlpha, point))),
+            error: dot(axis, subtract(otherPoint, point))
+        };
+    });
+}
+
+export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001) {
     const n = qd.length;
     const zero = Array(n).fill(0);
     const poses = place(bodies, q);
     const bias = inverseDynamics(bodies, q, qd, zero, gravity, poses);
     const columns = zero.map((_, column) => inverseDynamics(bodies, q, zero, zero.map((__, k) => (k === column ? 1 : 0)), 0, poses));
     // inverseDynamics gives a column of the mass matrix per unit acceleration; it is symmetric. A joint's armature adds
-    // to each of its own axes.
-    const armature = bodies.flatMap((body) => Array(speedCount[body.kind]).fill(body.kind === 'free' ? 0 : body.joint.armature ?? 0));
+    // to each of its own axes, and so does its damping times the step: the damping taken at the step's end speed.
+    const armature = bodies.flatMap((body) => Array(speedCount[body.kind]).fill(body.kind === 'free' ? 0 : (body.joint.armature ?? 0) + (body.joint.damping ?? 0) * timeStep));
     const matrix = zero.map((__, row) => zero.map((___, column) => columns[column][row] + (row === column ? armature[row] : 0)));
     const applied = appliedForces(bodies, q, qd);
     const free = solve(matrix, applied.map((value, k) => value - bias[k]));
-    if (!loop) return free;
+    if (!loops.length) return free;
 
-    // The gap's rate per unit speed of each joint (J's columns), and its acceleration from the speeds alone (J̇ q̇).
-    const gapMotion = (speeds, rates, g) => {
-        const states = motionOf(bodies, poses, speeds, rates, g);
-        const [a, b] = [loop.a, loop.b].map((end) => pointMotion(end, poses, states, g));
-        return { gap: subtract(a.position, b.position), rate: subtract(a.velocity, b.velocity), acceleration: subtract(a.acceleration, b.acceleration) };
-    };
-    const jacobian = zero.map((_, column) => gapMotion(zero.map((__, k) => (k === column ? 1 : 0)), zero, 0).rate);
-    const J = [0, 1, 2].map((row) => jacobian.map((column) => column[row]));
-    const current = gapMotion(qd, zero, 0);
-    const unconstrained = add(current.acceleration, J.map((row) => dot3(row, free)));
-    const response = [0, 1, 2].map((column) => solve(matrix, J[column]));
-    const K = J.map((row) => response.map((column) => dot3(row, column)));
+    // Every loop's rows: J's rows (each row's rate per unit speed of each joint), and, at the speeds, Ġ Δ and the gap,
+    // and at q̈₀ the rows' accelerations.
+    const rowsAt = (speeds, rates) => loops.flatMap((loop) => loopRows(loop, poses, motionOf(bodies, poses, speeds, rates, 0)));
+    const unit = zero.map((_, column) => rowsAt(zero.map((__, k) => (k === column ? 1 : 0)), zero).map(({ rate }) => rate));
+    const J = unit[0].map((_, row) => unit.map((column) => column[row]));
+    const current = rowsAt(qd, free);
     const omega = closureRate(timeStep);
-    const { compliance } = closure;
-    const wanted = [0, 1, 2].map((axis) => -2 * omega * current.rate[axis] - omega * omega * current.gap[axis] - unconstrained[axis]);
-    const force = solve(K.map((row, i) => row.map((value, j) => value + (i === j ? compliance : 0))), wanted);
-    return free.map((value, k) => value + response.reduce((sum, column, axis) => sum + column[k] * force[axis], 0));
+    const wanted = current.map(({ rate, drift, acceleration, error }) => -drift - 2 * omega * rate - omega * omega * error - acceleration);
+    const response = J.map((row) => solve(matrix, row));
+    const K = J.map((row, i) => response.map((column) => dot3(row, column) + (i === response.indexOf(column) ? closure.compliance : 0)));
+    const force = solve(K, wanted);
+    return free.map((value, k) => value + response.reduce((sum, column, row) => sum + column[k] * force[row], 0));
 }
 
 const dot3 = (a, b) => a.reduce((sum, value, index) => sum + value * b[index], 0);
@@ -339,7 +395,7 @@ function step(bodies, q, qd, qdd, timeStep) {
 // a solid joined to nothing has its joint as `free:<solid id>`.
 export function simulate(drawing, times, timeStep = 0.001) {
     const bodies = treeOf(drawing);
-    const loop = loopOf(drawing, bodies);
+    const loops = loopsOf(drawing, bodies);
     let q = restCoordinates(bodies);
     let qd = Array(bodies.reduce((sum, body) => sum + speedCount[body.kind], 0)).fill(0);
     const out = Object.fromEntries([...bodies.filter(({ kind }) => kind !== 'fixed').map(({ joint }) => [joint.id, []]), ...bodies.map(({ id }) => [id, []])]);
@@ -348,7 +404,7 @@ export function simulate(drawing, times, timeStep = 0.001) {
     let time = 0;
     for (const target of times) {
         while (time < target - timeStep / 2) {
-            const qdd = forwardDynamics(bodies, q, qd, loop, timeStep);
+            const qdd = forwardDynamics(bodies, q, qd, loops, timeStep);
             ({ q, qd } = step(bodies, q, qd, qdd, timeStep));
             time += timeStep;
         }
@@ -359,9 +415,10 @@ export function simulate(drawing, times, timeStep = 0.001) {
             out[body.id].push(poses[i].position);
             out.rotations[body.id].push(poses[i].rotation);
         });
-        if (loop) {
-            const at = (end) => (end.body === -1 ? end.point : add(poses[end.body].position, rotate(poses[end.body].rotation, end.point)));
-            out.gaps.push(Math.hypot(...subtract(at(loop.a), at(loop.b))));
+        // The largest gap left at any loop's point (along what it holds).
+        if (loops.length) {
+            const states = motionOf(bodies, poses, qd, qd.map(() => 0), 0);
+            out.gaps.push(Math.max(...loops.map((loop) => Math.hypot(...loopRows(loop, poses, states).filter((_, k) => loop.rows[k][0] === 'linear').map(({ error }) => error)))));
         }
     }
     return out;

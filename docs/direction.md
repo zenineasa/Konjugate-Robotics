@@ -68,14 +68,14 @@ The equations are written out as MathJSON with LaTeX beside it, which Konjugate'
 
 The same sweeps take a joint of any number of axes: a hinge or a slider one, a ball three (its angular velocity in its parent's frame, its turn a quaternion integrated from it, each component after the one before), and a free joint six, for **a solid joined to nothing**, which hangs from the Ground by a free joint edge of its own (its spatial velocity, centre and rotation integrated on its node). A joint of several axes solves with its D by the L D Lᵀ factors, written out as definitions on its edge.
 
-**A closed loop** (a four-bar linkage) is a tree plus the joint that closes it. That joint is an edge between its two solids, holding their two points together with a force λ found in the graph each instant, as everything else is:
+**A closed loop** (a four-bar linkage) is a tree plus the joint that closes it. That joint is an edge between its two solids, holding what its kind holds with forces λ found in the graph each instant, as everything else is. It holds rows of motion along a frame fixed on its first solid (t₁, t₂ and its axis n): a ball its point (three rows), a hinge its point and its axis (five), a slider its axis's line and its turn (five), a fixed joint everything (six). Each row's rate is a component of G Δ, Δ the second solid's spatial velocity less the first's: the second's velocity at the first's point, relative to the first's, or their relative angular velocity. A robot may close any number of loops, R rows in all:
 
-4. **Inward**, each joint on the way from either end of the loop back to the Ground passes its parent how its child's bias force moves with λ (a 6 by 3 matrix, P), starting from the closing edge's own share at each end.
-5. **Outward**, each of those joints works out how its child's acceleration moves with λ (another 6 by 3, A).
-6. The closing edge reads both ends' accelerations and A, and solves (K + εI) λ = -2 ω ė - ω² e - (p̈₁ - p̈₂) for λ: K = L₁ A₁ - L₂ A₂ is how the gap's acceleration moves with λ, e the gap, ω the closure's rate (a quarter of the time step's, critically damped: Baumgarte's terms) and ε a small compliance, so a direction the loop's other joints already hold, out of a planar linkage's plane, asks for no force.
-7. **Inward and outward once more**, the change λ makes to the bias forces and then to every joint's acceleration below the loop, added to what the first three sweeps gave.
+4. **Inward**, each joint on the way from either end of a loop back to the Ground passes its parent how its child's bias force moves with every λ (a 6 by R matrix, P), starting from each closing edge's own share at its ends (±Gᵀ).
+5. **Outward**, each of those joints works out how its child's acceleration moves with every λ (another 6 by R, A).
+6. Each closing edge reads its ends' accelerations and A, and hands the solid it holds its rows of K = G (A₂ - A₁) (how its rows' accelerations move with every λ) and of the acceleration wanted, -Ġ Δ - 2 ω c - ω² e - G (â₂ - â₁): c its rows' rates, e their gaps and twists, ω the closure's rate (a quarter of the time step's, critically damped: Baumgarte's terms). These pass in, solid to solid, to the Ground, where they gather; the edge from the Ground to each solid hanging from it solves (K + εI) λ = wanted for every loop at once (ε a small compliance, so a row the loop's other joints already hold, out of a planar linkage's plane, asks for no force), and the forces pass out again, solid to solid, to each closing edge.
+7. **Inward and outward once more**, the change the forces make to the bias forces and then to every joint's acceleration below the loops, added to what the first three sweeps gave.
 
-One loop per robot so far, closed by a hinge or a ball (a hinge holds its point; its axis is held by the loop's other joints when they turn about the same axis, as in a planar linkage). The gap opens a little while the linkage moves fast (within a twentieth of a millimetre in the four-bar example) and closes to nothing as it slows. **Contact** is not modelled yet: it needs forces between solids that are not joined, which are edges too, and come later.
+The gap opens a little while a linkage moves fast (within a twentieth of a millimetre in the four-bar example) and closes to nothing as it slows. **Contact** is not modelled yet: it needs forces between solids that are not joined, which are edges too, and come later.
 
 ### Time steps and how a joint is driven
 
@@ -120,11 +120,11 @@ Later, from the same proposal: merging a rebuild with hand-made work (Part 1), a
 
 ## Where milestone A stands
 
-Built (October 2026): the core additions above, with engine and JavaScript tests; the window as described under What a user does, steps 1 to 7, except motor mode; the model builder with the articulated-body equations on the joint edges; six examples (a pendulum, a two-link arm, a cart carrying two pendulums, an arm with a two-finger gripper, a four-bar linkage, a pendulum on two ball joints); unit tests; engine tests against the Newton-Euler reference (and MuJoCo where it is installed); a window test that drives the page in a browser and has Konjugate's engine validate the model it builds.
+Built (October 2026): the core additions above, with engine and JavaScript tests; the window as described under What a user does, steps 1 to 7, except motor mode; the model builder with the articulated-body equations on the joint edges; seven examples (a pendulum, a two-link arm, a cart carrying two pendulums, an arm with a two-finger gripper, a four-bar linkage, a pendulum on two ball joints, a crank and slider); unit tests; engine tests against the Newton-Euler reference (and MuJoCo where it is installed); a window test that drives the page in a browser and has Konjugate's engine validate the model it builds.
 
 Still to do in milestone A: a warning before a build replaces hand-made work; selecting several solids to move together; dragging a joint's point in the view.
 
-Built in milestone A2 (October 2026): ball joints, solids joined to nothing, and one closed loop per robot, as above, each checked against the Newton-Euler reference; a four-bar linkage and a pendulum on two ball joints among the examples. Still to do in A2: more than one loop, a loop closed by a fixed joint or a slider, and drives and limits on ball joints.
+Built in milestone A2 (October 2026): ball joints, with a torque or a servo to a turn and a most turn as their limit; solids joined to nothing; and loops closed by any kind of joint, any number to a robot, as above, each checked against the Newton-Euler reference (two loops in one robot, a weld, a slider on its rail, a hinge holding its axis), and against MuJoCo alone where it is installed; a four-bar linkage, a pendulum on two ball joints and a crank and slider among the examples. A joint's damping is taken at the step's end speed (added, times the step, to its effective inertia, as MuJoCo does), so heavy damping on a light link stays stable.
 
 ## Milestones
 
@@ -178,6 +178,6 @@ Topology optimisation and finite element analysis; sketches, constraints, fillet
 ## Open questions
 
 - **Speed for large robots.** Each joint's equations are a few hundred operations, evaluated by the engine's interpreter. A humanoid with thirty joints at a millisecond step should still run faster than real time, but this is not yet measured.
-- **Stiffness.** Semi-implicit Euler is stable for a swinging arm but still needs a step well below a stiff servo's time constant; an implicit treatment of the drive, inside the joint's equations, may come if users hit it.
+- **Stiffness.** Semi-implicit Euler is stable for a swinging arm but still needs a step well below a stiff servo's time constant. Damping is now taken implicitly, inside the joint's equations; the servo's spring could be taken the same way if users hit it.
 - **First user:** students and hobbyists, robotics start-ups sizing actuators, or the warehouse customers of the logistics toolbox? The working answer is hobbyists and students first: the drawing window serves them best, and they need no sales cycle.
 - **Web edition:** add-ons do not run there today; nothing the toolbox builds needs more than the engine.

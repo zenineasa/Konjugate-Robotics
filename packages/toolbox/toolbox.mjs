@@ -398,6 +398,32 @@ function solidInspector(solid) {
         </div>`;
 }
 
+// A ball joint's motion: its most turn, its damping, friction and armature (each axis alike) and its drive, a torque
+// about each of its parent's axes or a servo to a turn about them.
+function ballMotion(joint) {
+    const drive = joint.drive ?? { mode: 'free' };
+    const vector = (name, values, unit, shown) => `<div class="fieldRow"><span>${name === 'drive.torque' ? 'Torque' : 'Setpoint turn'}</span>${['x', 'y', 'z'].map((axis, index) => `<label>${axis}${numberInput(`${name}.${index}`, shown((values ?? [0, 0, 0])[index] ?? 0), { step: name === 'drive.torque' ? 0.01 : 1 })}</label>`).join('')}</div><p class="unit">${unit}, about ${escapeHtml(nameOf(frameById(drawing(), joint.parent).solid))}'s own axes.</p>`;
+    const fields = [field('Driven by', `<select name="drive.mode">${driveModes.map((mode) => `<option value="${mode}"${mode === drive.mode ? ' selected' : ''}>${driveLabels[mode]}</option>`).join('')}</select>`)];
+    if (drive.mode === 'torque') fields.push(vector('drive.torque', drive.torque, 'N·m', (value) => value));
+    if (drive.mode === 'servo') {
+        fields.push(vector('drive.setpoint', drive.setpoint, 'Degrees: a turn about the direction given, by its length', toDegrees));
+        fields.push(field('Stiffness', numberInput('drive.gain', drive.gain, { min: 0 }), 'N·m/rad'));
+        fields.push(field('Most torque', numberInput('drive.torqueLimit', drive.torqueLimit, { min: 0 }), 'N·m'));
+    }
+    fields.push(`<p class="note">${{
+        free: 'Nothing drives it: it turns freely about its point every way, as gravity and the rest of the robot turn it.',
+        torque: 'A constant torque about each axis, each a live slider on the relationship in the canvas.',
+        servo: 'A servo turns it to its setpoint, each axis of the turn a live slider on the relationship in the canvas, pushing with up to its most torque.'
+    }[drive.mode]}</p>`);
+    return `<h2>Motion</h2>
+        <label class="field"><span>Limited</span><span><input type="checkbox" name="limited"${joint.limits ? ' checked' : ''}></span></label>
+        ${joint.limits ? field('Most turn', numberInput('limits.upper', toDegrees(joint.limits.upper)), '°') : ''}
+        ${field('Damping', numberInput('damping', joint.damping, { min: 0 }), 'N·m·s/rad')}
+        ${field('Friction', numberInput('friction', joint.friction, { min: 0 }), 'N·m')}
+        ${field('Armature', numberInput('armature', joint.armature, { min: 0, title: 'The inertia of what turns with the joint inside it' }), 'kg·m²')}
+        ${fields.join('')}`;
+}
+
 function jointInspector(joint) {
     const current = drawing();
     const parentFrame = frameById(current, joint.parent);
@@ -430,7 +456,7 @@ function jointInspector(joint) {
     return `<h3>${escapeHtml(joint.name)}</h3>
         ${field('Name', `<input type="text" name="name" value="${escapeHtml(joint.name)}" spellcheck="false">`)}
         ${field('Kind', `<select name="kind">${jointKinds.map((kind) => `<option value="${kind}"${kind === joint.kind ? ' selected' : ''}>${jointLabels[kind]}</option>`).join('')}</select>`)}
-        <p class="note">Joins <strong>${escapeHtml(nameOf(parentFrame.solid))}</strong> (its point and axis) to <strong>${escapeHtml(nameOf(childFrame.solid))}</strong>.${loop ? ' It closes a loop: Build holds its two solids together at its point with a force of its own, shown on the relationship in the canvas.' : ''}</p>
+        <p class="note">Joins <strong>${escapeHtml(nameOf(parentFrame.solid))}</strong> (its point and axis) to <strong>${escapeHtml(nameOf(childFrame.solid))}</strong>.${loop ? ' It closes a loop: Build holds it with a force of its own, on its own relationship in the canvas; the force, the gap and the twist left are states of the solid it holds.' : ''}</p>
         <h2>Point and axis</h2>
         <div class="fieldRow"><span>Point</span>${['x', 'y', 'z'].map((name, index) => `<label>${name}${numberInput(`anchor.${index}`, toMillimetres(anchor[index]), { step: 1 })}</label>`).join('')}</div>
         <div class="fieldRow"><span>Axis</span>${['x', 'y', 'z'].map((name, index) => `<label>${name}${numberInput(`axis.${index}`, Math.round(axis[index] * 1000) / 1000, { step: 0.1 })}</label>`).join('')}</div>
@@ -446,11 +472,7 @@ function jointInspector(joint) {
         ${field('Friction', numberInput('friction', joint.friction, { min: 0 }), linear ? 'N' : 'N·m')}
         ${field('Armature', numberInput('armature', joint.armature, { min: 0, title: 'The inertia of what turns with the joint inside it, such as a motor\'s rotor through its gearbox' }), linear ? 'kg' : 'kg·m²')}
         ${driveFields.join('')}` : ''}
-        ${ball && !loop ? `<h2>Motion</h2>
-        ${field('Damping', numberInput('damping', joint.damping, { min: 0 }), 'N·m·s/rad')}
-        ${field('Friction', numberInput('friction', joint.friction, { min: 0 }), 'N·m')}
-        ${field('Armature', numberInput('armature', joint.armature, { min: 0, title: 'The inertia of what turns with the joint inside it' }), 'kg·m²')}
-        <p class="note">It turns freely about its point every way, damped and rubbed on each axis alike; nothing drives it yet.</p>` : ''}
+        ${ball && !loop ? ballMotion(joint) : ''}
         <div class="buttons"><button type="button" class="tool" data-action="delete">Delete joint</button></div>`;
 }
 
@@ -515,7 +537,20 @@ function inspectorChanged(input) {
         if (name === 'name') { if (value.trim()) apply({ name: value.trim() }, 'Name'); else render(); return; }
         if (name === 'kind') { apply({ kind: value }, 'Kind'); return; }
         if (name === 'limited') {
-            apply({ limits: value ? (linear ? { lower: -0.05, upper: 0.05 } : { lower: -Math.PI / 2, upper: Math.PI / 2 }) : null }, 'Limits');
+            const limits = joint.kind === 'ball' ? { lower: 0, upper: Math.PI / 4 } : linear ? { lower: -0.05, upper: 0.05 } : { lower: -Math.PI / 2, upper: Math.PI / 2 };
+            apply({ limits: value ? limits : null }, 'Limits');
+            return;
+        }
+        if (joint.kind === 'ball' && name === 'limits.upper') {
+            if (!(number > 0)) { toast('A most turn must be more than zero.'); render(); return; }
+            apply({ limits: { lower: 0, upper: fromDegrees(number) } }, 'Most turn');
+            return;
+        }
+        if (/^drive\.(torque|setpoint)\.[012]$/.test(name)) {
+            const [, field, index] = name.split('.');
+            const values = [...(Array.isArray(joint.drive?.[field]) ? joint.drive[field] : [0, 0, 0])];
+            values[Number(index)] = field === 'setpoint' ? fromDegrees(number) : number;
+            apply({ drive: { [field]: values } }, field === 'setpoint' ? 'Setpoint' : 'Torque');
             return;
         }
         if (name === 'limits.lower' || name === 'limits.upper') { apply({ limits: { ...joint.limits, [name.slice(7)]: fromShown(number) } }, 'Limits'); return; }

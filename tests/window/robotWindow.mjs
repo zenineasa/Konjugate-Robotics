@@ -203,9 +203,9 @@ try {
     // its damping, friction and armature but no drive.
     await page.selectOption('#exampleSelect', 'fourBar');
     await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Four-bar linkage');
-    assert.match(await page.textContent('#checksList'), /Closing pin closes a loop: Build holds its two solids together at its point/);
+    assert.match(await page.textContent('#checksList'), /Closing pin closes a loop: Build holds its two solids together at its point, free to turn only about its axis/);
     await page.click('#partsTree li:has-text("Closing pin")');
-    assert.match(await page.textContent('#inspector'), /It closes a loop: Build holds its two solids together at its point/);
+    assert.match(await page.textContent('#inspector'), /It closes a loop: Build holds it with a force of its own/);
     await page.click('#buildButton');
     await page.waitForFunction(() => window.__bridge.built?.edges?.some(({ name }) => name === 'Closing pin'));
     const linkage = await page.evaluate(() => window.__bridge.built);
@@ -213,9 +213,17 @@ try {
     await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Ball-joint pendulum');
     assert.match(await page.textContent('#checksList'), /Ready to build/);
     await page.click('#partsTree li:has-text("Shoulder")');
-    const card = await page.textContent('#inspector');
-    assert.match(card, /Damping/);
-    assert.doesNotMatch(card, /Driven by/);
+    assert.match(await page.textContent('#inspector'), /Damping/);
+    // A ball is driven too: as a servo, its setpoint is a turn about each of its parent's axes.
+    await page.selectOption('#inspector select[name="drive.mode"]', 'servo');
+    await page.fill('#inspector input[name="drive.setpoint.1"]', '20');
+    await page.press('#inspector input[name="drive.setpoint.1"]', 'Enter');
+    const shoulder = (await drawing()).joints.find(({ name }) => name === 'Shoulder');
+    assert.equal(shoulder.drive.mode, 'servo');
+    assert.ok(Math.abs(shoulder.drive.setpoint[1] - (20 * Math.PI) / 180) < 1e-9, 'The setpoint turn should be kept in radians.');
+    await page.check('#inspector input[name="limited"]');
+    assert.match(await page.textContent('#inspector'), /Most turn/);
+    assert.match(await page.textContent('#checksList'), /Ready to build/);
     await shot('06-ball');
 
     assert.deepEqual(problems, [], `the page reported problems: ${problems.join(' | ')}`);

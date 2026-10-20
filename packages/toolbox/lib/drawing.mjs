@@ -14,10 +14,11 @@
 // and axis are in its solid's own frame (the Ground's frame is the world), so a frame moves with its solid. A joint
 // joins two frames, `parent` and `child`, by their ids: its anchor is the parent frame's point and its axis the parent
 // frame's axis, both where the drawing has them. `kind` is hinge (turns about the axis), slider (slides along it), ball
-// or fixed. `limits` is { lower, upper } (radians for a hinge, metres for a slider) or null. `drive` says what moves a
-// hinge or slider: { mode: 'free' }, { mode: 'torque', torque } (newton metres, or newtons for a slider) or
-// { mode: 'servo', setpoint, gain, torqueLimit } (a position servo: its setpoint, its stiffness in N·m per radian, the
-// most torque it gives).
+// or fixed. `limits` is { lower, upper } (radians for a hinge, metres for a slider; for a ball, lower 0 and upper its
+// most turn from where it is drawn) or null. `drive` says what moves a hinge, a slider or a ball: { mode: 'free' },
+// { mode: 'torque', torque } (newton metres, or newtons for a slider; for a ball [x, y, z] about its parent's axes) or
+// { mode: 'servo', setpoint, gain, torqueLimit } (a position servo: its setpoint, for a ball a turn vector [x, y, z] in
+// its parent's frame, its length the angle; its stiffness in N·m per radian; the most torque it gives).
 //
 // Every operation returns a new drawing and leaves the one given alone, so the window's undo keeps each as it was.
 
@@ -209,6 +210,7 @@ export function updateFrame(drawing, id, { point, axis }) {
 // ---- joints -----------------------------------------------------------------------------------------------------
 
 export function defaultDrive(kind) {
+    if (kind === 'ball') return { mode: 'free', torque: [0, 0, 0], setpoint: [0, 0, 0], gain: 2, torqueLimit: 2 };
     if (kind !== 'hinge' && kind !== 'slider') return { mode: 'free' };
     return { mode: 'free', torque: 0, setpoint: 0, gain: kind === 'hinge' ? 20 : 2000, torqueLimit: kind === 'hinge' ? 2 : 50 };
 }
@@ -276,7 +278,8 @@ export function updateJoint(drawing, id, changes) {
     if (changes.name !== undefined) joint.name = String(changes.name);
     for (const field of ['damping', 'friction', 'armature']) if (changes[field] !== undefined) joint[field] = Number(changes[field]);
     if (changes.limits !== undefined) joint.limits = changes.limits ? { lower: Number(changes.limits.lower), upper: Number(changes.limits.upper) } : null;
-    if (changes.drive) joint.drive = { ...joint.drive, ...changes.drive };
+    // A ball's drive carries its vectors whichever mode it is in, so switching modes keeps them.
+    if (changes.drive) joint.drive = { ...(joint.kind === 'ball' ? defaultDrive('ball') : {}), ...joint.drive, ...changes.drive };
     return next;
 }
 
@@ -391,6 +394,10 @@ export function checkDrawing(drawing) {
         for (const field of ['damping', 'friction', 'armature']) {
             if (!(Number.isFinite(joint[field]) && joint[field] >= 0)) errors.push({ id: joint.id, message: `${joint.name}: its ${field} must be zero or more.` });
         }
+        if (joint.kind === 'ball' && joint.drive?.mode && joint.drive.mode !== 'free') {
+            const vector = joint.drive.mode === 'torque' ? joint.drive.torque : joint.drive.setpoint;
+            if (!(Array.isArray(vector) && vector.length === 3 && vector.every(Number.isFinite))) errors.push({ id: joint.id, message: `${joint.name}: a ball's ${joint.drive.mode === 'torque' ? 'torque' : 'setpoint'} is three numbers, about x, y and z.` });
+        }
         if (joint.drive?.mode === 'servo') {
             if (!(joint.drive.gain > 0)) errors.push({ id: joint.id, message: `${joint.name}: a servo's stiffness must be more than zero.` });
             if (!(joint.drive.torqueLimit > 0)) errors.push({ id: joint.id, message: `${joint.name}: a servo's most torque must be more than zero.` });
@@ -403,8 +410,13 @@ export function checkDrawing(drawing) {
     }
     const built = structure(drawing);
     for (const joint of built.loops) {
-        if (joint.kind === 'slider') errors.push({ id: joint.id, message: `${joint.name}: a slider cannot close a loop yet. Make it a hinge, a ball or fixed, or remove another joint of the loop.` });
-        else if (joint.kind !== 'fixed') notes.push({ id: joint.id, message: `${joint.name} closes a loop: Build holds its two solids together at its point, free to turn there${joint.kind === 'hinge' ? ' (about its axis when the loop\'s other joints turn about the same axis, as in a planar linkage)' : ''}.` });
+        const held = {
+            ball: 'together at its point, free to turn there',
+            hinge: 'together at its point, free to turn only about its axis',
+            slider: 'on its axis\'s line, free only to slide along it',
+            fixed: 'fixed to each other'
+        }[joint.kind];
+        notes.push({ id: joint.id, message: `${joint.name} closes a loop: Build holds its two solids ${held}, by a force of its own.` });
         if (joint.drive?.mode && joint.drive.mode !== 'free') errors.push({ id: joint.id, message: `${joint.name} closes a loop, so it cannot be driven; drive another joint of the loop.` });
     }
     for (const root of built.roots) {

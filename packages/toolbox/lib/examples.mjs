@@ -2,7 +2,8 @@
 
 // Drawings to start from, built with the same operations a user's clicks make (lib/drawing.mjs), so each is a drawing
 // like any other: a pendulum, a two-link arm on a turning waist, a cart on a rail carrying two pendulums, an arm
-// reaching out with a two-finger gripper, a four-bar linkage (a closed loop) and a pendulum on two ball joints.
+// reaching out with a two-finger gripper, a four-bar linkage (a closed loop), a pendulum on two ball joints, and a crank
+// driving a block along a rail (a loop closed by a slider).
 
 import { addFrameAt, addJoint, addSolid, createDrawing, updateJoint, updateSolid } from './drawing.mjs';
 import { add, between, length, normalize, scale, subtract } from './math.mjs';
@@ -13,7 +14,8 @@ export const examples = Object.freeze([
     { id: 'cartPendulums', name: 'Cart and pendulums', description: 'A servo slides a cart along a rail; the two pendulums hanging from it swing as it starts and stops.' },
     { id: 'gripperArm', name: 'Arm with gripper', description: 'A waist, a shoulder, an elbow and a wrist reach out with a two-finger gripper, each held by a servo: run it and the arm turns while the fingers close.' },
     { id: 'fourBar', name: 'Four-bar linkage', description: 'A crank, a coupler and a rocker on a base, the coupler pinned to the rocker to close the loop: a steady torque turns the crank round and the rocker rocks.' },
-    { id: 'ballPendulum', name: 'Ball-joint pendulum', description: 'Two links hanging from ball joints, let go out of line with each other, so they swing and twist in three dimensions.' }
+    { id: 'ballPendulum', name: 'Ball-joint pendulum', description: 'Two links hanging from ball joints, let go out of line with each other, so they swing and twist in three dimensions.' },
+    { id: 'crankSlider', name: 'Crank and slider', description: 'A crank turned by a steady torque pushes a block back and forth along a rail through a connecting rod; the block\'s slider on the rail closes the loop.' }
 ]);
 
 // Places a solid, then turns and moves it to `position` and `rotation`.
@@ -225,6 +227,36 @@ export function exampleDrawing(id) {
         const lower = result.id;
         result = join(drawing, upper, lower, middle, [0, 0, 1], 'ball', 'Elbow');
         return updateJoint(result.drawing, result.id, { damping: 0.0005, friction: 0.0002 });
+    }
+    if (id === 'crankSlider') {
+        let drawing = createDrawing('Crank and slider');
+        const pivot = [0, 0, 0.2];
+        const pin = [0.04, 0, 0.23];
+        const wrist = [0.18, 0, 0.2];
+        let result = rod(drawing, { name: 'Crank', from: pivot, to: pin, radius: 0.008, color: '#d08b4a' });
+        drawing = result.drawing;
+        const crank = result.id;
+        result = join(drawing, 'ground', crank, pivot, [0, 1, 0], 'hinge', 'Crank pivot');
+        drawing = updateJoint(result.drawing, result.id, { damping: 0.002, drive: { mode: 'torque', torque: 0.02 } });
+        result = rod(drawing, { name: 'Connecting rod', from: pin, to: wrist, radius: 0.008, color: '#5b8db8' });
+        drawing = result.drawing;
+        const connecting = result.id;
+        drawing = join(drawing, crank, connecting, pin, [0, 1, 0], 'hinge', 'Crank pin').drawing;
+        result = place(drawing, 'box', { name: 'Block', size: { x: 0.04, y: 0.03, z: 0.03 }, position: wrist, color: '#6aa86a' });
+        drawing = result.drawing;
+        const block = result.id;
+        drawing = join(drawing, connecting, block, wrist, [0, 1, 0], 'hinge', 'Wrist pin').drawing;
+        // The rail on a stand, a step further from the Ground than the crank, so the block's slider on it is the joint
+        // that closes the loop.
+        result = place(drawing, 'box', { name: 'Stand', size: { x: 0.02, y: 0.02, z: 0.15 }, position: [0.3, -0.04, 0.075], color: '#7d8fa3' });
+        drawing = result.drawing;
+        const stand = result.id;
+        drawing = join(drawing, 'ground', stand, [0.3, -0.04, 0], [0, 0, 1], 'fixed', 'Stand mount').drawing;
+        result = place(drawing, 'box', { name: 'Rail', size: { x: 0.3, y: 0.01, z: 0.01 }, position: [0.15, -0.04, 0.19], color: '#5f6f80' });
+        drawing = result.drawing;
+        const rail = result.id;
+        drawing = join(drawing, stand, rail, [0.3, -0.04, 0.15], [0, 0, 1], 'fixed', 'Rail mount').drawing;
+        return join(drawing, rail, block, wrist, [1, 0, 0], 'slider', 'Guide').drawing;
     }
     throw new Error(`There is no example "${id}".`);
 }

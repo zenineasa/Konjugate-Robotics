@@ -12,7 +12,7 @@
 //   its parent.
 // - A joint that closes a loop is an equality constraint: `connect` (the two solids held together at its point, free to
 //   turn, which with the loop's other joints parallel makes a planar linkage exact) for a hinge or a ball, `weld` for a
-//   fixed joint.
+//   fixed joint. MuJoCo has no equality for a slider, so a loop a slider closes is left open here.
 // - A solid joined to nothing on the Ground has a free joint, and falls.
 // - A servo is a position actuator on its joint: its stiffness, and its torque limited.
 // - Contact is off: every geom has contype and conaffinity 0. Solids drawn touching at a joint would otherwise push each
@@ -70,7 +70,8 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
                 const axis = normalize(scale(directionToLocal(pose, anchor.axis), flipped ? -1 : 1));
                 const attributes = [`name="${joint.id}"`, `type="${joint.kind === 'slider' ? 'slide' : joint.kind}"`, `pos="${formatVector(toLocal(pose, anchor.point))}"`];
                 if (joint.kind !== 'ball') attributes.push(`axis="${formatVector(axis)}"`);
-                if (joint.limits && joint.kind !== 'ball') attributes.push('limited="true"', `range="${formatNumber(joint.limits.lower)} ${formatNumber(joint.limits.upper)}"`);
+                // A ball's range is its most turn, from 0.
+                if (joint.limits) attributes.push('limited="true"', `range="${formatNumber(joint.kind === 'ball' ? 0 : joint.limits.lower)} ${formatNumber(joint.limits.upper)}"`);
                 attributes.push(`damping="${formatNumber(joint.damping ?? 0)}"`, `frictionloss="${formatNumber(joint.friction ?? 0)}"`, `armature="${formatNumber(joint.armature ?? 0)}"`);
                 write(depth + 1, `<joint ${attributes.join(' ')}/>`);
             }

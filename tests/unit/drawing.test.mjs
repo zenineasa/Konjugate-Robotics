@@ -101,7 +101,8 @@ test('structure walks from the Ground: parents, a loop and a floating solid', ()
     assert.equal(built.parentJoint.get(capsule).parent, groundId);
     assert.deepEqual(checkDrawing(drawing).errors, []);
     drawing = updateJoint(drawing, built.loops[0].id, { kind: 'slider' });
-    assert.match(checkDrawing(drawing).errors.map(({ message }) => message).join(' '), /a slider cannot close a loop yet/);
+    assert.deepEqual(checkDrawing(drawing).errors, []);
+    assert.match(checkDrawing(drawing).notes.map(({ message }) => message).join(' '), /closes a loop: Build holds its two solids on its axis's line, free only to slide along it/);
 });
 
 test('checks catch what cannot be built, each about the part it names', () => {
