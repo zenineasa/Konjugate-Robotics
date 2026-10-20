@@ -111,7 +111,7 @@ Later, from the same proposal: merging a rebuild with hand-made work (Part 1), a
 
 ## Where milestone A stands
 
-Built (October 2026): the core additions above, with engine and JavaScript tests; the window as described under What a user does, steps 1 to 7, except motor mode; the model builder with the articulated-body equations on the joint edges; three examples (a pendulum, a two-link arm, a cart carrying two pendulums); unit tests; engine tests against the Newton-Euler reference (and MuJoCo where it is installed); a window test that drives the page in a browser and has Konjugate's engine validate the model it builds.
+Built (October 2026): the core additions above, with engine and JavaScript tests; the window as described under What a user does, steps 1 to 7, except motor mode; the model builder with the articulated-body equations on the joint edges; four examples (a pendulum, a two-link arm, a cart carrying two pendulums, an arm with a two-finger gripper); unit tests; engine tests against the Newton-Euler reference (and MuJoCo where it is installed); a window test that drives the page in a browser and has Konjugate's engine validate the model it builds.
 
 Still to do in milestone A: a warning before a build replaces hand-made work; selecting several solids to move together; dragging a joint's point in the view.
 

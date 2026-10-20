@@ -14,7 +14,7 @@ import { pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { exampleDrawing } from '../../packages/toolbox/lib/examples.mjs';
+import { exampleDrawing, examples } from '../../packages/toolbox/lib/examples.mjs';
 import { massOf, reverseJoint, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
 import { buildModel } from '../../packages/toolbox/lib/modelBuilder.mjs';
@@ -90,6 +90,26 @@ test('a cart on a slider carries two pendulums, a branch of the tree each, as th
     const reversed = reverseJoint(drawing, jointNamed(drawing, 'Front swing').id);
     const again = await matchesReference('cartReversed', reversed, carried);
     assert.ok(largestDifference(again.series('Front pendulum.x'), run.series('Front pendulum.x')) < 1e-12);
+});
+
+test('an arm with a gripper turns at its waist and closes its fingers, held up against gravity, as the reference moves it', async () => {
+    const drawing = exampleDrawing('gripperArm');
+    const carried = {
+        Waist: 'Turret', Shoulder: 'Upper arm', Elbow: 'Forearm', Wrist: 'Hand', 'Left finger slide': 'Left finger', 'Right finger slide': 'Right finger'
+    };
+    const run = await matchesReference('gripper', drawing, carried);
+    const waist = run.series('Turret.jointAngle').at(-1);
+    assert.ok(Math.abs(waist - 0.8) < 0.02, `The waist should turn to its 0.8 rad setpoint, not ${waist}.`);
+    for (const [joint, solid] of [['Shoulder', 'Upper arm'], ['Elbow', 'Forearm'], ['Wrist', 'Hand']]) {
+        const sag = Math.max(...run.series(`${solid}.jointAngle`).map(Math.abs));
+        assert.ok(sag < 0.05, `The ${joint} servo should hold the arm where it is drawn against gravity, but it gave ${sag} rad.`);
+    }
+    for (const finger of ['Left finger', 'Right finger']) {
+        const travel = run.series(`${finger}.jointPosition`).at(-1);
+        assert.ok(Math.abs(travel + 0.015) < 0.002, `The ${finger.toLowerCase()} should close by 15 mm, not ${travel * 1000} mm.`);
+    }
+    const gap = (index) => Math.hypot(...['x', 'y', 'z'].map((axis) => run.series(`Left finger.${axis}`).at(index) - run.series(`Right finger.${axis}`).at(index)));
+    assert.ok(gap(-1) < gap(0) - 0.025, `The fingers should close towards each other, from ${gap(0)} m apart to ${gap(-1)} m.`);
 });
 
 test('friction, armature, a torque drive and every shape reach the motion as drawn', async () => {
@@ -178,7 +198,7 @@ test('every equation a build writes reads back in the canvas as the same express
     };
     let seed = 3;
     const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 1.6 - 0.8;
-    for (const id of ['pendulum', 'twoLinkArm', 'cartPendulums']) {
+    for (const { id } of examples) {
         for (const edge of buildModel(exampleDrawing(id)).document.edges) {
             const { bindings, definitions, outputs } = edge.equationModel;
             const readable = bindings.map(({ symbol }) => ({ symbol }));

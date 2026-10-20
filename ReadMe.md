@@ -2,7 +2,7 @@
 
 Draw a robot, and get a [Konjugate](https://github.com/zenineasa/Konjugate) model of it. A simple CAD-like window: place solids, click a point on one solid and a point on another to join them, say how they join and what drives each joint, and press Build. In the canvas, **each solid is a node and each joint is an edge between two solids**, so the robot can be wired to motors, batteries, controllers and anything else Konjugate models, then run, driven with sliders, forked, fitted and optimised. The robot moves by its joints' own equations (Featherstone's articulated-body method, split along the joints), which Konjugate's engine runs like any other: nothing outside the graph solves it, and every equation can be read and edited on its edge in the canvas.
 
-![A cart sliding on a rail with two pendulums hanging from it, drawn in the Robotics window's 3D view](screenshots/konjugate.robotics.webp)
+![An arm on a turning waist reaching out with a two-finger gripper, drawn in the Robotics window's 3D view](screenshots/konjugate.robotics.webp)
 
 ## Status
 
