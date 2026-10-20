@@ -1,0 +1,57 @@
+# Copyright © 2026 Zenin Easa Panthakkalakath
+
+name: Build
+
+# An unsigned build, run only by hand (Actions > Build > Run workflow), proving the code and
+# packaging still work. Nothing builds on an ordinary push: only a version tag does (release.yml).
+# Mirrors Konjugate core's crossPlatform.yml/release.yml split: this is the
+# crossPlatform.yml role (build, no signing, no publish); release.yml is the tag-triggered signed-
+# release counterpart. scripts/build.mjs only imports Konjugate core's pure-JS
+# src/packageArchive.mjs, so this is a plain Node job, not a native build matrix.
+on:
+    workflow_dispatch:
+
+jobs:
+    build:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Check out this repo
+              uses: actions/checkout@v4
+              with:
+                  path: konjugate-robotics
+            # Checked out as a sibling directory, matching scripts/konjugatePaths.mjs's default
+            # konjugateDir resolution (../konjugate relative to this repo) -- no KONJUGATE_DIR
+            # override needed. Always the public repo's default branch: this add-on builds against
+            # whatever core currently ships, the same as any other third-party add-on author would.
+            - name: Check out Konjugate core
+              uses: actions/checkout@v4
+              with:
+                  repository: zenineasa/Konjugate
+                  path: konjugate
+            - uses: actions/setup-node@v4
+              with:
+                  node-version: 24.19.0
+            # Only core needs installing: scripts/build.mjs dynamically imports core's own
+            # src/packageArchive.mjs, which resolves its own npm dependencies (fflate) starting
+            # from core's node_modules. This repo declares no dependencies of its own -- three.js is
+            # vendored as static files in packages/toolbox/vendor/, not an npm dependency.
+            - name: Install Konjugate core's dependencies
+              working-directory: konjugate
+              run: npm ci
+            # The unit tests, including tests/unit/archiveImports.test.mjs, which builds the add-on and
+            # checks every relative import, script and stylesheet in it resolves to a file inside it.
+            # The engine and window tests need Konjugate's engine build and a browser; run them locally.
+            - name: Run tests
+              working-directory: konjugate-robotics
+              run: npm test
+            - name: Build the add-on
+              working-directory: konjugate-robotics
+              run: npm run build
+            # Deliberately unsigned: signing is release.yml's job, gated to an actual version tag,
+            # not something this verification build should do.
+            - name: Upload build artifact
+              uses: actions/upload-artifact@v4
+              with:
+                  name: konjugate-robotics
+                  path: konjugate-robotics/out/*.kja
+                  if-no-files-found: error

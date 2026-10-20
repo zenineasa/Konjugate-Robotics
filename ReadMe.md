@@ -28,6 +28,10 @@ npm run test:engine      # drawn robots through Konjugate's engine, against a Ne
 npm run setup:python     # optional: .venv with MuJoCo (needs uv), so test:engine also compares with MuJoCo alone
 ```
 
+## Releasing
+
+As for Konjugate's other add-ons: push a tag `v<version>` matching `package.json`'s version, and `.github/workflows/release.yml` tests, builds, signs (with the `ROBOTICS_SIGNING_PRIVATE_KEY` secret) and verifies the toolbox against Konjugate's `registry/konjugate.robotics.json`, then publishes it as `konjugate.robotics.kja`. `.github/workflows/build.yml` makes an unsigned build, run by hand. Release Konjugate first when the toolbox needs something new from it (`minimumKonjugateVersion`).
+
 ## Licence
 
 [AGPL-3.0](LICENSE). MuJoCo (Apache-2.0) is used only by the tests, from the developer's own install, and is not shipped. three.js (MIT) is vendored in `packages/toolbox/vendor/` with its licence.
