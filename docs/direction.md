@@ -34,7 +34,7 @@ Simple means: a few solid shapes, sizes typed or dragged, joints made by clickin
 
 Every action has a button or menu item, a gesture in the view and a key, works on the selection and can be undone, on Windows, Linux and macOS alike.
 
-Later steps, in later milestones: keyframed poses saved as schedules; the sizing view (each joint's operating points over its motor's envelope, winding temperatures, the battery's charge); forks for a heavier payload or a weaker motor; Tuning against a real robot's logs; optimising sizes and gear ratios; handing a reduced robot to a larger model; MJCF and URDF export.
+Later steps, in later milestones: the sizing view (each joint's operating points over its motor's envelope, winding temperatures, the battery's charge); forks for a heavier payload or a weaker motor; Tuning against a real robot's logs; optimising sizes and gear ratios; handing a reduced robot to a larger model; MJCF and URDF export.
 
 ## How the drawing becomes Konjugate
 
@@ -46,7 +46,8 @@ Build turns the drawing into these, side by side in the canvas, laid out from th
 | a solid | a **node**, named as the solid | for a solid carried by a hinge or slider, that joint's speed and position (`jointSpeed`, then `jointAngle` or `jointPosition`, the only states it integrates), its acceleration and the drive's torque; its place in the world (`x`, `y`, `z` in metres, z up; `roll`, `pitch`, `yaw`, so Pose Visualizer shows it with nothing set up; and its rotation matrix `r11` to `r33`); its spatial velocity and acceleration; its articulated inertia and bias force; its kinetic and potential energy; its shape, drawn at true size |
 | a joint | an **edge** from the solid nearer the Ground to the other, named as the joint | the joint's equations (below), and its parameters: damping and friction (live sliders), armature, lower and upper limit, and its drive: a torque (a live slider), or a servo's setpoint (a live slider), stiffness and torque limit (a live slider) |
 | a solid's mass | a **shared parameter** `<solid> mass` | linked from the edge that carries the solid |
-| a joint in motor mode | a **joint motor** node and a **battery** node from the component library, wired to the joint's edge | current, torque at the joint, winding temperature; the battery's charge (milestone B) |
+| a joint in motor mode | a **motor** node (`<joint> motor`) and the robot's one **battery** node, with relationships from the battery (supply), from the joint's solid (controller, windings) and to the battery (drain) | the motor's supply voltage, duty cycle, current, torque at the joint and winding temperature; the battery's voltage and charge; the motor's resistance, torque constant and gear ratio, and the battery's voltages and capacity, as shared parameters |
+| a keyframed joint | a **shared parameter** `<joint> setpoint` with the keyframes as its schedule, linked from the servo's or the motor controller's setpoint | its setpoint over time, in straight lines from one keyframe to the next, still a live slider |
 
 So in the canvas a two-link arm reads as `Ground → Shoulder → Upper arm → Elbow → Forearm`, and a user adds a controller by wiring it to the `Forearm` node's `jointAngle` and to the `Elbow` edge's setpoint.
 
@@ -82,7 +83,9 @@ The gap opens a little while a linkage moves fast (within a twentieth of a milli
 The engine's step is the robot's step: a millisecond by default, which suits most drawings. Stiff servos on light solids need a shorter one; the run report states the step. The equations are cheap (a few hundred operations per joint), so a millisecond step runs much faster than real time for small robots.
 
 - **Servo mode** (the default for hobby and smart servos, such as the SO-100's Feetech STS3215, which close their own position loop): a torque of stiffness times (setpoint minus position), limited to the servo's most torque, every step. Speed and current limits come later.
-- **Torque mode** (for a motor driven by a controller the user builds in the canvas): a constant torque, a live slider. Wiring a joint motor's torque into a joint edge comes with milestone B.
+- **Torque mode** (for a motor driven by a controller the user builds in the canvas): a constant torque, a live slider.
+- **Motor mode** (a DC motor and gearbox on the robot's battery): a controller sets the duty cycle, the proportional gain times the setpoint left to reach less the derivative gain times the joint's speed, held to ±1; the current is the duty cycle times the battery's voltage less the back-EMF (torque constant × gear ratio × joint speed), over the winding's resistance; the torque at the joint is the gear ratio times the torque constant times the current, and the rotor's inertia times the ratio squared joins the joint's armature. The winding heats with its resistance times the current squared and cools to ambient through a thermal resistance; the battery's charge falls by the current the drive draws (duty × current) over its capacity, and its voltage falls in a straight line from full to empty with its charge. The winding's inductance is left out (its time constant is far below a step), and the current is not limited. A user's own controller can set the duty instead, with the gains at nothing.
+- **Keyframes**: poses in time, recorded from the jog panel, each driven joint's setpoint at that time. Build makes each keyframed joint's setpoint a shared parameter scheduled by them (Konjugate's own schedules, so a user can read and edit them in the parameters table), in straight lines between keyframes.
 - A joint's **limits** are a stiff spring and damper beyond them, scaled by the joint's effective inertia so they hold without a smaller step. **Friction** is smoothed over a hundredth of a radian per second (a tanh), so a joint at rest creeps very slowly rather than sticking.
 
 ### Seeing it move: Pose Visualizer, not a second player
@@ -132,7 +135,7 @@ Each one ends in something that can be shown.
 
 - **A. Draw it, build it, run it.** The window with boxes, cylinders, spheres and capsules; frames picked on surfaces; hinge, slider and fixed joints; free, torque and servo drives; undo, keys and menus. Build makes solid nodes and joint edges carrying the articulated-body equations. Checked against an independent Newton-Euler solution and against MuJoCo running the same MJCF on its own. Shown on a two-link arm and a cart carrying two pendulums.
 - **A2. Loops, balls and floating solids.** Closed loops (a four-bar linkage) through constraint forces on the closing joint's edge; ball joints; a solid joined to nothing.
-- **B. Drive it.** Motor mode (joint motor and battery from the component library); a jog panel of live setpoints; keyframed poses saved as schedules; a pick-and-place example.
+- **B. Drive it.** Motor mode (a motor node per joint and the robot's battery); a jog panel that poses the robot for setpoints and keyframes; keyframed poses saved as schedules; a pick-and-place example. Built (October 2026): each checked against the Newton-Euler reference, extended with the motors' electrics, the battery and the schedules, to rounding.
 - **C. Will these motors do it?** The sizing view and forks for a heavier payload or a weaker motor, as built in the first version, on drawn robots.
 - **D. Start from a known robot.** MJCF and URDF import, and Menagerie fetched on request, into the drawing as solids (with their meshes) and joints, as built in the first version; then STL and STEP parts.
 - **E. Parametric parts.** Extruded profiles, robot part templates, joint-first skeleton design, sizes as shared parameters.

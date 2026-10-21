@@ -15,13 +15,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { exampleDrawing, examples } from '../../packages/toolbox/lib/examples.mjs';
-import { addFrameAt, addJoint, addSolid, createDrawing, massOf, reverseJoint, structure, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
+import { addFrameAt, addJoint, addKeyframe, addSolid, createDrawing, massOf, reverseJoint, structure, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
 import { between, fromAxisAngle, scale } from '../../packages/toolbox/lib/math.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
 import { buildModel } from '../../packages/toolbox/lib/modelBuilder.mjs';
 import { konjugateModule } from '../../scripts/konjugatePaths.mjs';
 import { mujocoMissing, runDocument, runReference } from './harness.mjs';
-import { simulate } from './newtonEuler.mjs';
+import { inverseDynamics, restCoordinates, simulate, treeOf } from './newtonEuler.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'robotics-drawn-'));
 const build = (drawing, runTime = 3) => buildModel(drawing, { timeStep: 0.001, runTime }).document;
@@ -352,6 +352,73 @@ test('a ball joint is driven: a torque turns it, a servo turns it to its setpoin
     assert.ok(Math.max(...angles) > 0.28 && Math.max(...angles) < 0.34, `The limit should stop the turn at 0.3 rad, not ${Math.max(...angles)}.`);
 });
 
+// The two-link arm with its shoulder and elbow on motors, keyframed with its waist servo from rest to a pose.
+function motorArm() {
+    let drawing = exampleDrawing('twoLinkArm');
+    const id = (name) => jointNamed(drawing, name).id;
+    drawing = updateJoint(drawing, id('Shoulder'), { drive: { mode: 'motor', setpoint: 0 } });
+    drawing = updateJoint(drawing, id('Elbow'), { drive: { mode: 'motor', setpoint: 0 } });
+    drawing = addKeyframe(drawing, { time: 0, setpoints: { [id('Waist')]: 0, [id('Shoulder')]: 0, [id('Elbow')]: 0 } }).drawing;
+    return addKeyframe(drawing, { time: 1, setpoints: { [id('Waist')]: 0.5, [id('Shoulder')]: 0.4, [id('Elbow')]: 0.8 } }).drawing;
+}
+
+test('a joint on a motor follows its keyframes, drawing current from the battery and heating its winding, as the reference has it', async () => {
+    const drawing = motorArm();
+    const { run, reference } = await matchesReference('motorArm', drawing, { Waist: 'Turret', Shoulder: 'Upper arm', Elbow: 'Forearm' }, 2);
+    for (const name of ['Shoulder', 'Elbow']) {
+        const motor = reference.motors[jointNamed(drawing, name).id];
+        for (const [state, key] of [['duty', 'duty'], ['current', 'current'], ['torque', 'torque'], ['windingTemperature', 'temperature']]) {
+            const difference = largestDifference(run.series(`${name} motor.${state}`), motor[key]);
+            assert.ok(difference < 1e-9, `${name}'s motor's ${state} differs from the reference by ${difference}.`);
+        }
+    }
+    assert.ok(largestDifference(run.series('Battery.stateOfCharge'), reference.charge) < 1e-12, 'The battery\'s charge differs from the reference.');
+    // Each joint reaches its last keyframe; the waist's servo moves along its schedule, in a straight line to it.
+    const end = run.times.length - 1;
+    assert.ok(Math.abs(run.series('Upper arm.jointAngle')[end] - 0.4) < 0.01 && Math.abs(run.series('Forearm.jointAngle')[end] - 0.8) < 0.01, 'The motors should reach their keyframes.');
+    const half = run.times.findIndex((time) => Math.abs(time - 0.5) < 1e-9);
+    assert.ok(Math.abs(run.series('Turret.jointAngle')[half] - 0.25) < 0.01, 'Halfway, the waist should be halfway to its keyframe.');
+    // Held still at the end, each motor's torque holds its joint up against gravity: the torque the arm's own weight
+    // needs there, as the reference works it out at that pose.
+    const bodies = treeOf(drawing);
+    const q = restCoordinates(bodies);
+    const speeds = bodies.reduce((sum, body) => sum + (body.kind === 'fixed' ? 0 : 1), 0);
+    bodies.forEach((body, index) => { if (body.kind === 'hinge') q[index] = [run.series(`${drawing.solids.find(({ id }) => id === body.id).name}.jointAngle`)[end]]; });
+    const needed = inverseDynamics(bodies, q, Array(speeds).fill(0), Array(speeds).fill(0));
+    const elbowIndex = bodies.filter(({ kind }) => kind !== 'fixed').findIndex(({ joint }) => joint.name === 'Elbow');
+    assert.ok(Math.abs(run.series('Elbow motor.torque')[end] - needed[elbowIndex]) < 0.01 * Math.abs(needed[elbowIndex]) + 1e-3,
+        `The elbow's motor should hold ${needed[elbowIndex]} N·m, not ${run.series('Elbow motor.torque')[end]}.`);
+    // The schedule is the keyframes', a shared parameter like any other.
+    const document = build(drawing, 2);
+    const shoulder = document.sharedParameters.find(({ name }) => name === 'Shoulder setpoint');
+    assert.deepEqual(shoulder.schedule, { interpolation: 'linear', samples: [[0, 0], [1, 0.4]] });
+});
+
+test('a pick-and-place cycle on motors runs as the reference runs it: the arm turns to each keyframe, the motors heat and the battery drains', async () => {
+    const drawing = exampleDrawing('pickAndPlace');
+    const carried = { Waist: 'Turret', Shoulder: 'Upper arm', Elbow: 'Forearm', Wrist: 'Hand', 'Left finger slide': 'Left finger', 'Right finger slide': 'Right finger' };
+    const { run, reference } = await matchesReference('pickAndPlace', drawing, carried, 7);
+    for (const name of ['Waist', 'Shoulder', 'Elbow', 'Wrist']) {
+        const motor = reference.motors[jointNamed(drawing, name).id];
+        assert.ok(largestDifference(run.series(`${name} motor.current`), motor.current) < 1e-9, `${name}'s motor's current differs from the reference.`);
+        assert.ok(largestDifference(run.series(`${name} motor.windingTemperature`), motor.temperature) < 1e-9, `${name}'s motor's winding differs from the reference.`);
+    }
+    // At the end of each hold (1 to 1.5 s at the pick, 4.5 to 5 s at the place) the arm is near where the keyframes say,
+    // within the controllers' sag under the part's weight.
+    const at = (time) => run.times.findIndex((candidate) => Math.abs(candidate - time) < 1e-9);
+    const keyframes = drawing.keyframes;
+    for (const keyframe of keyframes.filter(({ time }) => [1.5, 5].includes(time))) {
+        for (const [name, solid] of [['Waist', 'Turret'], ['Shoulder', 'Upper arm'], ['Elbow', 'Forearm']]) {
+            const wanted = keyframe.setpoints[jointNamed(drawing, name).id];
+            const angle = run.series(`${solid}.jointAngle`)[at(keyframe.time)];
+            assert.ok(Math.abs(angle - wanted) < 0.05, `At ${keyframe.time} s, ${name} should be near ${wanted} rad, not ${angle}.`);
+        }
+    }
+    // The shoulder holds the arm and the part up the whole time: its winding warms and the battery's charge falls.
+    assert.ok(run.series('Shoulder motor.windingTemperature').at(-1) > run.series('Shoulder motor.windingTemperature')[0], 'The shoulder\'s winding should warm.');
+    assert.ok(run.series('Battery.stateOfCharge').at(-1) < 100, 'The battery should drain.');
+});
+
 test('friction, armature, a torque drive and every shape reach the motion as drawn', async () => {
     let drawing = exampleDrawing('twoLinkArm');
     drawing = updateJoint(drawing, jointNamed(drawing, 'Waist').id, { friction: 0.01, armature: 0.002, drive: { mode: 'free' } });
@@ -488,9 +555,18 @@ test('every equation a build writes reads back in the canvas as the same express
     };
     let seed = 3;
     const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 1.6 - 0.8;
-    // Every example, and a solid joined to nothing (its free joint's six axes solved through L D Lᵀ).
+    // Every example, and a solid joined to nothing (its free joint's six axes solved through L D Lᵀ): every relationship's
+    // equations (several setting values, or one adding a rate) and every node's source terms (a motor's winding, the
+    // battery's voltage).
     for (const [id, drawing] of [...examples.map(({ id: exampleId }) => [exampleId, exampleDrawing(exampleId)]), ['floating', floatingDrawing()]]) {
-        for (const edge of buildModel(drawing).document.edges) {
+        const { document } = buildModel(drawing);
+        const terms = document.nodes.flatMap((node) => node.sourceTerms.map(({ expressionModel }) => ({ name: `${node.name}'s source term`, equationModel: {
+            bindings: expressionModel.bindings, definitions: [], outputs: [{ latex: expressionModel.latex, mathJson: expressionModel.mathJson }]
+        } })));
+        const single = (edge) => (edge.equationModel.outputs ? edge : { ...edge, equationModel: {
+            bindings: edge.equationModel.bindings, definitions: [], outputs: [{ latex: edge.equationModel.latex, mathJson: edge.equationModel.mathJson }]
+        } });
+        for (const edge of [...document.edges.map(single), ...terms]) {
             const { bindings, definitions, outputs } = edge.equationModel;
             const readable = bindings.map(({ symbol }) => ({ symbol }));
             const values = new Map(bindings.map(({ symbol }) => [symbol, random()]));

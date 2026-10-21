@@ -226,16 +226,71 @@ try {
     assert.match(await page.textContent('#checksList'), /Ready to build/);
     await shot('06-ball');
 
+    // 12. Motors, the battery, the jog panel and keyframes: the pick-and-place arm.
+    await page.selectOption('#exampleSelect', 'pickAndPlace');
+    await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Pick and place');
+    assert.equal(await page.locator('#posePanel input[name="jog"]').count(), 6, 'a jog slider for each joint a servo or a motor drives');
+    assert.equal(await page.locator('#posePanel .keyframes li').count(), 8);
+    const handAt = () => page.evaluate(() => { const view = window.roboticsWindow.view; const hand = window.roboticsWindow.drawing().solids.find(({ name }) => name === 'Hand'); return view.meshes.get(hand.id).position.toArray(); });
+    const drawnHand = await handAt();
+    // Jog the shoulder: the view shows the robot posed; the drawing is unchanged; Escape goes back.
+    const shoulderJog = page.locator('#posePanel label.jog', { hasText: 'Shoulder' }).locator('input');
+    const jogged = await shoulderJog.evaluate((input) => { input.value = '0.5'; input.dispatchEvent(new Event('input', { bubbles: true })); return Number(input.value); });
+    assert.ok(Math.abs(jogged - 0.5) < 0.01, 'the slider moves in steps of half a degree');
+    assert.notDeepEqual(await handAt(), drawnHand, 'jogging the shoulder should move the hand in the view');
+    assert.equal((await drawing()).solids.find(({ name }) => name === 'Hand').position.join(), (await page.evaluate(() => window.roboticsWindow.drawing().solids.find(({ name }) => name === 'Hand').position.join())));
+    await shot('07-jogged');
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    // K records the pose as a keyframe a second after the last; undo takes it back.
+    await page.keyboard.press('k');
+    let keyframes = (await drawing()).keyframes;
+    assert.equal(keyframes.length, 9);
+    const added = keyframes.find(({ time }) => time === 7);
+    const shoulderId = (await drawing()).joints.find(({ name }) => name === 'Shoulder').id;
+    assert.ok(added && Math.abs(added.setpoints[shoulderId] - jogged) < 1e-12, 'the new keyframe keeps the jogged shoulder');
+    await page.keyboard.press(`${command}+z`);
+    assert.equal((await drawing()).keyframes.length, 8);
+    await page.keyboard.press('Escape');
+    assert.deepEqual(await handAt(), drawnHand, 'Escape shows the robot as drawn again');
+    // Clicking a keyframe shows it; ] shows the next.
+    await page.click('#posePanel .keyframes li:nth-child(2)', { position: { x: 120, y: 8 } });
+    const second = (await drawing()).keyframes[1];
+    assert.equal(await page.evaluate(() => window.roboticsWindow.state.pose.keyframe), second.id);
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press(']');
+    assert.equal(await page.evaluate(() => window.roboticsWindow.state.pose.keyframe), (await drawing()).keyframes[2].id);
+    await page.keyboard.press('Escape');
+    // A motor's card: its controller and its motor; the battery's on the robot's card.
+    await page.click('#partsTree li:has-text("Waist")');
+    assert.match(await page.textContent('#inspector'), /Winding resistance[\s\S]*Gear ratio/);
+    await page.fill('#inspector input[name="motor.gearRatio"]', '120');
+    await page.press('#inspector input[name="motor.gearRatio"]', 'Enter');
+    assert.equal((await drawing()).joints.find(({ name }) => name === 'Waist').drive.motor.gearRatio, 120);
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('Escape');
+    assert.match(await page.textContent('#inspector'), /Battery/);
+    await page.fill('#inspector input[name="battery.capacity"]', '3');
+    await page.press('#inspector input[name="battery.capacity"]', 'Enter');
+    assert.equal((await drawing()).battery.capacity, 10800);
+    // Built: a motor node per motor, the battery, and each keyframed setpoint scheduled.
+    await page.click('#buildButton');
+    await page.waitForFunction(() => window.__bridge.built?.nodes?.some(({ name }) => name === 'Battery'));
+    const pickAndPlace = await page.evaluate(() => window.__bridge.built);
+    assert.ok(['Waist motor', 'Shoulder motor', 'Elbow motor', 'Wrist motor'].every((name) => pickAndPlace.nodes.some((node) => node.name === name)));
+    assert.equal(pickAndPlace.sharedParameters.find(({ name }) => name === 'Waist setpoint').schedule.samples.length, 8);
+    await shot('08-pick-and-place');
+
     assert.deepEqual(problems, [], `the page reported problems: ${problems.join(' | ')}`);
 
-    // 12. Konjugate's engine accepts the models, when there is a build of it.
+    // 13. Konjugate's engine accepts the models, when there is a build of it.
     const engine = process.env.KONJUGATE_ENGINE_PATH ?? konjugateModule(join('out', 'engine', process.platform === 'win32' ? 'konjugateEngine.exe' : 'konjugateEngine'));
     if (existsSync(engine)) {
         const { encodeProjectFile } = await import(pathToFileURL(konjugateModule('src/projectFile.mjs')));
         const { decodeValidationReport } = await import(pathToFileURL(konjugateModule('src/reportProtocol.mjs')));
         const directory = join(tmpdir(), `robotics-window-${process.pid}`);
         await mkdir(directory, { recursive: true });
-        for (const [name, built] of [['robot', document], ['linkage', linkage]]) {
+        for (const [name, built] of [['robot', document], ['linkage', linkage], ['pickAndPlace', pickAndPlace]]) {
             await writeFile(join(directory, `${name}.kjt`), await encodeProjectFile(JSON.stringify(built)));
             spawnSync(engine, ['validate', join(directory, `${name}.kjt`), '--report', join(directory, `${name}.report`)]);
             const report = decodeValidationReport(await readFile(join(directory, `${name}.report`)));

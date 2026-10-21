@@ -112,3 +112,14 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
 @media (max-width: 900px) {
     .layout { grid-template-columns: 200px 1fr 260px; }
 }
+
+.posePanel .jog { display: grid; grid-template-columns: 1fr; gap: 2px; margin: 6px 0; }
+.posePanel .jog span { color: var(--muted); }
+.posePanel .jog input[type="range"] { width: 100%; accent-color: var(--accent); }
+.posePanel .jog output { font-variant-numeric: tabular-nums; color: var(--text); font-size: 12px; }
+.posePanel .buttons { display: flex; flex-wrap: wrap; gap: 4px; margin: 8px 0; }
+.posePanel .keyframes { list-style: none; margin: 0; padding: 0; }
+.posePanel .keyframes li { display: grid; grid-template-columns: 56px auto 1fr auto auto; align-items: center; gap: 4px; padding: 3px 4px; border-radius: 5px; cursor: pointer; }
+.posePanel .keyframes li.selected { background: #2b2a1c; outline: 1px solid var(--selected); }
+.posePanel .keyframes li .tool { padding: 2px 6px; font-size: 12px; }
+.posePanel .keyframes .unit { color: var(--muted); }

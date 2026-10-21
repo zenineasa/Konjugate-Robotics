@@ -21,7 +21,7 @@
 // The Ground is a node too, holding still. Each solid's mass is a shared parameter; a joint's settings are its
 // relationship's parameters, the drive's torque or setpoint a live slider.
 
-import { checkDrawing, frameById, frameInWorld, groundId, massOf, poseOf, structure, treeOrder } from './drawing.mjs';
+import { batteryOf, checkDrawing, defaultDrive, drivenJoints, frameById, frameInWorld, groundId, keyframesOf, massOf, poseOf, structure, treeOrder } from './drawing.mjs';
 import * as E from './expressions.mjs';
 import { conjugate, directionToLocal, multiply as multiplyQuaternions, normalize, rotate, scale, toLocal, toRollPitchYaw } from './math.mjs';
 import { shapeMesh } from './shapes.mjs';
@@ -88,7 +88,8 @@ const biasSymbols = ['pa1', 'pa2', 'pa3', 'pa4', 'pa5', 'pa6'];
 
 const stateNames = {
     jointSpeed: 'Joint speed', jointAngle: 'Joint angle', jointPosition: 'Joint position', jointAcceleration: 'Joint acceleration',
-    jointTorque: 'Drive torque', x: 'x', y: 'y', z: 'z', roll: 'Roll', pitch: 'Pitch', yaw: 'Yaw',
+    jointTorque: 'Drive torque', motorTorque: 'Motor torque at the joint', supplyVoltage: 'Supply voltage', duty: 'Duty cycle', current: 'Current',
+    torque: 'Torque at the joint', windingTemperature: 'Winding temperature', voltage: 'Voltage', stateOfCharge: 'State of charge', x: 'x', y: 'y', z: 'z', roll: 'Roll', pitch: 'Pitch', yaw: 'Yaw',
     w1: 'Angular velocity x', w2: 'Angular velocity y', w3: 'Angular velocity z',
     v1: 'Velocity at origin x', v2: 'Velocity at origin y', v3: 'Velocity at origin z',
     vc1: 'Centre velocity x', vc2: 'Centre velocity y', vc3: 'Centre velocity z',
@@ -232,6 +233,10 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
     }
     for (const { id: solidId } of order) if (path.has(solidId) || affected.has(parentOf.get(solidId).parent)) affected.add(solidId);
 
+    // The joints a motor drives (each a hinge or a slider in the tree), by the solid each carries.
+    const motorDriven = new Map(order.map(({ id: solidId }) => [solidId, parentOf.get(solidId).joint])
+        .filter(([, joint]) => (joint.kind === 'hinge' || joint.kind === 'slider') && joint.drive?.mode === 'motor'));
+
     // ---- nodes ---------------------------------------------------------------------------------------------------
     const nodes = new Map();
     const addState = (node, symbol, initialValue, unit = '') => {
@@ -328,6 +333,7 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
             rotationStates(node, pose);
             velocityStates(node);
         }
+        if (motorDriven.has(solidId)) addState(node, 'motorTorque', 0, joint.kind === 'slider' ? 'N' : 'N·m');
         accelerationSymbols.forEach((symbol) => addState(node, symbol, 0));
         symmetric.forEach(([row, column]) => addState(node, inertiaSymbol(row, column), 0));
         biasSymbols.forEach((symbol) => addState(node, symbol, 0));
@@ -369,13 +375,39 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
         masses.set(solidId, shared);
     }
 
+    // ---- each driven joint's setpoint, scheduled by the keyframes ------------------------------------------------------
+    // A shared parameter per joint the keyframes set, following them in straight lines from one to the next (and
+    // holding the first before it and the last after it), a live slider too.
+    const setpoints = new Map();
+    const keyframes = keyframesOf(drawing);
+    for (const joint of drivenJoints(drawing)) {
+        const samples = keyframes.filter(({ setpoints: values }) => Number.isFinite(values[joint.id])).map(({ time, setpoints: values }) => [round(time), round(values[joint.id])]);
+        if (!samples.length) continue;
+        const travel = joint.limits ?? (joint.kind === 'hinge' ? { lower: -Math.PI, upper: Math.PI } : { lower: -0.5, upper: 0.5 });
+        const lower = Math.min(travel.lower, ...samples.map(([, value]) => value));
+        const upper = Math.max(travel.upper, ...samples.map(([, value]) => value));
+        const shared = {
+            id: id(), name: `${joint.name} setpoint`, symbol: camelKey(`${joint.name} setpoint`, symbols), value: samples[0][1],
+            unit: joint.kind === 'slider' ? 'm' : 'rad', mode: 'live', control: { minimum: round(lower), maximum: round(upper), step: round((upper - lower) / 400) },
+            schedule: { interpolation: 'linear', samples }
+        };
+        document.sharedParameters.push(shared);
+        setpoints.set(joint.id, shared);
+    }
+
     // ---- each joint, a relationship --------------------------------------------------------------------------------------
     for (const { id: childId } of order) {
         const { joint, parent: parentId } = parentOf.get(childId);
-        const roles = { onPath: path.has(childId), affected: affected.has(childId), parentAffected: affected.has(parentId), gathers: gather.has(childId), R, timeStep };
+        const roles = {
+            onPath: path.has(childId), affected: affected.has(childId), parentAffected: affected.has(parentId), gathers: gather.has(childId), R, timeStep,
+            setpoint: setpoints.get(joint.id) ?? null
+        };
         document.edges.push(jointRelationship(drawing, joint, nodes.get(parentId), nodes.get(childId), parentId, childId, masses.get(childId), id, roles));
     }
     for (const loop of loops) document.edges.push(closingRelationship(drawing, loop, nodes, path, R, id, timeStep));
+
+    // ---- motors and their battery ----------------------------------------------------------------------------------------
+    if (motorDriven.size) motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symbols, id);
     for (const node of document.nodes) delete node.bySymbol;
 
     const runConfigurationId = id();
@@ -389,7 +421,7 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
             driven: drawing.joints.filter((joint) => joint.drive?.mode && joint.drive.mode !== 'free').length,
             nodes: document.nodes.length,
             edges: document.edges.length,
-            equations: document.edges.reduce((sum, edge) => sum + edge.equationModel.outputs.length, 0)
+            equations: document.edges.reduce((sum, edge) => sum + (edge.equationModel.outputs?.length ?? 1), 0)
         },
         report: { warnings: check.warnings.map(({ message }) => message), notes: check.notes.map(({ message }) => message) }
     };
@@ -489,7 +521,9 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     if (moving && !free) {
         parameter('damping', 'Damping', joint.damping ?? 0, units.damping, range(joint.damping ?? 0, slider ? 50 : 0.5, 0));
         parameter('friction', 'Friction', joint.friction ?? 0, units.friction, range(joint.friction ?? 0, slider ? 5 : 0.5, 0));
-        parameter('armature', 'Armature', joint.armature ?? 0, units.armature);
+        // A motor's rotor turns with the joint, through its gearbox: its inertia times the ratio squared adds to the armature.
+        const rotor = drive.mode === 'motor' ? (drive.motor?.rotorInertia ?? 0) * (drive.motor?.gearRatio ?? 0) ** 2 : 0;
+        parameter('armature', rotor ? 'Armature (with the motor\'s rotor)' : 'Armature', (joint.armature ?? 0) + rotor, units.armature);
         parameter('step', 'Time step', roles.timeStep, 's');
         if (joint.limits && !ball) {
             parameter('lower', 'Lower limit', joint.limits.lower, units.position);
@@ -511,7 +545,7 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         if (drive.mode === 'servo' && !ball) {
             const travel = joint.limits ?? (hinge ? { lower: -Math.PI, upper: Math.PI } : { lower: -0.5, upper: 0.5 });
             const setpoint = Math.min(Math.max(drive.setpoint ?? 0, travel.lower), travel.upper);
-            parameter('setpoint', 'Setpoint', setpoint, units.position, { minimum: round(travel.lower), maximum: round(travel.upper), step: round((travel.upper - travel.lower) / 400) });
+            parameter('setpoint', 'Setpoint', roles.setpoint?.value ?? setpoint, units.position, roles.setpoint?.control ?? { minimum: round(travel.lower), maximum: round(travel.upper), step: round((travel.upper - travel.lower) / 400) }, roles.setpoint?.id ?? null);
             parameter('stiffness', 'Servo stiffness', drive.gain, units.stiffness);
             const limit = drive.torqueLimit;
             parameter('torqueLimit', slider ? 'Servo force limit' : 'Servo torque limit', limit, units.effort, { minimum: round(limit / 100), maximum: round(limit * 3), step: round(limit / 100) });
@@ -723,6 +757,8 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         const qd = speeds[0];
         let driveTorque = 0;
         if (drive.mode === 'torque') driveTorque = 'torque';
+        // A motor's torque at the joint, as its windings' relationship sets it on the child.
+        if (drive.mode === 'motor') driveTorque = bind(childNode, 'target', 'motorTorque', 'c');
         if (drive.mode === 'servo') {
             driveTorque = define('servo', E.max(E.negate('torqueLimit'), E.min('torqueLimit', E.multiply('stiffness', E.subtract('setpoint', q)))));
         }
@@ -962,5 +998,156 @@ function closingRelationship(drawing, loop, nodes, path, R, id, timeStep) {
         equation: '',
         equationModel: { bindings, definitions: pruned(), outputs },
         appearance: { color: '#e0b04f', offset: 0, waypoints: [] }
+    };
+}
+
+// A joint's motor (motor mode): a node of its own, holding its supply voltage, duty cycle, current, torque at the joint
+// and winding temperature; and the robot's battery, a node holding its voltage and charge. Each motor's relationships:
+// - Supply, from the battery: the motor's supply voltage is the battery's.
+// - Controller, from the joint's solid: a duty cycle of the proportional gain times the setpoint left to reach, less the
+//   derivative gain times the joint's speed, held to ±1. The setpoint is a live slider, or the keyframes' schedule. A
+//   user's own controller may set the duty instead, wired in the canvas with these gains at nothing.
+// - Windings, between the joint's solid and the motor: the current, (duty × supply voltage - back-EMF) over the
+//   winding's resistance, the back-EMF the torque constant times the motor's speed (the gear ratio times the joint's);
+//   the torque at the joint, gear ratio × torque constant × current; and that torque, on the joint's solid, where the
+//   joint's own relationship reads it. The winding's inductance is left out: its time constant is far below a step.
+// - Drain, to the battery: its charge falls by the current the drive draws from it (duty × current) over its capacity.
+// The motor's winding heats with its resistance times the current squared and cools to ambient (a source term of its
+// node), and the battery's voltage falls in a straight line from full to empty with its charge (a source term of its).
+function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symbols, id) {
+    const battery = batteryOf(drawing);
+    const share = (name, value, unit) => {
+        const created = { id: id(), name, symbol: camelKey(name, symbols), value: round(value), unit, mode: 'constant' };
+        document.sharedParameters.push(created);
+        return created;
+    };
+    const nodeOf = (name, type, position, color, shape = 'box') => ({
+        id: id(), name, type, position, states: [], sourceTerms: [], bySymbol: new Map(), numerics: { substepsPerGlobalStep: 1, integration: 'semiImplicit' },
+        appearance: { type: 'primitive', shape, color }
+    });
+    const addState = (node, symbol, initialValue, unit) => {
+        const created = { id: id(), name: stateName(symbol), symbol, initialValue: round(initialValue), unit };
+        node.states.push(created);
+        node.bySymbol.set(symbol, created);
+        return created;
+    };
+    // A source term of `node` setting or growing `state` by `latex`/`expression`, reading its own states and `parameters`.
+    const sourceTerm = (node, state, expression, parameters, setsValue) => {
+        const latex = E.toLatex(expression);
+        const bound = parameters.map((parameter) => ({ ...parameter, id: id() }));
+        const term = {
+            id: id(), state: state.symbol, expression: latex, parameters: bound,
+            expressionModel: {
+                latex, mathJson: expression, output: { stateId: state.id },
+                bindings: [...E.symbolsOf(expression)].map((symbol) => {
+                    const parameter = bound.find((candidate) => candidate.symbol === symbol);
+                    return parameter ? { symbol, kind: 'parameter', parameterId: parameter.id } : { symbol, kind: 'state', stateId: node.bySymbol.get(symbol).id };
+                })
+            }
+        };
+        if (setsValue) term.setsValue = true;
+        node.sourceTerms.push(term);
+    };
+    const linked = (shared, symbol) => ({ name: shared.name, symbol, value: shared.value, unit: shared.unit, mode: 'constant', sharedParameterId: shared.id });
+
+    const full = share('Battery full voltage', battery.fullVoltage, 'V');
+    const empty = share('Battery empty voltage', battery.emptyVoltage, 'V');
+    const capacity = share('Battery capacity', battery.capacity, 'A·s');
+    const store = nodeOf('Battery', 'robotBattery', [0, 4, 0], '#2f6970');
+    const voltage = addState(store, 'voltage', battery.fullVoltage, 'V');
+    addState(store, 'stateOfCharge', 100, '%');
+    sourceTerm(store, voltage, E.add('empty', E.multiply(E.subtract('full', 'empty'), 0.01, 'stateOfCharge')), [linked(full, 'full'), linked(empty, 'empty')], true);
+    document.nodes.push(store);
+
+    for (const [solidId, joint] of motorDriven) {
+        const solidNode = nodes.get(solidId);
+        const drive = { ...defaultDrive(joint.kind), ...joint.drive, motor: { ...defaultDrive(joint.kind).motor, ...joint.drive.motor } };
+        const { motor } = drive;
+        const linear = joint.kind === 'slider';
+        const motorNode = nodeOf(`${joint.name} motor`, 'robotMotor', [solidNode.position[0] + 2.5, solidNode.position[1] - 1.8, 0], '#397b86', 'cylinder');
+        for (const [symbol, initial, unit] of [['supplyVoltage', battery.fullVoltage, 'V'], ['duty', 0, ''], ['current', 0, 'A'], ['torque', 0, linear ? 'N' : 'N·m'], ['windingTemperature', motor.ambientTemperature, 'K']]) {
+            addState(motorNode, symbol, initial, unit);
+        }
+        const resistance = share(`${joint.name} winding resistance`, motor.resistance, 'Ω');
+        const torqueConstant = share(`${joint.name} torque constant`, motor.torqueConstant, 'N·m/A');
+        const gearRatio = share(`${joint.name} gear ratio`, motor.gearRatio, linear ? 'rad/m' : '');
+        sourceTerm(motorNode, motorNode.bySymbol.get('windingTemperature'),
+            E.divide(E.subtract(E.multiply('resistance', 'current', 'current'), E.divide(E.subtract('windingTemperature', 'ambient'), 'thermalResistance')), 'heatCapacity'), [
+                linked(resistance, 'resistance'),
+                { name: 'Thermal resistance to ambient', symbol: 'thermalResistance', value: round(motor.thermalResistance), unit: 'K/W', mode: 'constant' },
+                { name: 'Winding heat capacity', symbol: 'heatCapacity', value: round(motor.thermalCapacitance), unit: 'J/K', mode: 'constant' },
+                { name: 'Ambient temperature', symbol: 'ambient', value: round(motor.ambientTemperature), unit: 'K', mode: 'constant' }
+            ], false);
+        document.nodes.push(motorNode);
+
+        // Supply: the battery's voltage, on the motor.
+        document.edges.push(algebraicEdge(`${joint.name} supply`, store, motorNode, id, [], (bind, output) => {
+            output(motorNode, 'target', 'supplyVoltage', bind(store, 'source', 'voltage', 'p'));
+        }));
+        // Controller: the duty cycle, from the setpoint left to reach and the joint's speed.
+        const travel = joint.limits ?? (joint.kind === 'hinge' ? { lower: -Math.PI, upper: Math.PI } : { lower: -0.5, upper: 0.5 });
+        const scheduled = setpoints.get(joint.id);
+        const setpoint = Math.min(Math.max(drive.setpoint ?? 0, travel.lower), travel.upper);
+        const controllerParameters = [
+            { id: id(), name: 'Setpoint', symbol: 'setpoint', value: round(scheduled?.value ?? setpoint), unit: linear ? 'm' : 'rad', mode: 'live',
+                control: scheduled?.control ?? { minimum: round(travel.lower), maximum: round(travel.upper), step: round((travel.upper - travel.lower) / 400) },
+                ...(scheduled ? { sharedParameterId: scheduled.id } : {}) },
+            { id: id(), name: 'Proportional gain', symbol: 'proportional', value: round(drive.proportional), unit: linear ? '1/m' : '1/rad', mode: 'constant' },
+            { id: id(), name: 'Derivative gain', symbol: 'derivative', value: round(drive.derivative), unit: linear ? 's/m' : 's/rad', mode: 'constant' }
+        ];
+        const position = linear ? 'jointPosition' : 'jointAngle';
+        document.edges.push(algebraicEdge(`${joint.name} controller`, solidNode, motorNode, id, controllerParameters, (bind, output) => {
+            const q = bind(solidNode, 'source', position, 'p');
+            const qd = bind(solidNode, 'source', 'jointSpeed', 'p');
+            output(motorNode, 'target', 'duty', E.max(-1, E.min(1, E.subtract(E.multiply('proportional', E.subtract('setpoint', q)), E.multiply('derivative', qd)))));
+        }));
+        // Windings: the current, and the torque it makes at the joint.
+        const windingParameters = [
+            { id: id(), ...linked(resistance, 'resistance') },
+            { id: id(), ...linked(torqueConstant, 'torqueConstant') },
+            { id: id(), ...linked(gearRatio, 'gearRatio') }
+        ];
+        document.edges.push(algebraicEdge(`${joint.name} windings`, solidNode, motorNode, id, windingParameters, (bind, output, define) => {
+            const qd = bind(solidNode, 'source', 'jointSpeed', 'p');
+            const duty = bind(motorNode, 'target', 'duty', 'c');
+            const supply = bind(motorNode, 'target', 'supplyVoltage', 'c');
+            const current = define('amps', E.divide(E.subtract(E.multiply(duty, supply), E.multiply('torqueConstant', 'gearRatio', qd)), 'resistance'));
+            const torque = define('tq', E.multiply('gearRatio', 'torqueConstant', current));
+            output(motorNode, 'target', 'current', current);
+            output(motorNode, 'target', 'torque', torque);
+            output(solidNode, 'source', 'motorTorque', torque);
+        }));
+        // Drain: the charge the drive draws.
+        const drainParameters = [{ id: id(), ...linked(capacity, 'capacity') }];
+        const duty = motorNode.bySymbol.get('duty');
+        const current = motorNode.bySymbol.get('current');
+        const charge = store.bySymbol.get('stateOfCharge');
+        const expression = E.negate(E.divide(E.multiply(100, 'sourceDuty', 'sourceCurrent'), 'capacity'));
+        const latex = E.toLatex(expression);
+        document.edges.push({
+            id: id(), name: `${joint.name} drain`, directionality: 'directed',
+            source: { nodeId: motorNode.id, stateId: current.id }, target: { nodeId: store.id, stateId: charge.id },
+            parameters: drainParameters, equation: latex,
+            equationModel: {
+                latex, mathJson: expression, output: { role: 'target', stateId: charge.id },
+                bindings: [
+                    { kind: 'state', role: 'source', nodeId: motorNode.id, stateId: duty.id, symbol: 'sourceDuty' },
+                    { kind: 'state', role: 'source', nodeId: motorNode.id, stateId: current.id, symbol: 'sourceCurrent' },
+                    { kind: 'parameter', parameterId: drainParameters[0].id, symbol: 'capacity' }
+                ]
+            },
+            appearance: { color: '#c46a6a', offset: 0, waypoints: [] }
+        });
+    }
+}
+
+// A relationship of several equations between `source` and `target`, written by `write(bind, output, define)`.
+function algebraicEdge(name, source, target, id, parameters, write) {
+    const { bindings, outputs, bind, define, output, pruned } = equations();
+    for (const parameter of parameters) bindings.push({ symbol: parameter.symbol, kind: 'parameter', parameterId: parameter.id });
+    write(bind, output, define);
+    return {
+        id: id(), name, directionality: 'directed', source: { nodeId: source.id }, target: { nodeId: target.id }, parameters, equation: '',
+        equationModel: { bindings, definitions: pruned(), outputs }, appearance: { color: '#68a9cc', offset: 0, waypoints: [] }
     };
 }

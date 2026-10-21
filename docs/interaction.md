@@ -35,7 +35,14 @@ The command key is Ctrl on Windows and Linux and ⌘ on a Mac.
 | Move or turn a solid (and the solids it carries) | Its card: position and turn; Move, Turn | Drag the handles | `G`, `R` |
 | Join two solids | Join (with the kind beside it), then click a point on each | Click a point on each | `J` |
 | Join without moving | | Shift-click the second point | |
-| Change a joint: kind, point, axis, limits, damping, drive | Its card | Click its mark to select it | |
+| Change a joint: kind, point, axis, limits, damping, drive (free, torque, servo or motor) | Its card | Click its mark to select it | |
+| Set the battery the motors draw from | The robot's card (nothing selected) | | |
+| Pose the robot (jog) | The sliders under Pose | | |
+| Back to the robot as drawn | As drawn | | `Escape` |
+| Record a pose as a keyframe | Add keyframe | | `K` |
+| Show a keyframe | Show, beside it | Click its row | `[` and `]`: the one before and after |
+| Retime, replace or remove a keyframe | Its time; Replace; ✕ | | |
+| Make the pose the joints' setpoints | Set as setpoints | | |
 | Flip a joint's axis, swap its solids | Its card | | |
 | Duplicate | Duplicate | | command-`D` |
 | Delete | Delete | | Delete or Backspace (⌫ on a Mac) |

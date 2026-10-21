@@ -8,10 +8,11 @@
 // power user), works on the selection and can be undone, on Windows, Linux and macOS alike (docs/interaction.md).
 
 import {
-    addFrameAt, addJoint, addSolid, checkDrawing, createDrawing, driveLabels, driveModes, duplicateSolids, frameById, groundId,
-    jointById, jointKinds, jointLabels, massOf, materials, moveSolids, poseOf, readDrawing, removeJoints, removeSolids, reverseJoint, solidById,
-    structure, treeOrder, turnSolids, updateFrame, updateJoint, updateSolid
+    addFrameAt, addJoint, addKeyframe, addSolid, batteryOf, checkDrawing, createDrawing, defaultMotor, driveLabels, driveModes, drivenJoints, duplicateSolids,
+    frameById, groundId, jointById, jointKinds, jointLabels, keyframesOf, massOf, materials, moveSolids, nextKeyframeTime, poseOf, readDrawing, removeJoints,
+    removeKeyframe, removeSolids, reverseJoint, solidById, structure, treeOrder, turnSolids, updateBattery, updateFrame, updateJoint, updateKeyframe, updateSolid
 } from './lib/drawing.mjs';
+import { jogRange, posedDrawing } from './lib/pose.mjs';
 import { exampleDrawing, examples } from './lib/examples.mjs';
 import { History } from './lib/history.mjs';
 import { simulationLimits } from './lib/modelBuilder.mjs';
@@ -41,7 +42,10 @@ const state = {
     hover: null,
     settings: { runTime: 10, timeStep: 0.001 },
     built: null,
-    restoring: false
+    restoring: false,
+    // The jog panel's pose: each driven joint's value (radians or metres from where it is drawn), whether the view shows
+    // the robot posed, and the keyframe last shown.
+    pose: { active: false, values: {}, keyframe: null }
 };
 const drawing = () => state.history.current;
 
@@ -155,6 +159,8 @@ function afterHistory(message) {
 // ---- tools ------------------------------------------------------------------------------------------------------------
 
 function setTool(tool) {
+    // Moving, turning and joining work on the robot as drawn.
+    if (tool !== 'select') state.pose.active = false;
     state.tool = tool;
     if (tool !== 'join') { state.joinFirst = null; view.showMarker('chosen', null); }
     view.showMarker('hover', null);
@@ -245,7 +251,7 @@ function transformed(solidId, move) {
 
 function render() {
     const current = drawing();
-    view.setDrawing(current);
+    view.setDrawing(state.pose.active ? posedDrawing(current, state.pose.values) : current);
     view.setSelection(state.selection);
     const solids = selectedSolids();
     view.setTool(state.tool, solids.length === 1 ? carriedBy(solids[0]) : []);
@@ -253,6 +259,7 @@ function render() {
     renderTree();
     renderChecks();
     renderInspector();
+    renderPose();
     renderHint();
 }
 
@@ -318,6 +325,8 @@ function renderHint() {
         hint = state.joinFirst
             ? `Now click the point on the second solid. It turns and moves so the two points meet, faces together. Hold Shift as you click to leave it where it is. Escape stops.`
             : `Join: click the point on the first solid (or on the floor, for the Ground) where the ${jointLabels[$('#joinKind').value].toLowerCase()} goes. Its axis is the arrow, straight out of the surface; points snap to face centres and edge middles (green).`;
+    } else if (state.pose.active) {
+        hint = `Posed by the jog sliders${state.pose.keyframe ? `, as the keyframe at ${keyframesOf(current).find(({ id }) => id === state.pose.keyframe)?.time ?? '?'} s` : ''}: the drawing is unchanged. Add a keyframe (K), or go back to the robot as drawn (Escape).`;
     } else if (!current.solids.length) {
         hint = 'Start with a solid: Box (B), Cylinder (C), Sphere (S) or Capsule (P). Then join solids with Join (J).';
     } else if (state.tool === 'move' || state.tool === 'turn') {
@@ -363,7 +372,18 @@ function renderInspector() {
         <p class="note">Select a solid or a joint to change it. Build turns the drawing into the canvas: each solid a node, each joint a relationship between two of them. The joints' equations move the robot; nothing outside the canvas solves it.</p>
         <h2>Run</h2>
         ${field('Run time', numberInput('runTime', state.settings.runTime, { min: 0.01 }), 's')}
-        ${field('Step', numberInput('timeStep', state.settings.timeStep * 1000, { min: 0.1, step: 0.1, title: 'The engine\'s step. Stiff servos and light solids need a short one; a millisecond suits most drawings.' }), 'ms')}`;
+        ${field('Step', numberInput('timeStep', state.settings.timeStep * 1000, { min: 0.1, step: 0.1, title: 'The engine\'s step. Stiff servos and light solids need a short one; a millisecond suits most drawings.' }), 'ms')}
+        ${current.joints.some((joint) => joint.drive?.mode === 'motor') ? batteryFields(current) : ''}`;
+}
+
+// The battery every motor draws from.
+function batteryFields(current) {
+    const battery = batteryOf(current);
+    return `<h2>Battery</h2>
+        ${field('Full', numberInput('battery.fullVoltage', battery.fullVoltage, { min: 0 }), 'V')}
+        ${field('Empty', numberInput('battery.emptyVoltage', battery.emptyVoltage, { min: 0 }), 'V')}
+        ${field('Capacity', numberInput('battery.capacity', Math.round((battery.capacity / 3600) * 1000) / 1000, { min: 0 }), 'Ah')}
+        <p class="note">Every motor draws from it: its voltage falls in a straight line from full to empty with its charge, a node in the canvas.</p>`;
 }
 
 function solidInspector(solid) {
@@ -398,12 +418,32 @@ function solidInspector(solid) {
         </div>`;
 }
 
+// A motor's fields: its setpoint and controller gains, then the motor and gearbox.
+function motorFieldsOf(joint, show, unit) {
+    const linear = joint.kind === 'slider';
+    const drive = joint.drive;
+    const motor = { ...defaultMotor(joint.kind), ...drive.motor };
+    return [
+        field('Setpoint', numberInput('drive.setpoint', show(drive.setpoint ?? 0)), unit),
+        field('Proportional', numberInput('drive.proportional', drive.proportional ?? 0, { min: 0, title: 'Duty cycle per unit of the setpoint left to reach' }), linear ? '/m' : '/rad'),
+        field('Derivative', numberInput('drive.derivative', drive.derivative ?? 0, { min: 0, title: 'Duty cycle taken off per unit of the joint\'s speed' }), linear ? 's/m' : 's/rad'),
+        '<h2>Motor</h2>',
+        field('Winding resistance', numberInput('motor.resistance', motor.resistance, { min: 0 }), 'Ω'),
+        field('Torque constant', numberInput('motor.torqueConstant', motor.torqueConstant, { min: 0, title: 'Torque per ampere at the motor, and back-EMF volts per radian per second' }), 'N·m/A'),
+        field('Gear ratio', numberInput('motor.gearRatio', motor.gearRatio, { min: 0, title: linear ? 'Motor radians per metre of travel, as a lead screw\'s' : 'Motor turns per joint turn' }), linear ? 'rad/m' : ':1'),
+        field('Rotor inertia', numberInput('motor.rotorInertia', motor.rotorInertia, { min: 0 }), 'kg·m²'),
+        field('Thermal resistance', numberInput('motor.thermalResistance', motor.thermalResistance, { min: 0, title: 'From the winding to the air around it' }), 'K/W'),
+        field('Heat capacity', numberInput('motor.thermalCapacitance', motor.thermalCapacitance, { min: 0, title: 'Of the winding' }), 'J/K'),
+        field('Ambient', numberInput('motor.ambientTemperature', Math.round((motor.ambientTemperature - 273.15) * 100) / 100), '°C')
+    ];
+}
+
 // A ball joint's motion: its most turn, its damping, friction and armature (each axis alike) and its drive, a torque
 // about each of its parent's axes or a servo to a turn about them.
 function ballMotion(joint) {
     const drive = joint.drive ?? { mode: 'free' };
     const vector = (name, values, unit, shown) => `<div class="fieldRow"><span>${name === 'drive.torque' ? 'Torque' : 'Setpoint turn'}</span>${['x', 'y', 'z'].map((axis, index) => `<label>${axis}${numberInput(`${name}.${index}`, shown((values ?? [0, 0, 0])[index] ?? 0), { step: name === 'drive.torque' ? 0.01 : 1 })}</label>`).join('')}</div><p class="unit">${unit}, about ${escapeHtml(nameOf(frameById(drawing(), joint.parent).solid))}'s own axes.</p>`;
-    const fields = [field('Driven by', `<select name="drive.mode">${driveModes.map((mode) => `<option value="${mode}"${mode === drive.mode ? ' selected' : ''}>${driveLabels[mode]}</option>`).join('')}</select>`)];
+    const fields = [field('Driven by', `<select name="drive.mode">${driveModes.filter((mode) => mode !== 'motor').map((mode) => `<option value="${mode}"${mode === drive.mode ? ' selected' : ''}>${driveLabels[mode]}</option>`).join('')}</select>`)];
     if (drive.mode === 'torque') fields.push(vector('drive.torque', drive.torque, 'N·m', (value) => value));
     if (drive.mode === 'servo') {
         fields.push(vector('drive.setpoint', drive.setpoint, 'Degrees: a turn about the direction given, by its length', toDegrees));
@@ -447,10 +487,12 @@ function jointInspector(joint) {
             driveFields.push(field('Stiffness', numberInput('drive.gain', drive.gain, { min: 0 }), linear ? 'N/m' : 'N·m/rad'));
             driveFields.push(field(linear ? 'Most force' : 'Most torque', numberInput('drive.torqueLimit', drive.torqueLimit, { min: 0 }), linear ? 'N' : 'N·m'));
         }
+        if (drive.mode === 'motor') driveFields.push(...motorFieldsOf(joint, show, unit));
         driveFields.push(`<p class="note">${{
             free: 'Nothing drives it: it moves only as gravity and the rest of the robot move it.',
             torque: `A constant ${linear ? 'force' : 'torque'}, a live slider on the relationship in the canvas. Wire a motor to it there to drive it from a motor instead.`,
-            servo: 'A position servo holds it at its setpoint, a live slider on the relationship in the canvas, pushing with up to its most torque.'
+            servo: 'A position servo holds it at its setpoint, a live slider on the relationship in the canvas, pushing with up to its most torque.',
+            motor: `A DC motor and gearbox on the robot's battery turn it towards its setpoint: its controller sets the duty cycle from how far it has to go and how fast it is going. Build adds the motor and the battery as nodes in the canvas, with the motor's current, ${linear ? 'force' : 'torque'} and winding temperature and the battery's charge.`
         }[drive.mode]}</p>`);
     }
     return `<h3>${escapeHtml(joint.name)}</h3>
@@ -486,6 +528,12 @@ function inspectorChanged(input) {
     const solids = selectedSolids();
     const joints = selectedJoints();
     if (!state.selection.length) {
+        if (name.startsWith('battery.')) {
+            const field = name.slice(8);
+            if (!(number > 0)) { toast('This must be more than zero.'); render(); return; }
+            change(updateBattery(current, { [field]: field === 'capacity' ? number * 3600 : number }), 'Battery', `battery:${field}`);
+            return;
+        }
         if (name === 'runTime' && number > 0) state.settings.runTime = number;
         if (name === 'timeStep' && number >= 0.1) state.settings.timeStep = number / 1000;
         keepSessionSoon();
@@ -560,6 +608,18 @@ function inspectorChanged(input) {
             return;
         }
         if (name === 'drive.mode') { apply({ drive: { mode: value } }, 'Drive'); return; }
+        if (name === 'drive.proportional' || name === 'drive.derivative') {
+            if (number < 0) { toast('A gain must be zero or more.'); render(); return; }
+            apply({ drive: { [name.slice(6)]: number } }, name === 'drive.proportional' ? 'Proportional gain' : 'Derivative gain');
+            return;
+        }
+        if (name.startsWith('motor.')) {
+            const field = name.slice(6);
+            const amount = field === 'ambientTemperature' ? number + 273.15 : number;
+            if (field === 'rotorInertia' ? amount < 0 : !(amount > 0)) { toast(field === 'rotorInertia' ? 'This must be zero or more.' : 'This must be more than zero.'); render(); return; }
+            apply({ drive: { motor: { [field]: amount } } }, 'Motor');
+            return;
+        }
         if (name === 'drive.torque') { apply({ drive: { torque: number } }, linear ? 'Force' : 'Torque'); return; }
         if (name === 'drive.setpoint') { apply({ drive: { setpoint: fromShown(number) } }, 'Setpoint'); return; }
         if (name === 'drive.gain' || name === 'drive.torqueLimit') {
@@ -683,6 +743,103 @@ async function openDrawing() {
     }
 }
 
+// ---- the jog panel and the keyframes ------------------------------------------------------------------------------------
+
+const jogShown = (joint, value) => (joint.kind === 'slider' ? `${toMillimetres(value)} mm` : `${toDegrees(value)}°`);
+const poseValues = () => Object.fromEntries(drivenJoints(drawing()).map((joint) => [joint.id, state.pose.values[joint.id] ?? 0]));
+
+function renderPose() {
+    const panel = $('#posePanel');
+    if (panel.contains(document.activeElement) && document.activeElement.matches('input[type="number"]')) return;
+    const current = drawing();
+    const driven = drivenJoints(current);
+    if (!driven.length) {
+        panel.innerHTML = '<p class="note">Drive a hinge or a slider by a servo or a motor to pose it here and keyframe its moves.</p>';
+        return;
+    }
+    const keyframes = keyframesOf(current);
+    panel.innerHTML = `${driven.map((joint) => {
+        const range = jogRange(joint);
+        const value = state.pose.values[joint.id] ?? 0;
+        const step = joint.kind === 'slider' ? 0.0005 : Math.PI / 360;
+        return `<label class="jog"><span>${escapeHtml(joint.name)}</span><input type="range" name="jog" data-joint="${joint.id}" min="${range.lower}" max="${range.upper}" step="${step}" value="${value}" aria-label="Jog ${escapeHtml(joint.name)}"><output>${jogShown(joint, value)}</output></label>`;
+    }).join('')}
+        <div class="buttons">
+            <button type="button" class="tool" data-pose="add" title="Record this pose as a keyframe (K)">Add keyframe</button>
+            <button type="button" class="tool" data-pose="setpoints" title="Make this pose the joints' setpoints">Set as setpoints</button>
+            <button type="button" class="tool" data-pose="drawn" title="Back to the robot as drawn (Escape)"${state.pose.active ? '' : ' disabled'}>As drawn</button>
+        </div>
+        <h2>Keyframes</h2>
+        ${keyframes.length ? `<ol class="keyframes">${keyframes.map((keyframe) => `<li data-keyframe="${keyframe.id}"${keyframe.id === state.pose.keyframe ? ' class="selected"' : ''}>
+            <input type="number" name="keyframeTime" value="${keyframe.time}" min="0" step="0.1" aria-label="Keyframe time"><span class="unit">s</span>
+            <button type="button" class="tool" data-keyframe-action="show" title="Pose the robot as this keyframe">Show</button>
+            <button type="button" class="tool" data-keyframe-action="replace" title="Make this keyframe the pose now">Replace</button>
+            <button type="button" class="tool" data-keyframe-action="remove" title="Remove this keyframe" aria-label="Remove">✕</button>
+        </li>`).join('')}</ol>
+        <p class="note">Build makes each joint's setpoint follow its keyframes in straight lines, a schedule on its setpoint in the canvas. [ and ] show the keyframe before and after.</p>`
+        : '<p class="note">Pose the robot with the sliders, then Add keyframe (K) at each pose it should pass through. Build makes the joints\' setpoints follow them over time.</p>'}`;
+}
+
+function jogged(input) {
+    const joint = jointById(drawing(), input.dataset.joint);
+    if (!joint) return;
+    state.pose.values = { ...state.pose.values, [joint.id]: Number(input.value) };
+    state.pose.active = true;
+    state.pose.keyframe = null;
+    input.nextElementSibling.textContent = jogShown(joint, Number(input.value));
+    view.setDrawing(posedDrawing(drawing(), state.pose.values));
+    $('#posePanel [data-pose="drawn"]').disabled = false;
+    renderHint();
+}
+
+function addPoseKeyframe() {
+    if (!drivenJoints(drawing()).length) { toast('Drive a joint by a servo or a motor first.'); return; }
+    const time = nextKeyframeTime(drawing());
+    const added = addKeyframe(drawing(), { time, setpoints: poseValues() });
+    state.pose.keyframe = added.id;
+    change(added.drawing, `Add the keyframe at ${time} s`);
+}
+
+function showKeyframe(id) {
+    const keyframe = keyframesOf(drawing()).find((candidate) => candidate.id === id);
+    if (!keyframe) return;
+    state.pose = { active: true, values: { ...keyframe.setpoints }, keyframe: id };
+    if (state.tool !== 'select') state.tool = 'select';
+    render();
+}
+
+function stepKeyframe(direction) {
+    const keyframes = keyframesOf(drawing());
+    if (!keyframes.length) return;
+    const index = keyframes.findIndex(({ id }) => id === state.pose.keyframe);
+    const next = index < 0 ? (direction > 0 ? 0 : keyframes.length - 1) : Math.max(0, Math.min(keyframes.length - 1, index + direction));
+    showKeyframe(keyframes[next].id);
+}
+
+function poseAsDrawn() {
+    state.pose = { active: false, values: state.pose.values, keyframe: null };
+    render();
+}
+
+function poseAction(action) {
+    if (action === 'add') { addPoseKeyframe(); return; }
+    if (action === 'drawn') { poseAsDrawn(); return; }
+    if (action === 'setpoints') {
+        let next = drawing();
+        for (const [jointId, value] of Object.entries(poseValues())) next = updateJoint(next, jointId, { drive: { setpoint: value } });
+        change(next, 'Set the setpoints from the pose');
+    }
+}
+
+function keyframeAction(id, action) {
+    if (action === 'show') { showKeyframe(id); return; }
+    if (action === 'replace') { change(updateKeyframe(drawing(), id, { setpoints: poseValues() }), 'Replace the keyframe'); return; }
+    if (action === 'remove') {
+        if (state.pose.keyframe === id) state.pose.keyframe = null;
+        change(removeKeyframe(drawing(), id), 'Remove the keyframe');
+    }
+}
+
 // ---- help -------------------------------------------------------------------------------------------------------------
 
 const helpRows = () => [
@@ -693,7 +850,9 @@ const helpRows = () => [
     ['Fit the robot in the view', 'Fit; F'],
     ['Move or turn a solid', 'Move (G) or Turn (R), then drag the handles; or type its place and turn'],
     ['Join two solids', 'Join (J), then click a point on each; start on the floor to fix one to the Ground. Shift-click the second to leave it where it is'],
-    ['Change a joint', 'Select it: its kind, point and axis, limits, damping and drive'],
+    ['Change a joint', 'Select it: its kind, point and axis, limits, damping and drive (free, a torque, a servo or a motor)'],
+    ['Pose the robot', 'The jog sliders under Pose; Escape or As drawn goes back to the robot as drawn'],
+    ['Keyframe a pose', 'Add keyframe; K. Show, Replace or remove one in Keyframes, or click it; [ and ] show the one before and after'],
     ['Duplicate', `Duplicate; ${keys.duplicate}`],
     ['Delete', `Delete; ${keys.deleteKeys}`],
     ['Undo, redo', `${keys.undo}; ${keys.redo}`],
@@ -748,6 +907,24 @@ $('#checksList').addEventListener('click', (event) => {
     if (item) select(item.dataset.id);
 });
 $('#inspector').addEventListener('change', (event) => { if (event.target.name) inspectorChanged(event.target); });
+$('#posePanel').addEventListener('input', (event) => { if (event.target.name === 'jog') jogged(event.target); });
+$('#posePanel').addEventListener('change', (event) => {
+    if (event.target.name !== 'keyframeTime') return;
+    const id = event.target.closest('[data-keyframe]').dataset.keyframe;
+    const time = Number(event.target.value);
+    if (!(Number.isFinite(time) && time >= 0)) { toast('A keyframe\'s time is zero or more seconds.'); renderPose(); return; }
+    change(updateKeyframe(drawing(), id, { time }), 'Move the keyframe', `keyframe:${id}`);
+});
+$('#posePanel').addEventListener('keydown', (event) => { if (event.key === 'Enter' && event.target.matches('input[type="number"]')) event.target.blur(); });
+$('#posePanel').addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (button?.dataset.pose) { poseAction(button.dataset.pose); return; }
+    const row = event.target.closest('[data-keyframe]');
+    if (!row) return;
+    if (button?.dataset.keyframeAction) { keyframeAction(row.dataset.keyframe, button.dataset.keyframeAction); return; }
+    // Clicking a keyframe's row (not its time) shows it.
+    if (!event.target.matches('input')) showKeyframe(row.dataset.keyframe);
+});
 $('#inspector').addEventListener('click', (event) => {
     const button = event.target.closest('button[data-action]');
     if (button) inspectorAction(button.dataset.action);
@@ -770,6 +947,7 @@ document.addEventListener('keydown', (event) => {
     if (command && key === 'd') { event.preventDefault(); duplicateSelection(); return; }
     if (command || event.altKey) return;
     if (event.key === 'Escape') {
+        if (state.pose.active) { poseAsDrawn(); return; }
         if (state.tool === 'join' && state.joinFirst) { state.joinFirst = null; view.showMarker('chosen', null); render(); return; }
         if (state.tool !== 'select') { setTool('select'); return; }
         select([]);
@@ -777,7 +955,8 @@ document.addEventListener('keydown', (event) => {
     }
     if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(); return; }
     const shortcuts = { b: () => addShape('box'), c: () => addShape('cylinder'), s: () => addShape('sphere'), p: () => addShape('capsule'),
-        j: () => setTool('join'), g: () => setTool('move'), r: () => setTool('turn'), f: () => view.fit(), '?': showHelp };
+        j: () => setTool('join'), g: () => setTool('move'), r: () => setTool('turn'), f: () => view.fit(), '?': showHelp,
+        k: addPoseKeyframe, '[': () => stepKeyframe(-1), ']': () => stepKeyframe(1) };
     if (shortcuts[event.key]) { event.preventDefault(); shortcuts[event.key](); }
 });
 

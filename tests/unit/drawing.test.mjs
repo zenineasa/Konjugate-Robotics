@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
-    addFrameAt, addJoint, addSolid, checkDrawing, createDrawing, frameById, frameInWorld, groundId, massOf, readDrawing, removeJoints, removeSolids,
+    addFrameAt, addJoint, addSolid, checkDrawing, createDrawing, defaultMotor, frameById, frameInWorld, groundId, massOf, readDrawing, removeJoints, removeSolids,
     reverseJoint, structure, treeOrder, updateJoint, updateSolid
 } from '../../packages/toolbox/lib/drawing.mjs';
 import { History } from '../../packages/toolbox/lib/history.mjs';
@@ -46,7 +46,7 @@ test('joining mates the second solid to the first: frames meet, faces together, 
     // The capsule's middle is now its radius out from the face.
     close(joined.drawing.solids[1].position, [0.07, 0, 0.05]);
     assert.equal(joint.name, 'Hinge');
-    assert.deepEqual(joint.drive, { mode: 'free', torque: 0, setpoint: 0, gain: 20, torqueLimit: 2 });
+    assert.deepEqual(joint.drive, { mode: 'free', torque: 0, setpoint: 0, gain: 20, torqueLimit: 2, proportional: 5, derivative: 0.2, motor: defaultMotor('hinge') });
     // The original drawing is untouched.
     close(drawing.solids[1].position, [0.3, 0, 0.12]);
 });

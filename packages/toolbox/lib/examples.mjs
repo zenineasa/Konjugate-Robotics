@@ -3,9 +3,10 @@
 // Drawings to start from, built with the same operations a user's clicks make (lib/drawing.mjs), so each is a drawing
 // like any other: a pendulum, a two-link arm on a turning waist, a cart on a rail carrying two pendulums, an arm
 // reaching out with a two-finger gripper, a four-bar linkage (a closed loop), a pendulum on two ball joints, and a crank
-// driving a block along a rail (a loop closed by a slider).
+// driving a block along a rail (a loop closed by a slider), and the arm with a gripper on motors, keyframed through a
+// pick-and-place cycle.
 
-import { addFrameAt, addJoint, addSolid, createDrawing, updateJoint, updateSolid } from './drawing.mjs';
+import { addFrameAt, addJoint, addKeyframe, addSolid, createDrawing, updateJoint, updateSolid } from './drawing.mjs';
 import { add, between, length, normalize, scale, subtract } from './math.mjs';
 
 export const examples = Object.freeze([
@@ -15,6 +16,7 @@ export const examples = Object.freeze([
     { id: 'gripperArm', name: 'Arm with gripper', description: 'A waist, a shoulder, an elbow and a wrist reach out with a two-finger gripper, each held by a servo: run it and the arm turns while the fingers close.' },
     { id: 'fourBar', name: 'Four-bar linkage', description: 'A crank, a coupler and a rocker on a base, the coupler pinned to the rocker to close the loop: a steady torque turns the crank round and the rocker rocks.' },
     { id: 'ballPendulum', name: 'Ball-joint pendulum', description: 'Two links hanging from ball joints, let go out of line with each other, so they swing and twist in three dimensions.' },
+    { id: 'pickAndPlace', name: 'Pick and place', description: 'The arm with a gripper on DC motors and a battery, keyframed through a pick-and-place cycle, a 120 g part in its fingers: run it for each motor\'s current and winding temperature and the battery\'s charge.' },
     { id: 'crankSlider', name: 'Crank and slider', description: 'A crank turned by a steady torque pushes a block back and forth along a rail through a connecting rod; the block\'s slider on the rail closes the loop.' }
 ]);
 
@@ -227,6 +229,41 @@ export function exampleDrawing(id) {
         const lower = result.id;
         result = join(drawing, upper, lower, middle, [0, 0, 1], 'ball', 'Elbow');
         return updateJoint(result.drawing, result.id, { damping: 0.0005, friction: 0.0002 });
+    }
+    if (id === 'pickAndPlace') {
+        let drawing = { ...exampleDrawing('gripperArm'), name: 'Pick and place' };
+        const named = (name) => drawing.joints.find((joint) => joint.name === name).id;
+        // The arm's four joints on motors (each holding where it is drawn until the keyframes move it), the fingers on
+        // their servos.
+        for (const [name, damping] of [['Waist', 0.02], ['Shoulder', 0.02], ['Elbow', 0.01], ['Wrist', 0.005]]) {
+            drawing = updateJoint(drawing, named(name), { damping, drive: { mode: 'motor', setpoint: 0, proportional: 10, derivative: 0.3 } });
+        }
+        for (const name of ['Left finger slide', 'Right finger slide']) drawing = updateJoint(drawing, named(name), { drive: { setpoint: 0 } });
+        // The part, held between the fingers (fixed to the hand: picking it up and letting it go need contact, which comes
+        // later).
+        const hand = drawing.solids.find((solid) => solid.name === 'Hand');
+        const reach = normalize(subtract(drawing.solids.find((solid) => solid.name === 'Left finger').position, hand.position));
+        const centre = add(hand.position, scale([reach[0], 0, reach[2]], 0.06));
+        const result = place(drawing, 'box', { name: 'Part', size: { x: 0.025, y: 0.025, z: 0.025 }, position: centre, color: '#c9b44a' });
+        drawing = updateSolid(result.drawing, result.id, { mass: { by: 'density', density: 7850, material: 'steel' } });
+        drawing = join(drawing, hand.id, result.id, centre, [0, 0, 1], 'fixed', 'Grip').drawing;
+        // The cycle: turn to the part and reach down, close on it, lift, swing round, set it down, open, and go home.
+        const pose = (waist, shoulder, elbow, wrist, fingers) => ({
+            [named('Waist')]: waist, [named('Shoulder')]: shoulder, [named('Elbow')]: elbow, [named('Wrist')]: wrist,
+            [named('Left finger slide')]: fingers, [named('Right finger slide')]: fingers
+        });
+        const cycle = [
+            [0, pose(0, 0, 0, 0, 0)],
+            [1, pose(0.6, 0.25, 0.2, -0.3, 0)],
+            [1.5, pose(0.6, 0.25, 0.2, -0.3, -0.008)],
+            [2.5, pose(0.6, -0.1, -0.1, 0, -0.008)],
+            [3.5, pose(-0.6, -0.1, -0.1, 0, -0.008)],
+            [4.5, pose(-0.6, 0.25, 0.2, -0.3, -0.008)],
+            [5, pose(-0.6, 0.25, 0.2, -0.3, 0)],
+            [6, pose(0, 0, 0, 0, 0)]
+        ];
+        for (const [time, setpoints] of cycle) drawing = addKeyframe(drawing, { time, setpoints }).drawing;
+        return drawing;
     }
     if (id === 'crankSlider') {
         let drawing = createDrawing('Crank and slider');

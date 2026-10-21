@@ -33,8 +33,29 @@ export const groundId = 'ground';
 
 export const jointKinds = Object.freeze(['hinge', 'slider', 'ball', 'fixed']);
 export const jointLabels = Object.freeze({ hinge: 'Hinge', slider: 'Slider', ball: 'Ball', fixed: 'Fixed' });
-export const driveModes = Object.freeze(['free', 'torque', 'servo']);
-export const driveLabels = Object.freeze({ free: 'Free', torque: 'Torque', servo: 'Servo' });
+export const driveModes = Object.freeze(['free', 'torque', 'servo', 'motor']);
+export const driveLabels = Object.freeze({ free: 'Free', torque: 'Torque', servo: 'Servo', motor: 'Motor' });
+
+// A joint's DC motor and gearbox (motor mode), as a hobby 12 V gearmotor: its winding's resistance (ohms) and torque
+// constant (N·m per ampere, its back-EMF volts per rad/s too), the gear ratio (motor turns per joint turn; for a slider,
+// motor radians per metre, as a lead screw's), its rotor's inertia, and its winding's heating: thermal resistance to
+// ambient (K/W) and heat capacity (J/K).
+export function defaultMotor(kind) {
+    return {
+        resistance: 2.5, torqueConstant: 0.02, gearRatio: kind === 'slider' ? 3142 : 100, rotorInertia: 1e-6,
+        thermalResistance: 10, thermalCapacitance: 15, ambientTemperature: 293.15
+    };
+}
+export const motorFields = Object.freeze(['resistance', 'torqueConstant', 'gearRatio', 'rotorInertia', 'thermalResistance', 'thermalCapacitance', 'ambientTemperature']);
+
+// The robot's battery, which every motor draws from: its voltage full and empty (falling in a straight line with its
+// charge), and its capacity in ampere seconds (a 3-cell LiPo of 2.2 Ah by default).
+export const defaultBattery = Object.freeze({ fullVoltage: 12.6, emptyVoltage: 9.9, capacity: 7920 });
+export const batteryOf = (drawing) => ({ ...defaultBattery, ...(drawing.battery ?? {}) });
+const motorFieldNames = {
+    resistance: 'winding resistance', torqueConstant: 'torque constant', gearRatio: 'gear ratio', rotorInertia: 'rotor inertia',
+    thermalResistance: 'thermal resistance', thermalCapacitance: 'heat capacity', ambientTemperature: 'ambient temperature'
+};
 
 // Densities a solid may be made of, kilograms per cubic metre, from common tables; "Other" is typed.
 export const materials = Object.freeze([
@@ -50,7 +71,7 @@ export const materials = Object.freeze([
 const palette = ['#5b8db8', '#d08b4a', '#6aa86a', '#b86a9e', '#c9b44a', '#5ab3b0', '#a07ac8', '#c86a6a'];
 
 export function createDrawing(name = 'Robot') {
-    return { format: drawingFormat, version: drawingVersion, name, nextId: 1, solids: [], frames: [], joints: [] };
+    return { format: drawingFormat, version: drawingVersion, name, nextId: 1, solids: [], frames: [], joints: [], keyframes: [] };
 }
 
 // A drawing read from a session, checked for its shape, or an error saying what is wrong.
@@ -58,6 +79,7 @@ export function readDrawing(value) {
     if (!value || value.format !== drawingFormat) throw new Error('This is not a Robotics drawing.');
     if (value.version !== drawingVersion) throw new Error(`This drawing is of version ${value.version}; this toolbox reads version ${drawingVersion}.`);
     for (const field of ['solids', 'frames', 'joints']) if (!Array.isArray(value[field])) throw new Error(`The drawing has no list of ${field}.`);
+    if (value.keyframes !== undefined && !Array.isArray(value.keyframes)) throw new Error('The drawing\'s keyframes are not a list.');
     return structuredClone(value);
 }
 
@@ -212,7 +234,13 @@ export function updateFrame(drawing, id, { point, axis }) {
 export function defaultDrive(kind) {
     if (kind === 'ball') return { mode: 'free', torque: [0, 0, 0], setpoint: [0, 0, 0], gain: 2, torqueLimit: 2 };
     if (kind !== 'hinge' && kind !== 'slider') return { mode: 'free' };
-    return { mode: 'free', torque: 0, setpoint: 0, gain: kind === 'hinge' ? 20 : 2000, torqueLimit: kind === 'hinge' ? 2 : 50 };
+    // A motor's controller: a duty cycle of `proportional` per unit of the setpoint left to reach, less `derivative`
+    // times the joint's speed, held to ±1.
+    const hinge = kind === 'hinge';
+    return {
+        mode: 'free', torque: 0, setpoint: 0, gain: hinge ? 20 : 2000, torqueLimit: hinge ? 2 : 50,
+        proportional: hinge ? 5 : 100, derivative: hinge ? 0.2 : 5, motor: defaultMotor(kind)
+    };
 }
 
 // The solids joined to `start` through joints, not crossing `barrier`: the piece that moves with it.
@@ -279,9 +307,63 @@ export function updateJoint(drawing, id, changes) {
     for (const field of ['damping', 'friction', 'armature']) if (changes[field] !== undefined) joint[field] = Number(changes[field]);
     if (changes.limits !== undefined) joint.limits = changes.limits ? { lower: Number(changes.limits.lower), upper: Number(changes.limits.upper) } : null;
     // A ball's drive carries its vectors whichever mode it is in, so switching modes keeps them.
-    if (changes.drive) joint.drive = { ...(joint.kind === 'ball' ? defaultDrive('ball') : {}), ...joint.drive, ...changes.drive };
+    if (changes.drive) {
+        const defaults = defaultDrive(joint.kind);
+        const motor = changes.drive.motor ? { ...defaults.motor, ...joint.drive?.motor, ...changes.drive.motor } : joint.drive?.motor;
+        joint.drive = { ...(joint.kind === 'ball' || changes.drive.mode === 'motor' ? defaults : {}), ...joint.drive, ...changes.drive, ...(motor ? { motor } : {}) };
+    }
     return next;
 }
+
+// ---- the battery and the keyframes ----------------------------------------------------------------------------------
+
+export function updateBattery(drawing, changes) {
+    const next = structuredClone(drawing);
+    next.battery = { ...batteryOf(drawing), ...Object.fromEntries(Object.entries(changes).map(([key, value]) => [key, Number(value)])) };
+    return next;
+}
+
+// The joints keyframes set: those a servo or a motor drives, in the tree (a joint closing a loop is not driven), each a
+// hinge or a slider.
+export function drivenJoints(drawing) {
+    const loops = new Set(structure(drawing).loops.map(({ id }) => id));
+    return drawing.joints.filter((joint) => (joint.kind === 'hinge' || joint.kind === 'slider') && !loops.has(joint.id) && ['servo', 'motor'].includes(joint.drive?.mode));
+}
+
+// Keyframes are poses in time: { id, time, setpoints: { [jointId]: setpoint } }, kept in time order. Build turns them
+// into each driven joint's setpoint schedule, the setpoint moving in a straight line from one keyframe to the next.
+export const keyframesOf = (drawing) => [...(drawing.keyframes ?? [])].sort((a, b) => a.time - b.time);
+
+export function addKeyframe(drawing, { time, setpoints }) {
+    const next = structuredClone(drawing);
+    next.keyframes ??= [];
+    const id = take(next, 'k');
+    next.keyframes.push({ id, time: Number(time), setpoints: { ...setpoints } });
+    next.keyframes = keyframesOf(next);
+    return { drawing: next, id };
+}
+
+export function updateKeyframe(drawing, id, changes) {
+    const next = structuredClone(drawing);
+    const keyframe = (next.keyframes ?? []).find((candidate) => candidate.id === id);
+    if (!keyframe) throw new Error(`There is no keyframe ${id}.`);
+    if (changes.time !== undefined) keyframe.time = Number(changes.time);
+    if (changes.setpoints) keyframe.setpoints = { ...changes.setpoints };
+    next.keyframes = keyframesOf(next);
+    return next;
+}
+
+export function removeKeyframe(drawing, id) {
+    const next = structuredClone(drawing);
+    next.keyframes = (next.keyframes ?? []).filter((keyframe) => keyframe.id !== id);
+    return next;
+}
+
+// The time a new keyframe takes: a second after the last, or 0 for the first.
+export const nextKeyframeTime = (drawing) => {
+    const last = keyframesOf(drawing).at(-1);
+    return last ? Math.round((last.time + 1) * 1000) / 1000 : 0;
+};
 
 // Swaps a joint's parent and child frames: the other solid's frame becomes the anchor and axis.
 export function reverseJoint(drawing, id) {
@@ -398,6 +480,17 @@ export function checkDrawing(drawing) {
             const vector = joint.drive.mode === 'torque' ? joint.drive.torque : joint.drive.setpoint;
             if (!(Array.isArray(vector) && vector.length === 3 && vector.every(Number.isFinite))) errors.push({ id: joint.id, message: `${joint.name}: a ball's ${joint.drive.mode === 'torque' ? 'torque' : 'setpoint'} is three numbers, about x, y and z.` });
         }
+        if (joint.drive?.mode === 'motor') {
+            if (joint.kind !== 'hinge' && joint.kind !== 'slider') errors.push({ id: joint.id, message: `${joint.name}: a motor drives a hinge or a slider.` });
+            for (const field of motorFields) {
+                const value = joint.drive.motor?.[field];
+                const allowZero = field === 'rotorInertia';
+                if (!(Number.isFinite(value) && (allowZero ? value >= 0 : value > 0))) errors.push({ id: joint.id, message: `${joint.name}: its motor's ${motorFieldNames[field]} must be ${allowZero ? 'zero or more' : 'more than zero'}.` });
+            }
+            for (const field of ['proportional', 'derivative']) {
+                if (!(Number.isFinite(joint.drive[field]) && joint.drive[field] >= 0)) errors.push({ id: joint.id, message: `${joint.name}: its motor controller's ${field} gain must be zero or more.` });
+            }
+        }
         if (joint.drive?.mode === 'servo') {
             if (!(joint.drive.gain > 0)) errors.push({ id: joint.id, message: `${joint.name}: a servo's stiffness must be more than zero.` });
             if (!(joint.drive.torqueLimit > 0)) errors.push({ id: joint.id, message: `${joint.name}: a servo's most torque must be more than zero.` });
@@ -418,6 +511,20 @@ export function checkDrawing(drawing) {
         }[joint.kind];
         notes.push({ id: joint.id, message: `${joint.name} closes a loop: Build holds its two solids ${held}, by a force of its own.` });
         if (joint.drive?.mode && joint.drive.mode !== 'free') errors.push({ id: joint.id, message: `${joint.name} closes a loop, so it cannot be driven; drive another joint of the loop.` });
+    }
+    const battery = batteryOf(drawing);
+    if (drawing.joints.some((joint) => joint.drive?.mode === 'motor')) {
+        if (!(battery.capacity > 0)) errors.push({ message: 'The battery\'s capacity must be more than zero.' });
+        if (!(battery.emptyVoltage > 0 && battery.fullVoltage > battery.emptyVoltage)) errors.push({ message: 'The battery\'s full voltage must be above its empty voltage, and both above zero.' });
+    }
+    const driven = new Set(drivenJoints(drawing).map(({ id }) => id));
+    const times = new Set();
+    for (const keyframe of keyframesOf(drawing)) {
+        if (!(Number.isFinite(keyframe.time) && keyframe.time >= 0)) errors.push({ id: keyframe.id, message: `A keyframe's time must be zero or more, not ${keyframe.time}.` });
+        if (times.has(keyframe.time)) errors.push({ id: keyframe.id, message: `Two keyframes are at ${keyframe.time} s; move one.` });
+        times.add(keyframe.time);
+        const ignored = Object.keys(keyframe.setpoints).filter((jointId) => !driven.has(jointId));
+        if (ignored.length) warnings.push({ id: keyframe.id, message: `The keyframe at ${keyframe.time} s sets ${ignored.map((jointId) => jointById(drawing, jointId)?.name ?? 'a joint that is gone').join(', ')}, which no servo or motor drives now; Build leaves ${ignored.length === 1 ? 'it' : 'them'} out.` });
     }
     for (const root of built.roots) {
         const solid = solidById(drawing, root);

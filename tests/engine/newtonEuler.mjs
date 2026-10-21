@@ -96,7 +96,7 @@ export function treeOf(drawing) {
 }
 
 // The coordinates every joint starts from: as drawn.
-function restCoordinates(bodies) {
+export function restCoordinates(bodies) {
     return bodies.map((body) => {
         if (body.kind === 'hinge' || body.kind === 'slider') return [0];
         if (body.kind === 'ball') return [1, 0, 0, 0];
@@ -106,7 +106,7 @@ function restCoordinates(bodies) {
 }
 
 // Each solid's world pose and its joint's world anchor and axis, for coordinates `q` (one array per solid).
-function place(bodies, q) {
+export function place(bodies, q) {
     const poses = [];
     for (const [i, body] of bodies.entries()) {
         if (body.kind === 'free') {
@@ -223,11 +223,13 @@ function solve(matrix, vector) {
     return a.map((row, i) => row[n] / row[i]);
 }
 
-export function jointTorque(joint, position, speed) {
+// `setpoint` is the servo's setpoint now (its keyframes' schedule, or its drive's), `motorTorque` a motor's torque now.
+export function jointTorque(joint, position, speed, setpoint = joint.drive?.setpoint, motorTorque = 0) {
     const drive = joint.drive ?? { mode: 'free' };
     let torque = 0;
     if (drive.mode === 'torque') torque = drive.torque ?? 0;
-    if (drive.mode === 'servo') torque = Math.max(-drive.torqueLimit, Math.min(drive.torqueLimit, drive.gain * (drive.setpoint - position)));
+    if (drive.mode === 'servo') torque = Math.max(-drive.torqueLimit, Math.min(drive.torqueLimit, drive.gain * (setpoint - position)));
+    if (drive.mode === 'motor') torque = motorTorque;
     return torque - (joint.damping ?? 0) * speed - (joint.friction ?? 0) * Math.tanh(100 * speed);
 }
 
@@ -245,10 +247,12 @@ function ballDrive(joint, turn) {
     return scale(torque, Math.min(1, drive.torqueLimit / Math.max(Math.hypot(...torque), 1e-12)));
 }
 
-function appliedForces(bodies, q, qd) {
+function appliedForces(bodies, q, qd, inputs) {
     return bodies.flatMap((body, i) => {
         const speeds = qd.slice(body.firstSpeed, body.firstSpeed + speedCount[body.kind]);
-        if (body.kind === 'hinge' || body.kind === 'slider') return [jointTorque(body.joint, q[i][0], speeds[0])];
+        if (body.kind === 'hinge' || body.kind === 'slider') {
+            return [jointTorque(body.joint, q[i][0], speeds[0], inputs.setpoints?.[body.joint.id] ?? body.joint.drive?.setpoint, inputs.motorTorques?.[body.joint.id] ?? 0)];
+        }
         if (body.kind === 'ball') {
             const drive = ballDrive(body.joint, q[i]);
             return speeds.map((speed, axis) => drive[axis] - (body.joint.damping ?? 0) * speed - (body.joint.friction ?? 0) * Math.tanh(100 * speed));
@@ -323,7 +327,7 @@ function loopRows(loop, poses, states) {
     });
 }
 
-export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001) {
+export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inputs = {}) {
     const n = qd.length;
     const zero = Array(n).fill(0);
     const poses = place(bodies, q);
@@ -331,9 +335,11 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001) {
     const columns = zero.map((_, column) => inverseDynamics(bodies, q, zero, zero.map((__, k) => (k === column ? 1 : 0)), 0, poses));
     // inverseDynamics gives a column of the mass matrix per unit acceleration; it is symmetric. A joint's armature adds
     // to each of its own axes, and so does its damping times the step: the damping taken at the step's end speed.
-    const armature = bodies.flatMap((body) => Array(speedCount[body.kind]).fill(body.kind === 'free' ? 0 : (body.joint.armature ?? 0) + (body.joint.damping ?? 0) * timeStep));
+    // A motor's rotor adds its inertia times the gear ratio squared.
+    const rotor = (joint) => (joint.drive?.mode === 'motor' ? joint.drive.motor.rotorInertia * joint.drive.motor.gearRatio ** 2 : 0);
+    const armature = bodies.flatMap((body) => Array(speedCount[body.kind]).fill(body.kind === 'free' ? 0 : (body.joint.armature ?? 0) + rotor(body.joint) + (body.joint.damping ?? 0) * timeStep));
     const matrix = zero.map((__, row) => zero.map((___, column) => columns[column][row] + (row === column ? armature[row] : 0)));
-    const applied = appliedForces(bodies, q, qd);
+    const applied = appliedForces(bodies, q, qd, inputs);
     const free = solve(matrix, applied.map((value, k) => value - bias[k]));
     if (!loops.length) return free;
 
@@ -396,13 +402,60 @@ export function simulate(drawing, times, timeStep = 0.001) {
     const out = Object.fromEntries([...bodies.filter(({ kind }) => kind !== 'fixed').map(({ joint }) => [joint.id, []]), ...bodies.map(({ id }) => [id, []])]);
     out.rotations = Object.fromEntries(bodies.map(({ id }) => [id, []]));
     out.gaps = [];
+    // Motors and their battery: each motor's winding temperature and the battery's charge, stepped beside the joints.
+    const motors = bodies.filter((body) => (body.kind === 'hinge' || body.kind === 'slider') && body.joint.drive?.mode === 'motor');
+    const battery = { fullVoltage: 12.6, emptyVoltage: 9.9, capacity: 7920, ...(drawing.battery ?? {}) };
+    let charge = 100;
+    const temperatures = Object.fromEntries(motors.map(({ joint }) => [joint.id, joint.drive.motor.ambientTemperature]));
+    out.motors = Object.fromEntries(motors.map(({ joint }) => [joint.id, { duty: [], current: [], torque: [], temperature: [] }]));
+    out.charge = [];
+    // Each keyframed joint's setpoint at a time: in straight lines between its keyframes, the nearest one's beyond them.
+    const keyframes = [...(drawing.keyframes ?? [])].sort((a, b) => a.time - b.time);
+    const scheduleOf = (jointId) => keyframes.filter(({ setpoints }) => Number.isFinite(setpoints[jointId])).map(({ time: at, setpoints }) => [at, setpoints[jointId]]);
+    const schedules = Object.fromEntries(bodies.filter(({ kind, joint }) => (kind === 'hinge' || kind === 'slider') && ['servo', 'motor'].includes(joint.drive?.mode))
+        .map(({ joint }) => [joint.id, scheduleOf(joint.id)]).filter(([, samples]) => samples.length));
+    const lookup = (samples, at) => {
+        if (at <= samples[0][0]) return samples[0][1];
+        if (at >= samples.at(-1)[0]) return samples.at(-1)[1];
+        const after = samples.findIndex(([sampleTime]) => sampleTime > at);
+        const [[t0, v0], [t1, v1]] = [samples[after - 1], samples[after]];
+        return v0 + (v1 - v0) * (at - t0) / (t1 - t0);
+    };
+    // The motors' duty, current and torque now, from the joints' positions and speeds and the battery's voltage.
+    const motorsNow = (at) => Object.fromEntries(motors.map((body) => {
+        const { joint } = body;
+        const index = bodies.indexOf(body);
+        const position = q[index][0];
+        const speed = qd[body.firstSpeed];
+        const setpoint = schedules[joint.id] ? lookup(schedules[joint.id], at) : joint.drive.setpoint ?? 0;
+        const { resistance, torqueConstant, gearRatio } = joint.drive.motor;
+        const duty = Math.max(-1, Math.min(1, joint.drive.proportional * (setpoint - position) - joint.drive.derivative * speed));
+        const voltage = battery.emptyVoltage + (battery.fullVoltage - battery.emptyVoltage) * charge / 100;
+        const current = (duty * voltage - torqueConstant * gearRatio * speed) / resistance;
+        return [joint.id, { duty, current, torque: gearRatio * torqueConstant * current }];
+    }));
     let time = 0;
     for (const target of times) {
         while (time < target - timeStep / 2) {
-            const qdd = forwardDynamics(bodies, q, qd, loops, timeStep);
+            const setpoints = Object.fromEntries(Object.entries(schedules).map(([jointId, samples]) => [jointId, lookup(samples, time)]));
+            const now = motorsNow(time);
+            const motorTorques = Object.fromEntries(Object.entries(now).map(([jointId, { torque }]) => [jointId, torque]));
+            const qdd = forwardDynamics(bodies, q, qd, loops, timeStep, { setpoints, motorTorques });
             ({ q, qd } = step(bodies, q, qd, qdd, timeStep));
+            for (const { joint } of motors) {
+                const { resistance, thermalResistance, thermalCapacitance, ambientTemperature } = joint.drive.motor;
+                const { current } = now[joint.id];
+                temperatures[joint.id] += timeStep * (resistance * current * current - (temperatures[joint.id] - ambientTemperature) / thermalResistance) / thermalCapacitance;
+            }
+            charge += timeStep * Object.values(now).reduce((sum, { duty, current }) => sum - 100 * duty * current / battery.capacity, 0);
             time += timeStep;
         }
+        const now = motorsNow(time);
+        for (const { joint } of motors) {
+            for (const key of ['duty', 'current', 'torque']) out.motors[joint.id][key].push(now[joint.id][key]);
+            out.motors[joint.id].temperature.push(temperatures[joint.id]);
+        }
+        out.charge.push(charge);
         const poses = place(bodies, q);
         bodies.forEach((body, i) => {
             if (body.kind === 'hinge' || body.kind === 'slider') out[body.joint.id].push(q[i][0]);
