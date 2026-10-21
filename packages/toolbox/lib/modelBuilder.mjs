@@ -91,6 +91,7 @@ const stateNames = {
     jointTorque: 'Drive torque', x: 'x', y: 'y', z: 'z', roll: 'Roll', pitch: 'Pitch', yaw: 'Yaw',
     w1: 'Angular velocity x', w2: 'Angular velocity y', w3: 'Angular velocity z',
     v1: 'Velocity at origin x', v2: 'Velocity at origin y', v3: 'Velocity at origin z',
+    vc1: 'Centre velocity x', vc2: 'Centre velocity y', vc3: 'Centre velocity z',
     jointSpeed1: 'Joint angular velocity x', jointSpeed2: 'Joint angular velocity y', jointSpeed3: 'Joint angular velocity z',
     jointTurnW: 'Joint turn w', jointTurnX: 'Joint turn x', jointTurnY: 'Joint turn y', jointTurnZ: 'Joint turn z',
     turnW: 'Turn w', turnX: 'Turn x', turnY: 'Turn y', turnZ: 'Turn z',
@@ -133,6 +134,7 @@ const biasChangeSymbols = ['dp1', 'dp2', 'dp3', 'dp4', 'dp5', 'dp6'];
 const accelerationChangeSymbols = ['da1', 'da2', 'da3', 'da4', 'da5', 'da6'];
 const turnSymbols = { ball: ['jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ'], free: ['turnW', 'turnX', 'turnY', 'turnZ'] };
 const degreesOfFreedom = { hinge: 1, slider: 1, ball: 3, free: 6, fixed: 0 };
+const centreVelocitySymbols = ['vc1', 'vc2', 'vc3'];
 
 // The reasons a drawing cannot be simulated yet by this builder (beyond checkDrawing's), each { id, message }: none, now
 // that every kind of joint can close a loop and a robot may have any number of them; kept for what comes next.
@@ -308,16 +310,19 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
             rotationStates(node, pose);
             velocityStates(node);
         } else if (joint.kind === 'free') {
-            // Joined to nothing: its own spatial velocity, centre and rotation are what it integrates.
-            velocityStates(node);
+            // Joined to nothing: its angular velocity and its centre's velocity, its centre and its rotation are what it
+            // integrates (as MuJoCo's free joint does: the centre's velocity, not the velocity at the world's origin, so
+            // a solid far from the origin steps as well as one near it). The velocity at the origin is set, as for any
+            // solid, for its children's joints to read.
+            ['w1', 'w2', 'w3'].forEach((symbol) => addState(node, symbol, 0, 'rad/s'));
+            const centreVelocity = centreVelocitySymbols.map((symbol) => addState(node, symbol, 0, 'm/s'));
             ['x', 'y', 'z'].forEach((symbol, axis) => addState(node, symbol, pose.position[axis], 'm'));
             const turn = turnSymbols.free.map((symbol, index) => addState(node, symbol, pose.rotation[index]));
             const accelerations = [1, 2, 3, 4, 5, 6].map((axis) => addState(node, `jointAcceleration${axis}`, 0, axis <= 3 ? 'rad/s²' : 'm/s²'));
-            velocitySymbols.forEach((symbol, index) => integrate(node, node.bySymbol.get(symbol), accelerations[index].symbol));
-            // The centre moves as the velocity at the origin plus ω × the centre.
-            const spin = E.cross(['w1', 'w2', 'w3'], ['x', 'y', 'z']);
-            ['x', 'y', 'z'].forEach((symbol, axis) => integrate(node, node.bySymbol.get(symbol), E.add(`v${axis + 1}`, spin[axis])));
+            ['w1', 'w2', 'w3', ...centreVelocitySymbols].forEach((symbol, index) => integrate(node, node.bySymbol.get(symbol), accelerations[index].symbol));
+            ['x', 'y', 'z'].forEach((symbol, axis) => integrate(node, node.bySymbol.get(symbol), centreVelocity[axis].symbol));
             quaternionRates(turnSymbols.free, ['w1', 'w2', 'w3']).forEach((rate, index) => integrate(node, turn[index], rate));
+            ['v1', 'v2', 'v3'].forEach((symbol) => addState(node, symbol, 0, 'm/s'));
             rotationStates(node, pose, { position: false });
         } else {
             rotationStates(node, pose);
@@ -528,7 +533,7 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     } else if (ball) {
         speeds = [1, 2, 3].map((axis) => bind(childNode, 'target', `jointSpeed${axis}`, 'c'));
     } else if (free) {
-        speeds = velocitySymbols.map((symbol) => bind(childNode, 'target', symbol, 'c'));
+        speeds = ['w1', 'w2', 'w3', ...centreVelocitySymbols].map((symbol) => bind(childNode, 'target', symbol, 'c'));
     }
     const articulated = (row, column) => `c${inertiaSymbol(row, column)[0].toUpperCase()}${inertiaSymbol(row, column).slice(1)}`;
     symmetric.forEach(([row, column]) => bind(childNode, 'target', inertiaSymbol(row, column), 'c'));
@@ -591,12 +596,20 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
             return [...axis, ...defineAll(`jm${column + 1}`, E.cross(point, axis))];
         });
     } else if (free) {
-        motions = [0, 1, 2, 3, 4, 5].map((column) => [0, 1, 2, 3, 4, 5].map((row) => (row === column ? 1 : 0)));
+        // Its speeds are its angular velocity and its centre's velocity: turning about each world axis through its
+        // centre c, and moving along each.
+        motions = [0, 1, 2].map((column) => {
+            const axis = [0, 1, 2].map((row) => (row === column ? 1 : 0));
+            return [...axis, ...E.cross(position, axis)];
+        }).concat([0, 1, 2].map((column) => [0, 0, 0, ...[0, 1, 2].map((row) => (row === column ? 1 : 0))]));
     }
-    // The joint's own velocity, S q̇, and the child's: its parent's plus the joint's.
+    // The joint's own velocity, S q̇, and the child's: its parent's plus the joint's (a free joint's parent, the Ground,
+    // is still).
     const jointVelocity = [0, 1, 2, 3, 4, 5].map((row) => E.add(motions.map((motion, k) => E.multiply(motion[row], speeds[k]))));
-    const velocity = free ? speeds : defineAll('vel', parentVelocity.map((value, index) => E.add(value, jointVelocity[index])));
-    if (!free) velocitySymbols.forEach((symbol, index) => toChild(symbol, velocity[index]));
+    const velocity = free ? [...speeds.slice(0, 3), ...defineAll('vel', jointVelocity.slice(3))]
+        : defineAll('vel', parentVelocity.map((value, index) => E.add(value, jointVelocity[index])));
+    if (free) ['v1', 'v2', 'v3'].forEach((symbol, index) => toChild(symbol, velocity[3 + index]));
+    else velocitySymbols.forEach((symbol, index) => toChild(symbol, velocity[index]));
 
     // The child's own spatial inertia about the origin: its rotational inertia about its centre turned into the world,
     // shifted to the origin, and its mass.
@@ -764,7 +777,8 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         ...E.cross(angular, jointVelocity.slice(0, 3)),
         ...E.cross(angular, jointVelocity.slice(3)).map((value, index) => E.add(value, E.cross(linear, jointVelocity.slice(0, 3))[index]))
     ];
-    const bias = defineAll('c', motionCross);
+    // A free joint's axes move with its centre: Ṡ q̇ = [0; ċ × ω] in place of the parent's velocity cross the joint's.
+    const bias = defineAll('c', free ? [0, 0, 0, ...E.cross(speeds.slice(3), speeds.slice(0, 3))] : motionCross);
 
     // Inward: what the child passes to its parent (the Ground takes nothing): the articulated inertia less what the
     // joint lets go (IA - U D⁻¹ Uᵀ), and the bias force plus IA c plus U D⁻¹ (u - Uᵀ c).

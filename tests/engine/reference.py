@@ -37,6 +37,8 @@ def main(path):
     for time in request["times"]:
         while data.time < time - timestep / 2:
             mujoco.mj_step(model, data)
+        # mj_step leaves the bodies' places as they were before its last step; bring them up to the joints'.
+        mujoco.mj_kinematics(model, data)
         for name, (qpos, _) in joints.items():
             positions[name].append(float(data.qpos[qpos]))
         for name, index in bodies.items():

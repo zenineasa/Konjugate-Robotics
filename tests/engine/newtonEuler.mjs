@@ -10,7 +10,7 @@
 // - a ball: its turn as a quaternion (in its parent's frame, from where it is drawn), and its angular velocity in its
 //   parent's frame;
 // - a solid joined to nothing (a free joint on the Ground): its centre and its rotation as a quaternion, in the world,
-//   and its spatial velocity (angular velocity, then the velocity of its point passing through the world's origin).
+//   and its angular velocity and its centre's velocity, as MuJoCo's free joint has them.
 // Stepped as the engine steps each node, one state after another in the node's order: the speeds from the
 // accelerations, then the coordinates from the new speeds, each coordinate from the ones updated before it.
 //
@@ -150,11 +150,7 @@ function motionOf(bodies, poses, qd, qdd, g) {
         const speeds = qd.slice(body.firstSpeed, body.firstSpeed + speedCount[body.kind]);
         const rates = qdd.slice(body.firstSpeed, body.firstSpeed + speedCount[body.kind]);
         if (body.kind === 'free') {
-            const omega = speeds.slice(0, 3);
-            const alpha = rates.slice(0, 3);
-            const velocity = add(speeds.slice(3), cross(omega, pose.position));
-            const acceleration = add(add(rates.slice(3), cross(alpha, pose.position)), cross(omega, velocity));
-            states.push({ omega, alpha, velocity, acceleration: add(acceleration, [0, 0, g]), centre: pose.position });
+            states.push({ omega: speeds.slice(0, 3), alpha: rates.slice(0, 3), velocity: speeds.slice(3), acceleration: add(rates.slice(3), [0, 0, g]), centre: pose.position });
             continue;
         }
         const parent = body.parent === -1
@@ -204,9 +200,9 @@ export function inverseDynamics(bodies, q, qd, qdd, g = gravity, poses = place(b
         if (body.kind === 'hinge') result.push(dot(poses[i].axis, aboutAnchor()));
         else if (body.kind === 'slider') result.push(dot(poses[i].axis, force[i]));
         else if (body.kind === 'ball') result.push(...rotate(conjugate(poses[i].parentRotation), aboutAnchor()));
-        // A free joint's speeds are an angular velocity and the velocity at the origin: the moment about the origin, and
-        // the force.
-        else if (body.kind === 'free') result.push(...add(moment[i], cross(states[i].centre, force[i])), ...force[i]);
+        // A free joint's speeds are an angular velocity and its centre's velocity: the moment about the centre, and the
+        // force.
+        else if (body.kind === 'free') result.push(...moment[i], ...force[i]);
     }
     return result;
 }
@@ -376,11 +372,10 @@ function step(bodies, q, qd, qdd, timeStep) {
         if (body.kind === 'hinge' || body.kind === 'slider') next[0] += timeStep * own[0];
         if (body.kind === 'ball') stepQuaternion(next, own, timeStep);
         if (body.kind === 'free') {
-            // The centre moves at the velocity at the origin plus ω × the centre.
             const [w1, w2, w3, v1, v2, v3] = own;
-            next[0] += timeStep * (v1 + w2 * next[2] - w3 * next[1]);
-            next[1] += timeStep * (v2 + w3 * next[0] - w1 * next[2]);
-            next[2] += timeStep * (v3 + w1 * next[1] - w2 * next[0]);
+            next[0] += timeStep * v1;
+            next[1] += timeStep * v2;
+            next[2] += timeStep * v3;
             const turn = next.slice(3);
             stepQuaternion(turn, [w1, w2, w3], timeStep);
             next.splice(3, 4, ...turn);

@@ -402,11 +402,11 @@ test('a drawn robot resumed from a checkpoint carries on exactly as the run that
     }
 });
 
-// MuJoCo steps the same way (its Euler integrator: speeds, then positions from the new speeds) but takes a joint's
-// damping implicitly and models its servos as position actuators, so the two agree closely, not to rounding. The bound
-// below is a finding, stated: Konjugate and MuJoCo agree to within it over these runs.
-const mujocoBound = 1e-2;
-test('MuJoCo on its own swings the same pendulum and holds the same arm, to within a stated bound', { skip: withoutMujoco ?? false }, async () => {
+// MuJoCo steps a tree as Konjugate does: speeds from the accelerations, then positions from the new speeds, a joint's
+// damping taken at the step's end speed, its servos as position actuators of the same stiffness and most torque. So
+// they agree to rounding, measured at about 1e-11 over these runs (with MuJoCo 3.16), bounded here at 1e-8.
+const mujocoBound = 1e-8;
+test('MuJoCo on its own swings the same pendulum, holds the same arm and carries the same cart, to rounding', { skip: withoutMujoco ?? false }, async () => {
     for (const id of ['pendulum', 'twoLinkArm', 'cartPendulums']) {
         const drawing = exampleDrawing(id);
         const run = await runDocument(directory, `mujoco-${id}`, build(drawing, 3));
@@ -424,8 +424,12 @@ test('MuJoCo on its own swings the same pendulum and holds the same arm, to with
 });
 
 // The same, for what MuJoCo can hold as Konjugate does: ball joints, a body joined to nothing (MuJoCo's free joint) and
-// loops closed by a pin or a weld (its connect and weld equalities, which it holds softly, so a little looser). Each
-// solid's centre is compared, every 10 ms.
+// loops closed by a pin or a weld (its connect and weld equalities). Here the two step a little differently: MuJoCo
+// turns a ball or a free joint by the exact rotation of its step, where Konjugate steps its quaternion one component
+// after another, and MuJoCo holds an equality softly, where Konjugate holds a loop by Baumgarte's terms. Each solid's
+// centre is compared every 10 ms: measured within 0.62 mm (the ball pendulum), 0.16 mm (the four-bar), 0.04 mm (the
+// weld) and 0.013 mm (the falling body), each about as far as either is from a run at a twentieth of the step.
+const mujocoLoopBound = 1e-3;
 test('MuJoCo on its own moves ball joints, a body joined to nothing and closed loops as Konjugate does, to within a stated bound', { skip: withoutMujoco ?? false }, async () => {
     const welded = (() => {
         let drawing = createDrawing('Welded arms');
@@ -458,7 +462,7 @@ test('MuJoCo on its own moves ball joints, a body joined to nothing and closed l
             for (const [axis, symbol] of ['x', 'y', 'z'].entries()) worst = Math.max(worst, largestDifference(run.series(`${solid.name}.${symbol}`), reference[solid.id].map((place) => place[axis])));
         }
         console.log(`${id}: Konjugate's and MuJoCo's solids are within ${(worst * 1000).toFixed(3)} mm of each other.`);
-        assert.ok(worst < mujocoBound, `${id}: a solid is ${worst} m from where MuJoCo alone has it.`);
+        assert.ok(worst < mujocoLoopBound, `${id}: a solid is ${worst} m from where MuJoCo alone has it.`);
     }
 });
 

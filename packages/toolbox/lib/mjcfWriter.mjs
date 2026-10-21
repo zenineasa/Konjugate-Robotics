@@ -83,6 +83,8 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
     };
 
     write(0, `<mujoco model="${escape(drawing.name || 'Robot')}">`);
+    // Angles in radians, as the drawing has them: MuJoCo reads a joint's range in degrees otherwise.
+    write(1, '<compiler angle="radian"/>');
     write(1, `<option timestep="${formatNumber(timestep)}" gravity="0 0 -9.81" integrator="implicitfast">`);
     write(2, '<flag energy="enable"/>');
     write(1, '</option>');

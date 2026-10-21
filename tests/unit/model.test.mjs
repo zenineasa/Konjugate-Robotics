@@ -30,6 +30,8 @@ test('the MJCF has a slider as a slide joint, and a solid joined to nothing floa
     const pendulum = exampleDrawing('pendulum');
     const floating = { ...pendulum, joints: [], frames: [] };
     assert.equal((writeMjcf(floating).match(/<freejoint\/>/g) ?? []).length, 2);
+    // Its angles are radians, as the drawing's are: MuJoCo would read a range in degrees otherwise.
+    assert.match(writeMjcf(pendulum), /<compiler angle="radian"\/>/);
     // A ball's limit is its most turn, MuJoCo's range from 0.
     const limitedBall = updateJoint(pendulum, pendulum.joints.find(({ name }) => name === 'Pivot').id, { kind: 'ball' });
     const ballJoint = limitedBall.joints.find(({ name }) => name === 'Pivot');
@@ -129,7 +131,7 @@ test('ball joints, solids joined to nothing and loops closed by any joint, sever
     const floatingModel = buildModel(floating).document;
     assert.deepEqual(floatingModel.edges.map(({ name }) => name), ['Post floating', 'Arm floating']);
     assert.deepEqual(floatingModel.nodes.find(({ name }) => name === 'Post').sourceTerms.map(({ state }) => state),
-        ['w1', 'w2', 'w3', 'v1', 'v2', 'v3', 'x', 'y', 'z', 'turnW', 'turnX', 'turnY', 'turnZ']);
+        ['w1', 'w2', 'w3', 'vc1', 'vc2', 'vc3', 'x', 'y', 'z', 'turnW', 'turnX', 'turnY', 'turnZ']);
     // Its far end pinned to the Ground as well: a loop, closed by a relationship of its own.
     let frame = addFrameAt(pendulum, 'ground', [0.2, 0.035, 0.18], [0, 1, 0]);
     const groundFrame = frame.id;
