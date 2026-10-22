@@ -20,7 +20,7 @@ How the Robotics window should feel to three kinds of user, and what that means 
 6. **Escape always backs out** one level: the first point of a joint, then the tool, then the selection.
 7. **No surprises on keys**: keys act only when the user is not typing in a field.
 8. **Every platform as its own users expect**: `lib/platform.mjs` decides which keys mean what, as in Logistics.
-9. **Tests cover each way**: `tests/window/robotWindow.mjs` does the workflow by buttons, clicks in the view and keys, as a Windows or Linux user and as a Mac user.
+9. **Tests cover each way**: `tests/interaction/robotWindow.mjs` does the workflow in the real Konjugate app, opening the window from the toolstrip, by buttons, clicks in the view and keys, as a Windows or Linux user and as a Mac user.
 
 ## Actions
 

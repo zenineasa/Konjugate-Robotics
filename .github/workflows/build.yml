@@ -40,7 +40,7 @@ jobs:
               run: npm ci
             # The unit tests, including tests/unit/archiveImports.test.mjs, which builds the add-on and
             # checks every relative import, script and stylesheet in it resolves to a file inside it.
-            # The engine and window tests need Konjugate's engine build and a browser; run them locally.
+            # The engine and interaction tests need Konjugate's engine build and its Electron app; run them locally.
             - name: Run tests
               working-directory: konjugate-robotics
               run: npm test

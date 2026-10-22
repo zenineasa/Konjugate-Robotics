@@ -35,7 +35,7 @@ This repository builds against a sibling checkout of Konjugate (`KONJUGATE_DIR` 
 npm run build            # out/konjugate.robotics.toolbox-<version>.kja
 npm run install:dev      # builds and installs it into your local Konjugate, removing the retired Robotics Engine plugin
 npm test                 # unit tests
-npm run test:window      # the window in a plain browser (Playwright from the Konjugate checkout), as a Windows or Linux user and as a Mac user
+npm run test:interaction # builds, then drives the window in the real Konjugate app (its Electron, through Playwright), as a Windows or Linux user and as a Mac user
 npm run test:engine      # drawn robots through Konjugate's engine, against a Newton-Euler reference
 npm run setup:python     # optional: .venv with MuJoCo (needs uv), so test:engine also compares with MuJoCo alone
 ```

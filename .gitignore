@@ -6,3 +6,4 @@ out/
 .venv/
 __pycache__/
 .DS_Store
+Claude outputs/

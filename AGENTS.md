@@ -12,7 +12,7 @@ Code map:
 - `packages/toolbox/importers/drawing.mjs`: the importer (open a drawing file; build the model from the window's drawing).
 - `tests/engine/newtonEuler.mjs`: an independent solution of a drawing's motion (recursive Newton-Euler), the reference the built model is checked against.
 
-Commands: `npm test` (unit), `npm run test:window` (the window in a plain browser, Playwright from the Konjugate checkout; with an engine build it also validates the model it builds), `npm run test:engine` (drawn robots through Konjugate's engine against the Newton-Euler reference, and against MuJoCo alone when `npm run setup:python` has been run; needs the engine build). Konjugate's checkout is expected at `../konjugate` (or `KONJUGATE_DIR`).
+Commands: `npm test` (unit), `npm run test:interaction` (builds the toolbox, installs it into a scratch userData and drives its window in the real Konjugate app, launched in Konjugate's own Electron through Playwright's Electron mode as the fintech and logistics toolboxes do, so no browser is downloaded; Build is read back from the canvas, and with an engine build the engine validates those models; slow), `npm run test:engine` (drawn robots through Konjugate's engine against the Newton-Euler reference, and against MuJoCo alone when `npm run setup:python` has been run; needs the engine build). Konjugate's checkout is expected at `../konjugate` (or `KONJUGATE_DIR`).
 
 Conventions:
 
