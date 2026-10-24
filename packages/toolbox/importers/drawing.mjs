@@ -29,9 +29,10 @@ export default async function importDrawing({ files = [], options = {} }) {
         return failure(error.message);
     }
     try {
-        const { document, data, report } = buildModel(drawing, { timeStep: options.timeStep ?? 0.001, runTime: options.runTime ?? 10 });
+        const built = buildModel(drawing, { timeStep: options.timeStep ?? 0.001, runTime: options.runTime ?? 10 });
+        const { document, data, report } = built;
         return {
-            ok: true, document, parameterIndex: [], data,
+            ok: true, document, parameterIndex: built.parameterIndex, data,
             report: {
                 errors: [], warnings: report.warnings, notes: report.notes,
                 summary: `${drawing.name || 'The robot'}: ${data.solids} solids and ${data.joints} joints`

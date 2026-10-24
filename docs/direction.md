@@ -34,7 +34,9 @@ Simple means: a few solid shapes, sizes typed or dragged, joints made by clickin
 
 Every action has a button or menu item, a gesture in the view and a key, works on the selection and can be undone, on Windows, Linux and macOS alike.
 
-Later steps, in later milestones: the sizing view (each joint's operating points over its motor's envelope, winding temperatures, the battery's charge); forks for a heavier payload or a weaker motor; Tuning against a real robot's logs; optimising sizes and gear ratios; handing a reduced robot to a larger model; MJCF and URDF export.
+8. **Will these motors do it?** Size runs the robot in Konjugate and shows each motor's run on the band of torque and speed it can give at its joint, how much of the run it gave all it could, how hot its winding got and what the battery gave; a what-if forks that run from a time (a heavier solid, a weaker motor, a tired battery) and shows the two side by side, and in the canvas as a branch each.
+
+Later steps, in later milestones: Tuning against a real robot's logs; optimising sizes and gear ratios; handing a reduced robot to a larger model; MJCF and URDF export.
 
 ## How the drawing becomes Konjugate
 
@@ -118,6 +120,8 @@ General additions, not robotics-specific, described in the core proposal [Toolbo
 2. **Semi-implicit integration** (built, October 2026, not yet released). A node may integrate its states in the order listed, each from the ones updated before it (`numerics.integration: "semiImplicit"`).
 3. **Arcsin, Arccos, Arctan, Arctan2 and Tanh** in equations (built, October 2026, not yet released).
 4. **A resumed run steps exactly as the run it came from** (fixed, October 2026): the last step of a run resumed from a checkpoint is no longer a few ulps short.
+5. **A plain run for a launcher** (built, October 2026, not yet released): `runBaseline` runs the imported model once, as Run does in the canvas, and answers with the series asked for; a scenario of the same length forks from it. A launcher requires it as `baselineRun`. Milestone C's sizing view needs it: a scenario must change something, and the robot as drawn changes nothing.
+6. **A fork's change reaches the algebraic states at once** (fixed, October 2026, not yet released): the engine sets them again whenever a parameter is set or scheduled during a run, before the next step reads them. Before, a fork started paused had its states set with the values from before its changes, so its first step read, for a robot, the articulated inertia of the old mass (a live slider moved during a run had the same one-step lag); found by checking each what-if fork against the changed robot resumed from the same checkpoint.
 
 Later, from the same proposal: merging a rebuild with hand-made work (Part 1), and design objectives with constraints (Part 3). Each toolbox release needs a Konjugate release with what it requires, so core goes first.
 
@@ -136,7 +140,7 @@ Each one ends in something that can be shown.
 - **A. Draw it, build it, run it.** The window with boxes, cylinders, spheres and capsules; frames picked on surfaces; hinge, slider and fixed joints; free, torque and servo drives; undo, keys and menus. Build makes solid nodes and joint edges carrying the articulated-body equations. Checked against an independent Newton-Euler solution and against MuJoCo running the same MJCF on its own. Shown on a two-link arm and a cart carrying two pendulums.
 - **A2. Loops, balls and floating solids.** Closed loops (a four-bar linkage) through constraint forces on the closing joint's edge; ball joints; a solid joined to nothing.
 - **B. Drive it.** Motor mode (a motor node per joint and the robot's battery); a jog panel that poses the robot for setpoints and keyframes; keyframed poses saved as schedules; a pick-and-place example. Built (October 2026): each checked against the Newton-Euler reference, extended with the motors' electrics, the battery and the schedules, to rounding.
-- **C. Will these motors do it?** The sizing view and forks for a heavier payload or a weaker motor, as built in the first version, on drawn robots.
+- **C. Will these motors do it?** The sizing view and forks for a heavier payload or a weaker motor, as built in the first version, on drawn robots. Built (October 2026): Size runs the robot with core's new `runBaseline`, and the what-ifs (a heavier solid, a weaker motor, a tired battery) are the toolbox's scenarios, run by the host as forks of that run on live shared parameters (each solid's mass, each motor's torque constant, the battery's voltages). Each fork is checked to carry on exactly as the changed robot, built again and resumed from the same checkpoint, to 1e-9; every motor's run lies inside its band; the window is tested in the real app.
 - **D. Start from a known robot.** MJCF and URDF import, and Menagerie fetched on request, into the drawing as solids (with their meshes) and joints, as built in the first version; then STL and STEP parts.
 - **E. Parametric parts.** Extruded profiles, robot part templates, joint-first skeleton design, sizes as shared parameters.
 - **F. Fit to a real robot.** Tuning against a public LeRobot dataset of an SO-100 arm, then a user's own logs.

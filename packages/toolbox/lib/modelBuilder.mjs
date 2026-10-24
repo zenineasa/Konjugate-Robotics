@@ -76,6 +76,16 @@ function rotationMatrix(q) {
 
 const round = (value) => Math.round(value * 1e12) / 1e12;
 
+// A live shared parameter's slider, from `minimum` to `maximum` in 400 steps.
+const liveRange = (minimum, maximum) => ({ minimum: round(minimum), maximum: round(maximum), step: round((maximum - minimum) / 400) });
+
+// What a fork can change, as Konjugate's launcher host finds it (the importer's parameter index): a live shared
+// parameter, by what it is (`key`) and whose it is (`entity`, a solid's, a motor's joint's or the battery's name).
+const indexEntry = (key, entity, shared) => ({
+    key, entity, name: shared.name, symbol: shared.symbol, sharedParameterId: shared.id, scope: 'instance', value: shared.value, unit: shared.unit,
+    live: shared.mode === 'live', minimum: shared.control?.minimum, maximum: shared.control?.maximum
+});
+
 // The states a solid's node holds, by symbol: its joint's speed and angle first (integrated in that order), then what
 // the relationships set. Index pairs of the 6 by 6 symmetric articulated inertia are its upper triangle.
 const symmetric = [];
@@ -366,13 +376,18 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
     document.nodes.push(...nodes.values());
 
     // ---- each solid's mass, a shared parameter -------------------------------------------------------------------------
+    // A live slider, so a fork can make a solid heavier from a time on (the part in a gripper, say), from a tenth of it
+    // to twenty times it (and at least 5 kg more).
     const symbols = new Set();
     const masses = new Map();
+    const parameterIndex = [];
     for (const { id: solidId } of order) {
         const solid = drawing.solids.find((candidate) => candidate.id === solidId);
-        const shared = { id: id(), name: `${solid.name} mass`, symbol: camelKey(`${solid.name} mass`, symbols), value: round(massOf(solid)), unit: 'kg', mode: 'constant' };
+        const mass = massOf(solid);
+        const shared = { id: id(), name: `${solid.name} mass`, symbol: camelKey(`${solid.name} mass`, symbols), value: round(mass), unit: 'kg', mode: 'live', control: liveRange(mass / 10, Math.max(20 * mass, mass + 5)) };
         document.sharedParameters.push(shared);
         masses.set(solidId, shared);
+        parameterIndex.push(indexEntry('solidMass', solid.name, shared));
     }
 
     // ---- each driven joint's setpoint, scheduled by the keyframes ------------------------------------------------------
@@ -407,7 +422,7 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
     for (const loop of loops) document.edges.push(closingRelationship(drawing, loop, nodes, path, R, id, timeStep));
 
     // ---- motors and their battery ----------------------------------------------------------------------------------------
-    if (motorDriven.size) motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symbols, id);
+    if (motorDriven.size) parameterIndex.push(...motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symbols, id));
     for (const node of document.nodes) delete node.bySymbol;
 
     const runConfigurationId = id();
@@ -415,6 +430,7 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
     document.activeRunConfigurationId = runConfigurationId;
     return {
         document,
+        parameterIndex,
         data: {
             solids: drawing.solids.length,
             joints: drawing.joints.length,
@@ -1016,11 +1032,13 @@ function closingRelationship(drawing, loop, nodes, path, R, id, timeStep) {
 // node), and the battery's voltage falls in a straight line from full to empty with its charge (a source term of its).
 function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symbols, id) {
     const battery = batteryOf(drawing);
-    const share = (name, value, unit) => {
-        const created = { id: id(), name, symbol: camelKey(name, symbols), value: round(value), unit, mode: 'constant' };
+    // A shared parameter; `range` makes it a live slider over it, which a fork can change.
+    const share = (name, value, unit, range = null) => {
+        const created = { id: id(), name, symbol: camelKey(name, symbols), value: round(value), unit, mode: range ? 'live' : 'constant', ...(range ? { control: liveRange(...range) } : {}) };
         document.sharedParameters.push(created);
         return created;
     };
+    const parameterIndex = [];
     const nodeOf = (name, type, position, color, shape = 'box') => ({
         id: id(), name, type, position, states: [], sourceTerms: [], bySymbol: new Map(), numerics: { substepsPerGlobalStep: 1, integration: 'semiImplicit' },
         appearance: { type: 'primitive', shape, color }
@@ -1050,8 +1068,10 @@ function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symb
     };
     const linked = (shared, symbol) => ({ name: shared.name, symbol, value: shared.value, unit: shared.unit, mode: 'constant', sharedParameterId: shared.id });
 
-    const full = share('Battery full voltage', battery.fullVoltage, 'V');
-    const empty = share('Battery empty voltage', battery.emptyVoltage, 'V');
+    // Its voltages are live, so a fork can tire the battery: the same charge giving fewer volts.
+    const full = share('Battery full voltage', battery.fullVoltage, 'V', [0, 2 * battery.fullVoltage]);
+    const empty = share('Battery empty voltage', battery.emptyVoltage, 'V', [0, 2 * battery.fullVoltage]);
+    parameterIndex.push(indexEntry('batteryFullVoltage', 'Battery', full), indexEntry('batteryEmptyVoltage', 'Battery', empty));
     const capacity = share('Battery capacity', battery.capacity, 'A·s');
     const store = nodeOf('Battery', 'robotBattery', [0, 4, 0], '#2f6970');
     const voltage = addState(store, 'voltage', battery.fullVoltage, 'V');
@@ -1069,7 +1089,9 @@ function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symb
             addState(motorNode, symbol, initial, unit);
         }
         const resistance = share(`${joint.name} winding resistance`, motor.resistance, 'Ω');
-        const torqueConstant = share(`${joint.name} torque constant`, motor.torqueConstant, 'N·m/A');
+        // Live, so a fork can weaken the motor (a worn or a smaller one): less torque for its current, and less back-EMF.
+        const torqueConstant = share(`${joint.name} torque constant`, motor.torqueConstant, 'N·m/A', [motor.torqueConstant / 10, 2 * motor.torqueConstant]);
+        parameterIndex.push(indexEntry('torqueConstant', joint.name, torqueConstant));
         const gearRatio = share(`${joint.name} gear ratio`, motor.gearRatio, linear ? 'rad/m' : '');
         sourceTerm(motorNode, motorNode.bySymbol.get('windingTemperature'),
             E.divide(E.subtract(E.multiply('resistance', 'current', 'current'), E.divide(E.subtract('windingTemperature', 'ambient'), 'thermalResistance')), 'heatCapacity'), [
@@ -1139,6 +1161,7 @@ function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symb
             appearance: { color: '#c46a6a', offset: 0, waypoints: [] }
         });
     }
+    return parameterIndex;
 }
 
 // A relationship of several equations between `source` and `target`, written by `write(bind, output, define)`.

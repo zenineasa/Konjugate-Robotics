@@ -9,12 +9,17 @@
     "permissions": [
         "data.import",
         "model.open",
-        "project.data"
+        "project.data",
+        "scenario.run"
     ],
     "requires": [
         "projectSession",
         "keepSession",
-        "algebraicRelationships"
+        "algebraicRelationships",
+        "parameterSchedules",
+        "baselineRun",
+        "scenarioForkTime",
+        "suppliedPerParameter"
     ],
     "contributes": {
         "toolstrip": [
@@ -38,6 +43,64 @@
                         "label": "Drawing",
                         "accept": ["json"],
                         "description": "A robot drawing as JSON (format konjugate.robotics.drawing, version 1): written by a script, or kept from another project. Opening one replaces the drawing in the window, and can be undone."
+                    }
+                ]
+            }
+        ],
+        "scenarios": [
+            {
+                "scenarioId": "heavierSolid",
+                "name": "A heavier solid",
+                "description": "From a time in the run, a solid weighs more: the part in a gripper, say. Watch which motors reach their limit, how hot their windings get and how much charge the cycle takes.",
+                "forkAt": 0,
+                "runTime": 10,
+                "effects": [
+                    "The chosen solid's mass changes to the one given, from the time given to the end of the run."
+                ],
+                "interventions": [
+                    {
+                        "parameter": "solidMass",
+                        "target": "supplied",
+                        "samples": true
+                    }
+                ]
+            },
+            {
+                "scenarioId": "weakerMotor",
+                "name": "A weaker motor",
+                "description": "From a time in the run, a motor gives less torque for its current, as a worn or a smaller one would. Watch whether its joint still keeps up, and what the others do.",
+                "forkAt": 0,
+                "runTime": 10,
+                "effects": [
+                    "The chosen motor's torque constant changes to the one given, from the time given to the end of the run: less torque for its current, and less back-EMF for its speed."
+                ],
+                "interventions": [
+                    {
+                        "parameter": "torqueConstant",
+                        "target": "supplied",
+                        "samples": true
+                    }
+                ]
+            },
+            {
+                "scenarioId": "tiredBattery",
+                "name": "A tired battery",
+                "description": "From a time in the run, the battery gives fewer volts at every charge, as a tired or a half-flat one does. Watch the motors' top speed and torque fall with it.",
+                "forkAt": 0,
+                "runTime": 10,
+                "effects": [
+                    "The battery's full and empty voltages both fall by the drop given, from the time given to the end of the run."
+                ],
+                "interventions": [
+                    {
+                        "parameter": "batteryFullVoltage",
+                        "target": "supplied",
+                        "samples": true
+                    },
+                    {
+                        "parameter": "batteryEmptyVoltage",
+                        "target": "supplied",
+                        "samples": true
                     }
                 ]
             }

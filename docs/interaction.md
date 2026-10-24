@@ -51,4 +51,7 @@ The command key is Ctrl on Windows and Linux and ⌘ on a Mac.
 | Snap moves to 5 mm and turns to 15° | Snap | | |
 | Back out | Select | | `Escape` |
 | Build into the canvas | Build into canvas | | command-`B` |
+| Will these motors do it? (open and close the sizing panel; opened, it runs the robot as drawn if it has not run) | Size; ✕ | | `M`; `Escape` closes it when nothing is selected |
+| Run the robot as drawn, or a what-if from a time | Run as drawn; What if, its fields, Run what-if | | |
+| Open the runs in the canvas | Show in canvas | | |
 | Keys and gestures | ? | | `?` |

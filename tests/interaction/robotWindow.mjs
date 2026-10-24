@@ -229,8 +229,20 @@ try {
     assert.match(await page.textContent('#inspector'), /It closes a loop: Build holds it with a force of its own/);
     await page.click('#buildButton');
     const linkage = await builtInCanvas((model) => model.edges.some(({ name }) => name === 'Closing pin'));
+    const buildStatus = () => page.textContent('#buildStatus');
+    await page.waitForFunction(() => /^Built into the canvas/.test(document.querySelector('#buildStatus').textContent));
+    const linkageStatus = await buildStatus();
     await page.selectOption('#exampleSelect', 'ballPendulum');
     await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Ball-joint pendulum');
+    // Another robot in the window: the status no longer describes it as built, and says the canvas has the last build.
+    assert.match(await buildStatus(), /^The canvas holds the robot as last built \(\d+ solids, \d+ joints\), not as drawn now\. Build again/);
+    // Undo brings the built robot back, and the status with it; redo, the other robot again.
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press(`${command}+z`);
+    assert.equal(await buildStatus(), linkageStatus);
+    await page.keyboard.press(asMac ? 'Meta+Shift+z' : 'Control+y');
+    assert.equal((await drawing()).name, 'Ball-joint pendulum');
+    assert.match(await buildStatus(), /^The canvas holds the robot as last built/);
     assert.match(await page.textContent('#checksList'), /Ready to build/);
     await page.click('#partsTree li:has-text("Shoulder")');
     assert.match(await page.textContent('#inspector'), /Damping/);
@@ -299,6 +311,55 @@ try {
     assert.ok(['Waist motor', 'Shoulder motor', 'Elbow motor', 'Wrist motor'].every((name) => pickAndPlace.nodes.some((node) => node.name === name)));
     assert.equal(pickAndPlace.sharedParameters.find(({ name }) => name === 'Waist setpoint').schedule.samples.length, 8);
     await shot('08-pick-and-place');
+
+    // 14. Will these motors do it? M opens the sizing panel and, as nothing has been run as drawn, Konjugate runs the
+    // pick-and-place arm (runBaseline): a card per motor, its run inside its band. A heavier part from 2 s is a what-if
+    // forked from that run in Konjugate, shown beside it; Show in canvas opens both, a branch each; M closes the panel.
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press('m');
+    await page.waitForSelector('#sizingPanel:not([hidden])');
+    const sized = () => page.waitForFunction(() => { const { sizing } = window.roboticsWindow.state; return sizing.asDrawn && !sizing.running; }, null, { timeout: 180000 });
+    await sized();
+    assert.equal(await page.locator('#sizingPanel .motorCard[data-joint]').count(), 4, 'a card for each of the four motors');
+    assert.equal(await page.locator('#sizingPanel .batteryCard').count(), 1);
+    const asDrawn = await page.evaluate(() => window.roboticsWindow.state.sizing.asDrawn);
+    const shoulderSized = asDrawn.motors.find(({ name }) => name === 'Shoulder');
+    assert.ok(shoulderSized.points.length > 100 && shoulderSized.hottest > shoulderSized.motor.ambientTemperature, 'the shoulder ran, and its winding warmed');
+    assert.ok(asDrawn.battery.chargeUsed > 0, 'the run drew on the battery');
+    // Each point inside its band: the duty is held to ±1, so the motor never gives more than its band allows.
+    for (const motor of asDrawn.motors) {
+        const { resistance: R, torqueConstant: kt, gearRatio: N } = motor.motor;
+        for (const [speed, torque] of motor.points) assert.ok(Math.abs(torque + (kt * N) ** 2 * speed / R) <= kt * N * asDrawn.supply.fullVoltage / R * (1 + 1e-9), `${motor.name}: a point outside its band`);
+    }
+    assert.match(await page.textContent('#sizingPanel .status'), /10 s as drawn/);
+    await shot('09-sizing');
+    await page.selectOption('#sizingPanel select[data-whatif="scenarioId"]', 'heavierSolid');
+    await page.selectOption('#sizingPanel select[data-whatif="solid"]', 'Part');
+    await page.fill('#sizingPanel input[data-whatif="mass"]', '600');
+    await page.press('#sizingPanel input[data-whatif="mass"]', 'Enter');
+    await page.fill('#sizingPanel input[data-whatif="forkAt"]', '2');
+    await page.press('#sizingPanel input[data-whatif="forkAt"]', 'Enter');
+    await page.click('#sizingPanel button[data-sizing="whatIf"]');
+    await page.waitForFunction(() => window.roboticsWindow.state.sizing.whatIf && !window.roboticsWindow.state.sizing.running, null, { timeout: 180000 });
+    const changed = await page.evaluate(() => window.roboticsWindow.state.sizing.whatIf);
+    assert.equal(changed.change, 'Part weighs 600 g from 2 s');
+    assert.equal(changed.forkTime, 2);
+    const heavierShoulder = changed.summary.motors.find(({ name }) => name === 'Shoulder');
+    assert.ok(heavierShoulder.peakCurrent > shoulderSized.peakCurrent, 'carrying a heavier part, the shoulder draws more current');
+    assert.ok(changed.summary.battery.chargeUsed > asDrawn.battery.chargeUsed, 'and the cycle takes more charge');
+    assert.ok(await page.locator('#sizingPanel circle.changed').count() > 0, 'the what-if\'s points are drawn beside the run as drawn');
+    await shot('10-what-if');
+    await page.click('#sizingPanel button[data-sizing="show"]');
+    await canvas.waitForFunction(() => document.querySelectorAll('#branchTree .branchTreeButton').length === 2
+        && /A heavier solid/.test(document.querySelector('#branchTree').textContent), null, { timeout: 30000 });
+    // M closes the panel, Size opens it again (the run as drawn is current, so it runs nothing), and ✕ closes it.
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press('m');
+    assert.equal(await page.isHidden('#sizingPanel'), true);
+    await page.click('#sizeButton');
+    assert.equal(await page.isVisible('#sizingPanel'), true);
+    await page.click('#sizingPanel button[data-sizing="close"]');
+    assert.equal(await page.isHidden('#sizingPanel'), true);
 
     assert.deepEqual(problems, [], `the page reported problems: ${problems.join(' | ')}`);
 

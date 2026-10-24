@@ -52,6 +52,7 @@
             <option value="">Examples…</option>
         </select>
         <button type="button" class="tool" id="openButton" title="Open a drawing from a JSON file">Open…</button>
+        <button type="button" class="tool" id="sizeButton" aria-pressed="false" title="Will these motors do it? Run the robot and size its motors (M)"><span class="glyph">⚡</span>Size</button>
         <button type="button" class="primary" id="buildButton" title="Build the robot into the canvas">Build into canvas</button>
         <button type="button" class="tool" id="helpButton" title="Keys and gestures (?)" aria-label="Keys and gestures">?</button>
     </header>
@@ -71,6 +72,7 @@
         <section class="viewport" id="viewport" aria-label="3D view">
             <div class="hint" id="hint" aria-live="polite"></div>
             <div class="toast" id="toast" role="status" hidden></div>
+            <section class="sizing" id="sizingPanel" aria-label="Will these motors do it?" hidden></section>
         </section>
 
         <aside class="panel right" id="inspector" aria-label="Selected part"></aside>

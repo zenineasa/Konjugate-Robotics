@@ -43,10 +43,12 @@ export const driveLabels = Object.freeze({ free: 'Free', torque: 'Torque', servo
 export function defaultMotor(kind) {
     return {
         resistance: 2.5, torqueConstant: 0.02, gearRatio: kind === 'slider' ? 3142 : 100, rotorInertia: 1e-6,
-        thermalResistance: 10, thermalCapacitance: 15, ambientTemperature: 293.15
+        thermalResistance: 10, thermalCapacitance: 15, ambientTemperature: 293.15, windingLimit: 403.15
     };
 }
-export const motorFields = Object.freeze(['resistance', 'torqueConstant', 'gearRatio', 'rotorInertia', 'thermalResistance', 'thermalCapacitance', 'ambientTemperature']);
+// `windingLimit`: the hottest its winding may get (130 °C, a class B winding's, by default). Not part of the model: the
+// sizing view holds the run's winding temperature against it.
+export const motorFields = Object.freeze(['resistance', 'torqueConstant', 'gearRatio', 'rotorInertia', 'thermalResistance', 'thermalCapacitance', 'ambientTemperature', 'windingLimit']);
 
 // The robot's battery, which every motor draws from: its voltage full and empty (falling in a straight line with its
 // charge), and its capacity in ampere seconds (a 3-cell LiPo of 2.2 Ah by default).
@@ -54,7 +56,8 @@ export const defaultBattery = Object.freeze({ fullVoltage: 12.6, emptyVoltage: 9
 export const batteryOf = (drawing) => ({ ...defaultBattery, ...(drawing.battery ?? {}) });
 const motorFieldNames = {
     resistance: 'winding resistance', torqueConstant: 'torque constant', gearRatio: 'gear ratio', rotorInertia: 'rotor inertia',
-    thermalResistance: 'thermal resistance', thermalCapacitance: 'heat capacity', ambientTemperature: 'ambient temperature'
+    thermalResistance: 'thermal resistance', thermalCapacitance: 'heat capacity', ambientTemperature: 'ambient temperature',
+    windingLimit: 'hottest winding'
 };
 
 // Densities a solid may be made of, kilograms per cubic metre, from common tables; "Other" is typed.
@@ -482,10 +485,15 @@ export function checkDrawing(drawing) {
         }
         if (joint.drive?.mode === 'motor') {
             if (joint.kind !== 'hinge' && joint.kind !== 'slider') errors.push({ id: joint.id, message: `${joint.name}: a motor drives a hinge or a slider.` });
+            // A drawing kept before a field was added has its default.
+            const motor = { ...defaultMotor(joint.kind), ...joint.drive.motor };
             for (const field of motorFields) {
-                const value = joint.drive.motor?.[field];
+                const value = motor[field];
                 const allowZero = field === 'rotorInertia';
                 if (!(Number.isFinite(value) && (allowZero ? value >= 0 : value > 0))) errors.push({ id: joint.id, message: `${joint.name}: its motor's ${motorFieldNames[field]} must be ${allowZero ? 'zero or more' : 'more than zero'}.` });
+            }
+            if (motor.windingLimit > 0 && motor.ambientTemperature > 0 && !(motor.windingLimit > motor.ambientTemperature)) {
+                errors.push({ id: joint.id, message: `${joint.name}: its motor's hottest winding must be above the ambient temperature.` });
             }
             for (const field of ['proportional', 'derivative']) {
                 if (!(Number.isFinite(joint.drive[field]) && joint.drive[field] >= 0)) errors.push({ id: joint.id, message: `${joint.name}: its motor controller's ${field} gain must be zero or more.` });
