@@ -8,8 +8,10 @@
 // robots (images at the top of a model's folder) are left out: the toolbox draws its own. Images further in are
 // textures the model uses, and stay.
 //
-// No dependencies and no I/O of its own: `fetchJson(url)` and `fetchBytes(url)` come from the caller (the window's
+// No dependencies but lib/mjcf.mjs, and no I/O of its own: `fetchJson(url)` and `fetchBytes(url)` come from the caller (the window's
 // network bridge, or Node's fetch in scripts and tests), as does `write(path, bytes)`.
+
+import { modelPaths } from './mjcf.mjs';
 
 export const repository = { owner: 'google-deepmind', name: 'mujoco_menagerie', url: 'https://github.com/google-deepmind/mujoco_menagerie' };
 export const hosts = ['api.github.com', 'raw.githubusercontent.com'];
@@ -38,6 +40,16 @@ export async function modelFiles(fetchJson, commit, folder) {
     };
     await list(folder);
     return files.filter(({ path }) => !pictures.test(path));
+}
+
+// The files one model of `commit` needs, found from its own MJCF (lib/mjcf.mjs, modelPaths) and fetched from GitHub's
+// raw file host: its MJCF files, the meshes they name and its LICENSE, as { path, url } relative to the folder. GitHub's
+// API is asked nothing here: it answers only so many requests an hour without signing in, and a folder listing takes
+// one a folder. `fetchText(url)` comes from the caller.
+export async function modelFilesFromModel(fetchText, commit, folder, main = 'scene.xml') {
+    if (!/^[A-Za-z0-9_.-]+$/.test(folder)) throw new Error(`"${folder}" is not a Menagerie model folder name.`);
+    const paths = await modelPaths((path) => fetchText(rawUrl(commit, `${folder}/${path}`)), main);
+    return [...paths, 'LICENSE'].map((path) => ({ path, url: rawUrl(commit, `${folder}/${path}`) }));
 }
 
 export function rawUrl(commit, path) {

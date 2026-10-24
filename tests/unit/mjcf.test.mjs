@@ -12,7 +12,8 @@ import importDrawing from '../../packages/toolbox/importers/drawing.mjs';
 import { checkDrawing, massOf, poseOf } from '../../packages/toolbox/lib/drawing.mjs';
 import { compose, rotate } from '../../packages/toolbox/lib/frames.mjs';
 import { combine, meshInertia, placed, primitiveInertia, principal } from '../../packages/toolbox/lib/inertia.mjs';
-import { bodyLook, parseXml, readModel } from '../../packages/toolbox/lib/mjcf.mjs';
+import { bodyLook, modelPaths, parseXml, readModel } from '../../packages/toolbox/lib/mjcf.mjs';
+import { modelFilesFromModel } from '../../packages/toolbox/lib/menagerie.mjs';
 import { importModel } from '../../packages/toolbox/lib/mjcfImport.mjs';
 import { readStl } from '../../packages/toolbox/lib/meshes.mjs';
 import { roboticsRoot } from '../../scripts/konjugatePaths.mjs';
@@ -71,6 +72,17 @@ test('a model is read as MuJoCo reads it: included files, default classes, a fra
     assert.deepEqual(model.leftOut, [
         'a geom of the world (a floor, say): nothing touches anything yet', 'a tendon (Coupling)', 'the joint constraint Lock'
     ]);
+});
+
+test('the files a model reads are found from its MJCF: what it includes and the meshes they name, in its meshdir', async () => {
+    const asked = [];
+    const fetchText = async (path) => { asked.push(path); return typeof files[path] === 'string' ? files[path] : ''; };
+    assert.deepEqual(await modelPaths(fetchText, 'scene.xml'), ['scene.xml', 'arm.xml', 'meshes/turret.stl']);
+    assert.deepEqual(asked, ['scene.xml', 'arm.xml'], 'only the MJCF is read to find them');
+    // From Menagerie: each at the commit, on the raw file host, with the licence.
+    const fromMenagerie = await modelFilesFromModel(async (url) => files[url.split('/test_arm/')[1]], 'c'.repeat(40), 'test_arm');
+    assert.deepEqual(fromMenagerie.map(({ path }) => path), ['scene.xml', 'arm.xml', 'meshes/turret.stl', 'LICENSE']);
+    assert.equal(fromMenagerie[2].url, `https://raw.githubusercontent.com/google-deepmind/mujoco_menagerie/${'c'.repeat(40)}/test_arm/meshes/turret.stl`);
 });
 
 test('a model this reader cannot follow is refused with the reason', () => {

@@ -404,6 +404,10 @@ try {
     await page.click('#viewport', { position: { x: 10, y: 10 } });
     await page.keyboard.press('i');
     await page.waitForSelector('#importDialog[open]');
+    // A request Konjugate refuses says why, in Konjugate's own words: the UR5e is not in this stand-in Menagerie.
+    await page.click('#importBody .robotRow[data-folder="universal_robots_ur5e"] button[data-import="licence"]');
+    await page.waitForSelector('#importBody .status .error', { timeout: 30000 });
+    assert.match(await page.textContent('#importBody .status .error'), /^raw\.githubusercontent\.com answered 404/);
     const arm = '#importBody .robotRow[data-folder="trs_so_arm100"]';
     await page.click(`${arm} button[data-import="licence"]`);
     await page.waitForSelector(`${arm} .licence`, { timeout: 30000 });
@@ -419,6 +423,9 @@ try {
     assert.match(await page.textContent('#importBody .importReport'), /SO-ARM100: 7 solids and 7 joints, 4 driven by its actuators\.[\s\S]*A tendon \(Coupling\)\.[\s\S]*Extend brake, a damper actuator the drawing cannot take yet\./);
     const requests = await app.evaluate(() => globalThis.roboticsRequests);
     assert.ok(requests.every((address) => address.includes('/commits/main') || address.includes(commit)), 'every file is fetched at the commit the licence was shown for');
+    // GitHub's API is asked for the commit alone (it answers only so many requests an hour): the files the model reads
+    // are found from its own MJCF and fetched from the raw file host.
+    assert.deepEqual(requests.filter((address) => address.startsWith('https://api.github.com/')).map((address) => new URL(address).pathname), ['/repos/google-deepmind/mujoco_menagerie/commits/main', '/repos/google-deepmind/mujoco_menagerie/commits/main']);
     await shot('11-import');
     await page.click('#importDialog form button');
     // The jog panel starts from the robot as drawn: nothing kept from the arm before, though its joints' ids are the same.

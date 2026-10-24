@@ -15,7 +15,7 @@ import {
 import { jogRange, posedDrawing } from './lib/pose.mjs';
 import { envelope, motorsOf, sizingSignals, summarize, whatIf } from './lib/sizing.mjs';
 import { robotByFolder, robots, storedName } from './lib/catalog.mjs';
-import { latestCommit, licenceName, modelFiles, rawUrl, repository } from './lib/menagerie.mjs';
+import { latestCommit, licenceName, modelFilesFromModel, rawUrl, repository } from './lib/menagerie.mjs';
 import { exampleDrawing, examples } from './lib/examples.mjs';
 import { History } from './lib/history.mjs';
 import { simulationLimits } from './lib/modelBuilder.mjs';
@@ -24,7 +24,20 @@ import { addsToSelection, commandHeld, platformKeys } from './lib/platform.mjs';
 import { shapeKinds, shapeLabels, sizeFields, volume } from './lib/shapes.mjs';
 import { DrawingView } from './lib/view.mjs';
 
-const api = window.konjugateLauncher ?? null;
+// Konjugate's launcher bridge, each request's refusal (an answer { ok: false, message }) turned into an error with
+// Konjugate's own message, so every caller hears why a request failed rather than reading a field that is not there.
+function bridge(launcher) {
+    if (!launcher) return null;
+    return Object.fromEntries(Object.entries(launcher).map(([name, method]) => [name, typeof method !== 'function' ? method : (...args) => {
+        const result = method(...args);
+        if (!result || typeof result.then !== 'function') return result;
+        return result.then((answer) => {
+            if (answer && answer.ok === false) throw new Error(answer.message ?? 'Konjugate refused the request.');
+            return answer;
+        });
+    }]));
+}
+const api = bridge(window.konjugateLauncher ?? null);
 const keys = platformKeys();
 const $ = (selector, root = document) => root.querySelector(selector);
 const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -1197,7 +1210,10 @@ async function importWork(label, work) {
     try {
         await work();
     } catch (error) {
-        importState.error = error.message;
+        // GitHub answers only so many requests an hour from one address without signing in, and says 403 or 429 past it.
+        importState.error = /api\.github\.com answered (403|429)/.test(error.message)
+            ? `${error.message} GitHub answers only so many requests an hour from one network without signing in; try again in a while.`
+            : error.message;
     } finally {
         importState.busy = null;
         importState.progress = null;
@@ -1215,12 +1231,12 @@ function toggleLicence(folder) {
     });
 }
 
-// Every file of the robot's folder at the licence's commit, into the store, each with where it belongs.
+// The files the robot's model reads, at the licence's commit, into the store, each with where it belongs.
 function download(folder) {
     const licence = importState.licences.get(folder);
     if (!licence) return null;
     return importWork('Downloading…', async () => {
-        const files = await modelFiles(fetchJson, licence.commit, folder);
+        const files = await modelFilesFromModel(async (url) => (await api.fetchText(url)).text, licence.commit, folder);
         let done = 0;
         for (const file of files) {
             importState.progress = `${done} of ${files.length} files`;

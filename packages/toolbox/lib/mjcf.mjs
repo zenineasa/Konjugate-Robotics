@@ -133,6 +133,34 @@ function resolver(classes) {
 const actuatorKinds = new Set(['general', 'motor', 'position', 'velocity', 'intvelocity', 'damper', 'cylinder', 'muscle', 'adhesion', 'plugin']);
 const hex = (rgba) => `#${rgba.slice(0, 3).map((value) => Math.round(Math.min(Math.max(value, 0), 1) * 255).toString(16).padStart(2, '0')).join('')}`;
 
+// The files a model reads, found from its MJCF alone: `fetchText(path)` answers a file's text by its path in the model's
+// folder. Starting from `main`, every included file (relative to the main file, as MuJoCo takes them) and every mesh
+// it names (in the compiler's meshdir, or assetdir), as paths in the folder; the MJCF files first. Textures and height
+// fields are left out: an import does not read them.
+export async function modelPaths(fetchText, main) {
+    const base = directoryOf(main);
+    const xml = [main];
+    const meshes = [];
+    let compiler = {};
+    for (let at = 0; at < xml.length; at += 1) {
+        const root = parseXml(await fetchText(xml[at]), xml[at]);
+        const visit = (element) => {
+            for (const child of element.children) {
+                if (child.name === 'include' && child.attributes.file) {
+                    const path = normalisePath(base + child.attributes.file);
+                    if (!xml.includes(path)) xml.push(path);
+                } else if (child.name === 'compiler') compiler = { ...compiler, ...child.attributes };
+                else if (child.name === 'mesh' && child.attributes.file) meshes.push(child.attributes.file);
+                visit(child);
+            }
+        };
+        visit(root);
+    }
+    const meshDirectory = normalisePath(base + (compiler.meshdir ?? compiler.assetdir ?? ''));
+    const meshPaths = [...new Set(meshes.map((file) => normalisePath(`${meshDirectory ? `${meshDirectory}/` : ''}${file}`)))];
+    return [...xml, ...meshPaths];
+}
+
 // What an import needs of a model: { name, bodies, actuators, gravity, timestep, leftOut, meshTriangles }. `files` maps paths in the
 // model's folder to their text or bytes; `main` is the model's MJCF among them (its scene file, say, which includes the
 // robot). Each body, parent before child:
