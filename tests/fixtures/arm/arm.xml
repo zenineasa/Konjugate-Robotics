@@ -64,10 +64,10 @@
     <joint name="Lock" joint1="Extend" active="false"/>
   </equality>
   <actuator>
-    <position name="Waist servo" joint="Waist" kp="30" forcerange="-20 20"/>
-    <position name="Shoulder servo" joint="Shoulder" kp="40" kv="0.5" gear="2"/>
+    <position name="Waist servo" joint="Waist" kp="30" dampratio="1" forcerange="-20 20"/>
+    <position name="Shoulder servo" joint="Shoulder" kp="40" kv="0.5" gear="2" forcerange="-5 5"/>
     <motor name="Elbow motor" joint="Elbow" ctrlrange="-1 1"/>
     <damper name="Extend brake" joint="Extend" kv="1" ctrlrange="0 1"/>
-    <position name="Extend servo" joint="Extend" kp="400" forcerange="-20 20"/>
+    <position name="Extend servo" joint="Extend" kp="400" forcerange="-20 20" ctrlrange="0.005 0.03"/>
   </actuator>
 </mujoco>

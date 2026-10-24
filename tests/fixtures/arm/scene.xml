@@ -1,7 +1,8 @@
 <!-- Copyright © 2026 Zenin Easa Panthakkalakath -->
 <!-- A small arm written for the import tests: it uses what an import has to read (included files, default classes,
      a childclass, degrees, a frame, an STL mesh, given inertias full and diagonal, a body whose inertia comes from its
-     geoms, a massless bracket, a ref, a slider, a ball, servos with a gear and kv, a motor) and what it leaves out (a
+     geoms, a massless bracket, a ref, a slider, a ball, servos with a gear, a kv, a dampratio and a control range, one starting at its most torque,
+     a motor) and what it leaves out (a
      floor, a tendon, an equality, an actuator of another kind), none of which moves anything here. Nothing reaches its range while the tests run it: limits are held
      differently in MuJoCo (softly) and are not in the Newton-Euler reference. -->
 <mujoco model="Test arm">

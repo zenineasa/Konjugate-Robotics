@@ -540,6 +540,7 @@ function jointInspector(joint) {
             driveFields.push(field('Setpoint', numberInput('drive.setpoint', show(drive.setpoint ?? 0)), unit));
             driveFields.push(field('Stiffness', numberInput('drive.gain', drive.gain, { min: 0 }), linear ? 'N/m' : 'N·m/rad'));
             driveFields.push(field(linear ? 'Most force' : 'Most torque', numberInput('drive.torqueLimit', drive.torqueLimit, { min: 0 }), linear ? 'N' : 'N·m'));
+            driveFields.push(field('Servo damping', numberInput('drive.damping', drive.damping ?? 0, { min: 0, title: 'Its own damping, within its most torque, as a real servo\'s' }), linear ? 'N·s/m' : 'N·m·s/rad'));
         }
         if (drive.mode === 'motor') driveFields.push(...motorFieldsOf(joint, show, unit));
         driveFields.push(`<p class="note">${{
@@ -677,6 +678,11 @@ function inspectorChanged(input) {
         }
         if (name === 'drive.torque') { apply({ drive: { torque: number } }, linear ? 'Force' : 'Torque'); return; }
         if (name === 'drive.setpoint') { apply({ drive: { setpoint: fromShown(number) } }, 'Setpoint'); return; }
+        if (name === 'drive.damping') {
+            if (!(number >= 0)) { toast('This must be zero or more.'); render(); return; }
+            apply({ drive: { damping: number } }, 'Servo damping');
+            return;
+        }
         if (name === 'drive.gain' || name === 'drive.torqueLimit') {
             if (!(number > 0)) { toast('This must be more than zero.'); render(); return; }
             apply({ drive: { [name.slice(6)]: number } }, name === 'drive.gain' ? 'Servo stiffness' : 'Servo limit');

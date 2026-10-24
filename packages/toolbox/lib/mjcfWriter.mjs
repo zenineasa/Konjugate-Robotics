@@ -126,7 +126,7 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
         write(1, '<actuator>');
         for (const { joint } of servos) {
             const limit = joint.drive.torqueLimit;
-            write(2, `<position name="${joint.id}" joint="${joint.id}" kp="${formatNumber(joint.drive.gain)}" forcelimited="true" forcerange="${formatNumber(-limit)} ${formatNumber(limit)}"/>`);
+            write(2, `<position name="${joint.id}" joint="${joint.id}" kp="${formatNumber(joint.drive.gain)}"${joint.drive.damping > 0 ? ` kv="${formatNumber(joint.drive.damping)}"` : ''} forcelimited="true" forcerange="${formatNumber(-limit)} ${formatNumber(limit)}"/>`);
         }
         write(1, '</actuator>');
     }

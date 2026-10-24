@@ -228,9 +228,20 @@ export function jointTorque(joint, position, speed, setpoint = joint.drive?.setp
     const drive = joint.drive ?? { mode: 'free' };
     let torque = 0;
     if (drive.mode === 'torque') torque = drive.torque ?? 0;
-    if (drive.mode === 'servo') torque = Math.max(-drive.torqueLimit, Math.min(drive.torqueLimit, drive.gain * (setpoint - position)));
+    if (drive.mode === 'servo') torque = Math.max(-drive.torqueLimit, Math.min(drive.torqueLimit, servoRaw(drive, position, speed, setpoint)));
     if (drive.mode === 'motor') torque = motorTorque;
     return torque - (joint.damping ?? 0) * speed - (joint.friction ?? 0) * Math.tanh(100 * speed);
+}
+
+// A servo's torque before its limit: its stiffness times the setpoint left to reach, less its own damping times the
+// speed.
+const servoRaw = (drive, position, speed, setpoint) => drive.gain * (setpoint - position) - (drive.damping ?? 0) * speed;
+// A servo's own damping, taken at the step's end speed while it is within its limit, as the joint's damping is.
+function servoStepDamping(body, q, qd, inputs) {
+    const drive = body.joint?.drive;
+    if (!(body.kind === 'hinge' || body.kind === 'slider') || drive?.mode !== 'servo' || !(drive.damping > 0)) return 0;
+    const raw = servoRaw(drive, q[0], qd[body.firstSpeed], inputs.setpoints?.[body.joint.id] ?? drive.setpoint);
+    return Math.abs(raw) <= drive.torqueLimit ? drive.damping : 0;
 }
 
 // A ball's drive, about its parent's axes: a constant torque, or a servo turning it towards its setpoint (a turn
@@ -337,7 +348,7 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
     // to each of its own axes, and so does its damping times the step: the damping taken at the step's end speed.
     // A motor's rotor adds its inertia times the gear ratio squared.
     const rotor = (joint) => (joint.drive?.mode === 'motor' ? joint.drive.motor.rotorInertia * joint.drive.motor.gearRatio ** 2 : 0);
-    const armature = bodies.flatMap((body) => Array(speedCount[body.kind]).fill(body.kind === 'free' ? 0 : (body.joint.armature ?? 0) + rotor(body.joint) + (body.joint.damping ?? 0) * timeStep));
+    const armature = bodies.flatMap((body, i) => Array(speedCount[body.kind]).fill(body.kind === 'free' ? 0 : (body.joint.armature ?? 0) + rotor(body.joint) + ((body.joint.damping ?? 0) + servoStepDamping(body, q[i], qd, inputs)) * timeStep));
     const matrix = zero.map((__, row) => zero.map((___, column) => columns[column][row] + (row === column ? armature[row] : 0)));
     const applied = appliedForces(bodies, q, qd, inputs);
     const free = solve(matrix, applied.map((value, k) => value - bias[k]));

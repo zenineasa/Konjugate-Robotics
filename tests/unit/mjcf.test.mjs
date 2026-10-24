@@ -67,7 +67,9 @@ test('a model is read as MuJoCo reads it: included files, default classes, a fra
     assert.deepEqual(body('Bob').joints[0].kind, 'ball');
     assert.equal(body('Bob').joints[0].damping, 0.05, 'a body outside any childclass takes the main default class');
     const servo = model.actuators.find(({ name }) => name === 'Shoulder servo');
-    assert.deepEqual([servo.kind, servo.gain, servo.damping, servo.gear, servo.forceRange], ['position', 40, 0.5, 2, [-50, 50]], 'its force range from the default class');
+    assert.deepEqual([servo.kind, servo.gain, servo.damping, servo.gear, servo.forceRange], ['position', 40, 0.5, 2, [-5, 5]]);
+    assert.deepEqual(model.actuators.find(({ name }) => name === 'Extend servo').forceRange, [-20, 20], 'its own force range over the default class\'s');
+    assert.equal(model.actuators.find(({ name }) => name === 'Waist servo').dampratio, 1);
     assert.deepEqual(model.actuators.map(({ kind }) => kind), ['position', 'position', 'motor', 'other', 'position']);
     assert.deepEqual(model.leftOut, [
         'a geom of the world (a floor, say): nothing touches anything yet', 'a tendon (Coupling)', 'the joint constraint Lock'
@@ -131,18 +133,24 @@ test('an import makes a drawing of the model: its solids at their centres of mas
     closeVector([joint('Shoulder').limits.lower, joint('Shoulder').limits.upper], [-Math.PI / 2 - Math.PI / 18, Math.PI / 2 - Math.PI / 18]);
     assert.deepEqual(joint('Swing').limits, { lower: 0, upper: 1.047197551197 });
     // Servos: kp gear², the control's target over its gear from the ref, the force range times the gear; kv as damping.
-    assert.deepEqual([joint('Shoulder').drive.mode, joint('Shoulder').drive.gain, joint('Shoulder').drive.torqueLimit], ['servo', 160, 100]);
+    // Servos: kp gear², the control's target over its gear from the ref, the force range times the gear, kv gear² as
+    // the servo's own damping, within its most torque.
+    assert.deepEqual([joint('Shoulder').drive.mode, joint('Shoulder').drive.gain, joint('Shoulder').drive.torqueLimit, joint('Shoulder').drive.damping], ['servo', 160, 10, 2]);
     close(joint('Shoulder').drive.setpoint, -Math.PI / 18, 1e-12);
-    close(joint('Shoulder').damping, 0.05 + 0.5 * 4);
+    close(joint('Shoulder').damping, 0.05);
     assert.deepEqual([joint('Waist').drive.gain, joint('Waist').drive.torqueLimit], [30, 20]);
+    // A dampratio, as MuJoCo works it out: twice the root of kp times the inertia the waist moves at the reference pose
+    // with every other joint free (1 / (M⁻¹)ᵢᵢ), as MuJoCo 3.16 compiles this model: kv 2.420266056.
+    close(joint('Waist').drive.damping, 2.420266056, 1e-9);
+    // A control of 0 held to the control range: the slider's target 5 mm out.
     assert.deepEqual([joint('Elbow').drive.mode, joint('Elbow').drive.torque], ['torque', 0]);
-    assert.deepEqual([joint('Extend').drive.mode, joint('Extend').drive.gain], ['servo', 400], 'the servo after the damper');
+    assert.deepEqual([joint('Extend').drive.mode, joint('Extend').drive.gain, joint('Extend').drive.setpoint], ['servo', 400, 0.005], 'the servo after the damper');
     assert.deepEqual(report, {
         solids: 7, joints: 7, drives: 4,
         leftOut: [
             'a geom of the world (a floor, say): nothing touches anything yet', 'a tendon (Coupling)', 'the joint constraint Lock',
             'joint Shoulder\'s ref: its position here is counted from 0.174532925199 rad, where the model puts its body',
-            'Shoulder servo\'s kv is taken as its joint\'s damping', 'Extend brake, a damper actuator the drawing cannot take yet'
+            'Extend brake, a damper actuator the drawing cannot take yet'
         ]
     });
     // A look is the body's visible geoms in its solid's frame: the turret's mesh box, corner for corner, where the model

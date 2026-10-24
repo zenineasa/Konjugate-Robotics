@@ -502,6 +502,7 @@ export function checkDrawing(drawing) {
         if (joint.drive?.mode === 'servo') {
             if (!(joint.drive.gain > 0)) errors.push({ id: joint.id, message: `${joint.name}: a servo's stiffness must be more than zero.` });
             if (!(joint.drive.torqueLimit > 0)) errors.push({ id: joint.id, message: `${joint.name}: a servo's most torque must be more than zero.` });
+            if (joint.drive.damping !== undefined && !(joint.drive.damping >= 0)) errors.push({ id: joint.id, message: `${joint.name}: a servo's damping must be zero or more.` });
         }
         // The two frames should meet, unless the user chose to keep them apart.
         const parentWorld = frameInWorld(drawing, frameById(drawing, joint.parent));

@@ -571,6 +571,8 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
             parameter('stiffness', 'Servo stiffness', drive.gain, units.stiffness);
             const limit = drive.torqueLimit;
             parameter('torqueLimit', slider ? 'Servo force limit' : 'Servo torque limit', limit, units.effort, { minimum: round(limit / 100), maximum: round(limit * 3), step: round(limit / 100) });
+            // Its own damping (a D term), inside its limit, as a real servo's (and MuJoCo's position actuator's kv).
+            if (drive.damping > 0) parameter('servoDamping', 'Servo damping', drive.damping, units.damping, range(drive.damping, slider ? 50 : 0.5, 0));
         }
     }
 
@@ -752,10 +754,17 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
 
     // U = IA S, and D = Sᵀ U plus the armature on each axis, and the damping times the time step: the damping taken at
     // the step's end speed (implicitly, as MuJoCo takes it), so a heavily damped light link stays stable.
+    // A servo's own damping is taken at the end speed too, while the servo is within its limit; at its limit the torque
+    // does not change with speed, as MuJoCo takes it.
+    const servoDamped = (hinge || slider) && drive.mode === 'servo' && drive.damping > 0;
+    const servoRaw = servoDamped ? define('servoRaw', E.subtract(E.multiply('stiffness', E.subtract('setpoint', q)), E.multiply('servoDamping', speeds[0]))) : null;
+    const servoStep = servoDamped
+        ? E.cases([[E.greater(servoRaw, 'torqueLimit'), 0], [E.less(servoRaw, E.negate('torqueLimit')), 0]], E.multiply('servoDamping', 'step'))
+        : 0;
     const projected = motions.map((motion, k) => defineAll(dof === 1 ? 'u' : `u${k + 1}r`, [1, 2, 3, 4, 5, 6].map((row) => E.dot(articulatedRow(row), motion))));
     const D = motions.map((motion, i) => projected.map((column, j) => {
         const entry = E.dot(motion, column);
-        return i === j && !free ? E.add(entry, 'armature', E.multiply('damping', 'step')) : entry;
+        return i === j && !free ? E.add(entry, 'armature', E.multiply('damping', 'step'), servoStep) : entry;
     }));
     let solve;
     if (dof === 1) {
@@ -782,7 +791,7 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         // A motor's torque at the joint, as its windings' relationship sets it on the child.
         if (drive.mode === 'motor') driveTorque = bind(childNode, 'target', 'motorTorque', 'c');
         if (drive.mode === 'servo') {
-            driveTorque = define('servo', E.max(E.negate('torqueLimit'), E.min('torqueLimit', E.multiply('stiffness', E.subtract('setpoint', q)))));
+            driveTorque = define('servo', E.max(E.negate('torqueLimit'), E.min('torqueLimit', servoRaw ?? E.multiply('stiffness', E.subtract('setpoint', q)))));
         }
         const effective = 'd';
         const limitTorque = joint.limits ? E.cases([

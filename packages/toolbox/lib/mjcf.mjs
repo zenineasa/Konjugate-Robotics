@@ -366,9 +366,12 @@ export function readModel(files, main) {
             let gain;
             let kind;
             let damping = 0;
+            let dampratio = 0;
             if (element.name === 'position') {
                 gain = Number(get('kp') ?? 1);
                 damping = Number(get('kv') ?? 0);
+                // Its damping as a share of critical, which MuJoCo works out on compiling from the joint's inertia.
+                dampratio = Number(get('dampratio') ?? 0);
                 kind = gain > 0 ? 'position' : 'other';
             } else if (element.name === 'motor') {
                 gain = 1;
@@ -395,7 +398,7 @@ export function readModel(files, main) {
             const gear = numbers(get('gear') ?? '1')[0] ?? 1;
             const target = element.attributes.joint ?? null;
             actuators.push({
-                name: element.attributes.name ?? '', element: element.name, joint: target, kind, gain, damping, gear,
+                name: element.attributes.name ?? '', element: element.name, joint: target, kind, gain, damping, dampratio, gear,
                 forceRange: rangeOf('force'), controlRange: rangeOf('ctrl'),
                 transmission: target ? 'joint' : ['tendon', 'site', 'body', 'jointinparent'].find((key) => element.attributes[key] !== undefined) ?? 'none'
             });
@@ -408,7 +411,11 @@ export function readModel(files, main) {
     const equalities = children('equality');
     if (counts.worldGeoms) leftOut.push(`${counts.worldGeoms === 1 ? 'a geom' : `${counts.worldGeoms} geoms`} of the world (a floor, say): nothing touches anything yet`);
     if (tendons.length) leftOut.push(`${tendons.length === 1 ? 'a tendon' : `${tendons.length} tendons`} (${tendons.map((tendon) => tendon.attributes.name ?? tendon.name).join(', ')})`);
-    for (const equality of equalities) leftOut.push(`the ${equality.name} constraint ${equality.attributes.name ?? ''}`.trim().replace(/ $/, ''));
+    for (const equality of equalities) {
+        const { name, joint1, joint2, body1, body2 } = equality.attributes;
+        const between = [joint1 ?? body1, joint2 ?? body2].filter(Boolean);
+        leftOut.push(name ? `the ${equality.name} constraint ${name}` : `the ${equality.name} constraint on ${between.join(' and ') || 'the model'}`);
+    }
     if (children('contact').length) leftOut.push('the contact pairs and exclusions: nothing touches anything yet');
     for (const name of counts.extraJoints) leftOut.push(`${name}'s joints after its first: a body takes one joint in the drawing`);
     for (const name of counts.springs) leftOut.push(`joint ${name}'s spring (its stiffness): the drawing's joints have none yet`);

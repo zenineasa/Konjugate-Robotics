@@ -15,9 +15,10 @@
 //   the drawing is counted from where the solid is drawn, which is the model's ref, so a range is moved by the ref.
 // - A body with no joint is welded to its parent (a fixed joint); a body on the world with a free joint is joined to
 //   nothing, and falls; a mocap body is fixed to the Ground.
-// - A position actuator on a joint is its servo: stiffness kp gear², setpoint its control (0) over its gear, counted
-//   from the ref, most torque its force range times its gear; its kv joins the joint's damping. A motor actuator is a
-//   torque drive of 0, a slider in the canvas. Another kind is left out, and said so.
+// - A position actuator on a joint is its servo: stiffness kp gear², setpoint its control (0, held to its control
+//   range) over its gear, counted from the ref, most torque its force range times its gear, and its own damping its kv
+//   gear² (or, for a dampratio, as MuJoCo works it out from the inertia it moves). A motor actuator is a torque drive
+//   of 0, a slider in the canvas. Another kind is left out, and said so.
 //
 // Pure, no dependencies but frames.mjs, inertia.mjs and drawing.mjs.
 
@@ -35,6 +36,95 @@ const roundVector = (vector) => vector.map(round);
 function boxOfInertia([a, b, c]) {
     const side = (i, j, k) => Math.sqrt(Math.max(6 * (j + k - i), 0));
     return { x: side(a, b, c), y: side(b, a, c), z: side(c, a, b) };
+}
+
+// The inertia an actuator on a joint's degree of freedom moves at the model's reference pose, as MuJoCo works it out
+// for a dampratio: 1 / (M⁻¹)ᵢᵢ, M the model's joint-space mass matrix there (every body's inertia through every joint
+// that moves it, each degree of freedom's armature on its diagonal), so the other joints are free to move with it.
+// `dofOf(jointName)` gives a hinge's or a slide's degree of freedom; its `inertia(index)` the inertia at that one.
+function massMatrix(model) {
+    const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+    const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    const add = (a, b) => a.map((value, axis) => value + b[axis]);
+    const scale = (a, factor) => a.map((value) => value * factor);
+    // Each degree of freedom: the body it moves (with all beyond it), its motion at the world's origin (ω, v), its armature.
+    const dofs = [];
+    const named = new Map();
+    model.bodies.forEach((body, index) => {
+        for (const joint of body.joints) {
+            const at = (local) => compose(body.world, { position: local, quaternion: [1, 0, 0, 0] }).position;
+            const turn = (local) => rotate(body.world.quaternion, local);
+            const units = [[1, 0, 0], [0, 1, 0], [0, 0, 1]];
+            const armature = joint.armature ?? 0;
+            if (joint.kind === 'hinge') {
+                const n = normalize(turn(joint.axis));
+                named.set(joint.name, dofs.length);
+                dofs.push({ index, w: n, v: cross(at(joint.anchor), n), armature });
+            } else if (joint.kind === 'slide') {
+                named.set(joint.name, dofs.length);
+                dofs.push({ index, w: [0, 0, 0], v: normalize(turn(joint.axis)), armature });
+            } else if (joint.kind === 'ball') {
+                for (const unit of units) { const e = turn(unit); dofs.push({ index, w: e, v: cross(at(joint.anchor), e), armature }); }
+            } else {
+                for (const unit of units) dofs.push({ index, w: [0, 0, 0], v: unit, armature });
+                for (const unit of units) { const e = turn(unit); dofs.push({ index, w: e, v: cross(body.world.position, e), armature }); }
+            }
+        }
+    });
+    const beyond = model.bodies.map(() => null);
+    const carried = (index) => {
+        if (beyond[index]) return beyond[index];
+        const set = new Set([index]);
+        model.bodies.forEach((body, at) => { if (set.has(body.parent)) set.add(at); });
+        beyond[index] = set;
+        return set;
+    };
+    // Each body's inertia in the world: its mass, centre and tensor.
+    const world = model.bodies.map(({ inertia, world: frame }) => {
+        if (!(inertia?.mass > 0)) return null;
+        const centre = compose(frame, { position: inertia.centre, quaternion: [1, 0, 0, 0] }).position;
+        const columns = [[1, 0, 0], [0, 1, 0], [0, 0, 1]].map((axis) => rotate(frame.quaternion, axis));
+        const apply = (w) => {
+            // R T Rᵀ w, R's columns the body's axes in the world.
+            const local = columns.map((column) => dot(column, w));
+            const t = inertia.tensor;
+            const turned = [0, 1, 2].map((row) => t[3 * row] * local[0] + t[3 * row + 1] * local[1] + t[3 * row + 2] * local[2]);
+            return add(add(scale(columns[0], turned[0]), scale(columns[1], turned[1])), scale(columns[2], turned[2]));
+        };
+        return { mass: inertia.mass, centre, apply };
+    });
+    const n = dofs.length;
+    const M = Array.from({ length: n }, () => Array(n).fill(0));
+    for (let a = 0; a < n; a += 1) {
+        for (let b = a; b < n; b += 1) {
+            let sum = 0;
+            for (const k of carried(dofs[a].index)) {
+                if (!carried(dofs[b].index).has(k) || !world[k]) continue;
+                const { mass, centre, apply } = world[k];
+                const ua = add(dofs[a].v, cross(dofs[a].w, centre));
+                const ub = add(dofs[b].v, cross(dofs[b].w, centre));
+                sum += dot(dofs[a].w, apply(dofs[b].w)) + mass * dot(ua, ub);
+            }
+            M[a][b] = sum + (a === b ? dofs[a].armature : 0);
+            M[b][a] = M[a][b];
+        }
+    }
+    // M⁻¹'s diagonal, by Gauss-Jordan elimination with partial pivoting.
+    const inverse = M.map((row, r) => [...row, ...Array.from({ length: n }, (_, c) => (c === r ? 1 : 0))]);
+    for (let column = 0; column < n; column += 1) {
+        let pivot = column;
+        for (let r = column + 1; r < n; r += 1) if (Math.abs(inverse[r][column]) > Math.abs(inverse[pivot][column])) pivot = r;
+        [inverse[column], inverse[pivot]] = [inverse[pivot], inverse[column]];
+        const lead = inverse[column][column];
+        if (!(Math.abs(lead) > 1e-300)) return { dofOf: () => null, inertia: () => null };
+        for (let c = 0; c < 2 * n; c += 1) inverse[column][c] /= lead;
+        for (let r = 0; r < n; r += 1) {
+            if (r === column || !inverse[r][column]) continue;
+            const factor = inverse[r][column];
+            for (let c = 0; c < 2 * n; c += 1) inverse[r][c] -= factor * inverse[column][c];
+        }
+    }
+    return { dofOf: (name) => named.get(name) ?? null, inertia: (dof) => 1 / inverse[dof][n + dof] };
 }
 
 // The drawing a model makes, as { drawing, looks, report }. `model` is lib/mjcf.mjs's readModel; `looks` maps each
@@ -169,6 +259,9 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
         if (joint?.range) {
             entry.limits = kind === 'ball' ? { lower: 0, upper: round(joint.range[1]) } : { lower: round(joint.range[0] - joint.reference), upper: round(joint.range[1] - joint.reference) };
         }
+        if (joint?.range && kind !== 'ball' && !(joint.range[0] <= joint.reference && joint.reference <= joint.range[1])) {
+            leftOut.push(`joint ${joint.name} is drawn outside its range (the model's reference pose is), so its limit pushes it back from the start, which MuJoCo does a little differently`);
+        }
         if (joint && joint.reference) leftOut.push(`joint ${joint.name}'s ref: its position here is counted from ${round(joint.reference)} ${kind === 'slider' ? 'm' : 'rad'}, where the model puts its body`);
         drawing.joints.push(entry);
         if (joint) jointOf.set(joint.name, { entry, joint });
@@ -178,6 +271,7 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
     // Actuators: each joint's first that the drawing can take, as its drive.
     let drives = 0;
     const driven = new Set();
+    let matrix = null;
     for (const actuator of model.actuators) {
         const label = actuator.name || `a ${actuator.element} actuator`;
         if (actuator.transmission !== 'joint') { leftOut.push(`${label}, which acts through a ${actuator.transmission} rather than a joint`); continue; }
@@ -188,14 +282,24 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
         const gear = actuator.gear || 1;
         if (actuator.kind === 'position') {
             const force = actuator.forceRange ? Math.max(Math.abs(actuator.forceRange[0]), Math.abs(actuator.forceRange[1])) : null;
+            // Its control of 0, held to its control range as MuJoCo holds it, is its target, over its gear.
+            const control = actuator.controlRange ? Math.min(Math.max(0, actuator.controlRange[0]), actuator.controlRange[1]) : 0;
             entry.drive = {
                 ...defaultDrive(entry.kind), mode: 'servo', gain: round(actuator.gain * gear * gear),
-                setpoint: round(-joint.reference),
+                setpoint: round(control / gear - joint.reference),
                 torqueLimit: round(force === null ? 1e6 : force * Math.abs(gear))
             };
             if (actuator.forceRange && Math.abs(actuator.forceRange[0] + actuator.forceRange[1]) > 1e-12) leftOut.push(`${label}'s force range is not even about zero: the servo gives up to ${round(force)} either way`);
             if (force === null) leftOut.push(`${label} has no force range: the servo is given a most torque of 10⁶`);
-            if (actuator.damping) { entry.damping = round(entry.damping + actuator.damping * gear * gear); leftOut.push(`${label}'s kv is taken as its joint's damping`); }
+            // Its kv is the servo's own damping, inside its most torque as in MuJoCo.
+            if (actuator.damping) entry.drive.damping = round(actuator.damping * gear * gear);
+            if (actuator.dampratio) {
+                // As MuJoCo works it out: dampratio times twice the root of kp times the inertia the actuator moves at
+                // the model's reference pose (massMatrix), over gear²; times gear² at the joint.
+                matrix ??= massMatrix(model);
+                const inertia = matrix.inertia(matrix.dofOf(joint.name));
+                entry.drive.damping = round(actuator.dampratio * 2 * Math.sqrt(actuator.gain * gear * gear * inertia));
+            }
         } else if (actuator.kind === 'motor') {
             entry.drive = { ...defaultDrive(entry.kind), mode: 'torque', torque: 0 };
         } else {
