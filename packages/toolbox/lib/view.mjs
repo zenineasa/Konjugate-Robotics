@@ -17,10 +17,19 @@ import { halfExtents, nearestSnap, surfaceNormal } from './shapes.mjs';
 const toThree = (q) => new THREE.Quaternion(q[1], q[2], q[3], q[0]);
 const fromThree = (q) => [q.w, q.x, q.y, q.z];
 
-function geometryOf(solid) {
+// A solid's geometry: its shape's, or for one imported from a model its look (a mesh in its own frame), or the box
+// about it while its look is not at hand.
+function geometryOf(solid, look = null) {
     const { shape, size } = solid;
     let geometry;
-    if (shape === 'box') geometry = new THREE.BoxGeometry(size.x, size.y, size.z);
+    if (shape === 'mesh' && look?.mesh?.index?.length) {
+        geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(look.mesh.position, 3));
+        geometry.setIndex(look.mesh.index);
+        geometry.computeVertexNormals();
+        return geometry;
+    }
+    if (shape === 'box' || shape === 'mesh') geometry = new THREE.BoxGeometry(Math.max(size.x, 1e-4), Math.max(size.y, 1e-4), Math.max(size.z, 1e-4));
     else if (shape === 'cylinder') geometry = new THREE.CylinderGeometry(size.radius, size.radius, size.length, 40).rotateX(Math.PI / 2);
     else if (shape === 'sphere') geometry = new THREE.SphereGeometry(size.radius, 40, 20);
     else geometry = new THREE.CapsuleGeometry(size.radius, size.length, 10, 32).rotateX(Math.PI / 2);
@@ -34,6 +43,7 @@ export class DrawingView {
         this.drawing = null;
         this.selection = [];
         this.meshes = new Map();
+        this.looks = {};
         this.carried = [];
         this.tool = 'select';
 
@@ -159,6 +169,12 @@ export class DrawingView {
 
     // ---- what is drawn -------------------------------------------------------------------------------------------
 
+    // Imported solids' looks, by key (`solid.look.key`; { mesh, color }): drawn in place of the box about each.
+    setLooks(looks) {
+        this.looks = looks ?? {};
+        if (this.drawing) this.setDrawing(this.drawing);
+    }
+
     setDrawing(drawing) {
         this.drawing = drawing;
         const keep = new Set(drawing.solids.map(({ id }) => id));
@@ -171,10 +187,11 @@ export class DrawingView {
         }
         for (const solid of drawing.solids) {
             let mesh = this.meshes.get(solid.id);
-            const shapeKey = JSON.stringify([solid.shape, solid.size]);
+            const look = solid.shape === 'mesh' ? this.looks[solid.look?.key] ?? null : null;
+            const shapeKey = JSON.stringify([solid.shape, solid.size, Boolean(look)]);
             if (!mesh || mesh.userData.shapeKey !== shapeKey) {
                 if (mesh) { this.solidGroup.remove(mesh); mesh.geometry.dispose(); }
-                const geometry = geometryOf(solid);
+                const geometry = geometryOf(solid, look);
                 mesh = new THREE.Mesh(geometry, new THREE.MeshStandardMaterial({ color: solid.color, roughness: 0.65, metalness: 0.05 }));
                 mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(geometry, 30), new THREE.LineBasicMaterial({ color: 0x0b0f13, transparent: true, opacity: 0.45 })));
                 mesh.userData = { solidId: solid.id, shapeKey };
@@ -313,7 +330,8 @@ export class DrawingView {
             const half = halfExtents(solid.shape, solid.size);
             const snap = nearestSnap(solid.shape, solid.size, local, Math.min(...half) * 0.35);
             const point = snap ? snap.point : local;
-            const normal = snap ? snap.normal : surfaceNormal(solid.shape, solid.size, local);
+            // On a mesh, straight out of the triangle the click landed on.
+            const normal = snap ? snap.normal : solid.shape === 'mesh' && hit.face ? hit.face.normal.toArray() : surfaceNormal(solid.shape, solid.size, local);
             return {
                 solid: solid.id,
                 point: new THREE.Vector3(...point).applyMatrix4(hit.object.matrixWorld).toArray(),

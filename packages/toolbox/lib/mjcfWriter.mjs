@@ -3,8 +3,8 @@
 // A drawing as an MJCF model, MuJoCo's own format, to run in MuJoCo on its own as a check on the built model (and later
 // for export). Pure: the same drawing always gives the same text.
 //
-// - Each solid is a body with one geom of its shape. Bodies nest as the drawing's structure has them (lib/drawing.mjs):
-//   a solid sits in the body of its parent joint's other solid, at its place in the drawing relative to it, and the
+// - Each solid is a body with one geom of its shape (an imported solid: its inertia, and the box about it). Bodies
+//   nest as the drawing's structure has them (lib/drawing.mjs): a solid sits in the body of its parent joint's other solid, at its place in the drawing relative to it, and the
 //   Ground is MuJoCo's world.
 // - A joint in the tree is a joint element in the child's body: a hinge or a slide at the parent frame's point, along
 //   the parent frame's axis (turned round when the tree reads the joint the other way, so its position still measures
@@ -77,7 +77,13 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
             }
         }
         const geometry = mjcfGeometry(solid.shape, solid.size);
-        write(depth + 1, `<geom name="${id}" type="${geometry.type}" size="${formatVector(geometry.size)}" mass="${formatNumber(massOf(solid))}" rgba="${rgba(solid.color)}" contype="0" conaffinity="0"/>`);
+        if (solid.shape === 'mesh') {
+            // An imported solid: its inertia as it is, along its own (principal) axes, and the box about it to show.
+            write(depth + 1, `<inertial pos="0 0 0" mass="${formatNumber(massOf(solid))}" diaginertia="${formatVector(solid.unitInertia.map((value) => value * massOf(solid)))}"/>`);
+            write(depth + 1, `<geom name="${id}" type="box" size="${formatVector(geometry.size.map((value) => Math.max(value, 1e-4)))}" mass="0" rgba="${rgba(solid.color)}" contype="0" conaffinity="0"/>`);
+        } else {
+            write(depth + 1, `<geom name="${id}" type="${geometry.type}" size="${formatVector(geometry.size)}" mass="${formatNumber(massOf(solid))}" rgba="${rgba(solid.color)}" contype="0" conaffinity="0"/>`);
+        }
         for (const child of order(children.get(id) ?? [])) body(child, id, depth + 1, false);
         write(depth, '</body>');
     };

@@ -61,7 +61,7 @@ export function treeOf(drawing) {
         const solid = drawing.solids.find((candidate) => candidate.id === id);
         const link = built.parentJoint.get(id);
         const pose = poseOf(drawing, id);
-        const common = { id, mass: massOf(solid), unit: unitInertia(solid.shape, solid.size), firstSpeed: 0 };
+        const common = { id, mass: massOf(solid), unit: solid.shape === 'mesh' ? solid.unitInertia : unitInertia(solid.shape, solid.size), firstSpeed: 0 };
         if (!link) {
             bodies.push({ ...common, kind: 'free', joint: { id: `free:${id}`, kind: 'free' }, parent: -1, restRotation: pose.rotation, restOffset: pose.position });
             index.set(id, bodies.length - 1);

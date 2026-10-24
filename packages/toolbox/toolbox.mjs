@@ -14,6 +14,8 @@ import {
 } from './lib/drawing.mjs';
 import { jogRange, posedDrawing } from './lib/pose.mjs';
 import { envelope, motorsOf, sizingSignals, summarize, whatIf } from './lib/sizing.mjs';
+import { robotByFolder, robots, storedName } from './lib/catalog.mjs';
+import { latestCommit, licenceName, modelFiles, rawUrl, repository } from './lib/menagerie.mjs';
 import { exampleDrawing, examples } from './lib/examples.mjs';
 import { History } from './lib/history.mjs';
 import { simulationLimits } from './lib/modelBuilder.mjs';
@@ -53,7 +55,9 @@ const state = {
     pose: { active: false, values: {}, keyframe: null },
     // The sizing panel: whether it is open, the run it shows (`from`: what Build was given for it; `asDrawn` and
     // `whatIf`: lib/sizing.mjs summaries), and a run under way.
-    sizing: { open: false, running: false, status: '', error: null, from: null, asDrawn: null, whatIf: null }
+    sizing: { open: false, running: false, status: '', error: null, from: null, asDrawn: null, whatIf: null },
+    // Imported solids' looks by key ({ mesh, color }), from the importer: kept with the project, not in the drawing.
+    looks: {}
 };
 const drawing = () => state.history.current;
 
@@ -417,11 +421,24 @@ function solidInspector(solid) {
     const pose = poseOf(drawing(), solid.id);
     const [roll, pitch, yaw] = toRollPitchYaw(pose.rotation).map(toDegrees);
     const material = solid.mass.by === 'mass' ? 'mass' : solid.mass.material ?? 'other';
-    const sizeInputs = sizeFields[solid.shape].map(([key, label]) => field(label, numberInput(`size.${key}`, toMillimetres(solid.size[key]), { min: 0.001 }), 'mm')).join('');
+    const imported = solid.shape === 'mesh';
+    const sizeInputs = imported ? '' : sizeFields[solid.shape].map(([key, label]) => field(label, numberInput(`size.${key}`, toMillimetres(solid.size[key]), { min: 0.001 }), 'mm')).join('');
     const frames = drawing().frames.filter((frame) => frame.solid === solid.id);
+    const inertiaFrom = { inertial: 'as the model gives it', geoms: 'worked out from its geoms, as MuJoCo works it out', meshes: 'worked out from its meshes\' volumes' }[solid.source?.inertia] ?? '';
+    const shapeField = imported
+        ? `<p class="note">Imported from ${solid.source?.body ? `body ${escapeHtml(solid.source.body)} of ` : ''}a model: its look is the model's, its place its centre of mass and its turn its axes of inertia.</p>`
+        : field('Shape', `<select name="shape">${shapeKinds.map((kind) => `<option value="${kind}"${kind === solid.shape ? ' selected' : ''}>${shapeLabels[kind]}</option>`).join('')}</select>`);
+    const massFields = imported
+        ? `${field('Mass', numberInput('massValue', solid.mass.value, { min: 0 }), 'kg')}
+        <p class="note">Its inertia about its axes is ${solid.unitInertia.map((value) => (value * massOf(solid) * 1e4).toPrecision(3)).join(', ')} kg·cm²${inertiaFrom ? `, ${inertiaFrom}` : ''}; it grows with its mass.</p>`
+        : `${field('Made of', `<select name="material">${materials.map((item) => `<option value="${item.id}"${item.id === material ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}<option value="other"${material === 'other' ? ' selected' : ''}>Another density</option><option value="mass"${material === 'mass' ? ' selected' : ''}>A mass I give</option></select>`)}
+        ${solid.mass.by === 'mass'
+        ? field('Mass', numberInput('massValue', solid.mass.value, { min: 0 }), 'kg')
+        : field('Density', numberInput('density', solid.mass.density, { min: 0, step: 10 }), 'kg/m³')}
+        <p class="note">${solid.mass.by === 'mass' ? `Its density works out at ${Math.round(solid.mass.value / volume(solid.shape, solid.size))} kg/m³.` : `Its mass works out at ${massOf(solid).toFixed(3)} kg, from its density and its ${(volume(solid.shape, solid.size) * 1e6).toFixed(1)} cm³.`}</p>`;
     return `<h3>${escapeHtml(solid.name)}</h3>
         ${field('Name', `<input type="text" name="name" value="${escapeHtml(solid.name)}" spellcheck="false">`)}
-        ${field('Shape', `<select name="shape">${shapeKinds.map((kind) => `<option value="${kind}"${kind === solid.shape ? ' selected' : ''}>${shapeLabels[kind]}</option>`).join('')}</select>`)}
+        ${shapeField}
         ${sizeInputs}
         <h2>Place</h2>
         <div class="fieldRow"><span>Position</span>${['x', 'y', 'z'].map((axis, index) => `<label>${axis}${numberInput(`position.${index}`, toMillimetres(pose.position[index]), { step: 1 })}</label>`).join('')}</div>
@@ -429,11 +446,7 @@ function solidInspector(solid) {
         <div class="fieldRow"><span>Turn</span>${[['roll', roll], ['pitch', pitch], ['yaw', yaw]].map(([name, value]) => `<label>${name[0]}${numberInput(`turn.${name}`, value, { step: 5 })}</label>`).join('')}</div>
         <p class="unit">Degrees: yaw about z, then pitch about y, then roll about x.</p>
         <h2>Mass</h2>
-        ${field('Made of', `<select name="material">${materials.map((item) => `<option value="${item.id}"${item.id === material ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}<option value="other"${material === 'other' ? ' selected' : ''}>Another density</option><option value="mass"${material === 'mass' ? ' selected' : ''}>A mass I give</option></select>`)}
-        ${solid.mass.by === 'mass'
-        ? field('Mass', numberInput('massValue', solid.mass.value, { min: 0 }), 'kg')
-        : field('Density', numberInput('density', solid.mass.density, { min: 0, step: 10 }), 'kg/m³')}
-        <p class="note">${solid.mass.by === 'mass' ? `Its density works out at ${Math.round(solid.mass.value / volume(solid.shape, solid.size))} kg/m³.` : `Its mass works out at ${massOf(solid).toFixed(3)} kg, from its density and its ${(volume(solid.shape, solid.size) * 1e6).toFixed(1)} cm³.`}</p>
+        ${massFields}
         ${field('Colour', `<input type="color" name="color" value="${escapeHtml(solid.color)}">`)}
         ${frames.length ? `<p class="note">${frames.length} joint point${frames.length === 1 ? '' : 's'} on it, which move with it.</p>` : ''}
         <div class="buttons">
@@ -770,6 +783,7 @@ async function openDrawing() {
         await api.clearFile?.('drawing', 'drawing', chosen.name);
         if (!answer?.data?.drawing) throw new Error((answer?.report?.errors ?? ['The drawing could not be read.']).join(' '));
         state.selection = [];
+        forgetPose();
         change(readDrawing(answer.data.drawing), `Open ${answer.data.name}`);
         view.fit();
     } catch (error) {
@@ -848,6 +862,12 @@ function stepKeyframe(direction) {
     const index = keyframes.findIndex(({ id }) => id === state.pose.keyframe);
     const next = index < 0 ? (direction > 0 ? 0 : keyframes.length - 1) : Math.max(0, Math.min(keyframes.length - 1, index + direction));
     showKeyframe(keyframes[next].id);
+}
+
+// A drawing put in place of the whole one (an example, a drawing opened, a robot imported): the jog panel starts again
+// from the robot as drawn, since its joints are others, whatever their ids.
+function forgetPose() {
+    state.pose = { active: false, values: {}, keyframe: null };
 }
 
 function poseAsDrawn() {
@@ -1102,6 +1122,178 @@ function renderSizing() {
         <div class="cards${current ? '' : ' stale'}">${asDrawn ? asDrawn.motors.map(card).join('') + battery : ''}</div>`;
 }
 
+// ---- importing a robot from a model ---------------------------------------------------------------------------------
+// A robot from MuJoCo Menagerie, its licence shown and its files kept on this computer when the user asks, pinned to
+// one commit; or a model's files brought in from disk. Importing one replaces the drawing (undo brings it back) and
+// says what came in and what was left out; its looks are kept with the project (the importer derives them), so the
+// window shows the imported solids again when it is reopened.
+
+const importState = { licences: new Map(), stored: new Map(), busy: null, report: null, error: null, progress: null };
+const shortCommit = (commit) => commit.slice(0, 7);
+const fetchJson = async (url) => JSON.parse((await api.fetchText(url)).text);
+
+// What is kept on this computer: each Menagerie robot's files by folder, and each batch brought in from disk.
+async function refreshStored() {
+    const { files } = await api.storedFiles();
+    importState.stored = new Map();
+    for (const file of files) {
+        const key = file.details?.robot ? `menagerie:${file.details.robot}` : file.details?.batch ? `disk:${file.details.batch}` : null;
+        if (!key) continue;
+        if (!importState.stored.has(key)) importState.stored.set(key, []);
+        importState.stored.get(key).push(file);
+    }
+}
+
+async function openImport() {
+    if (!api?.storedFiles) { toast('Importing a robot needs the Robotics window opened from Konjugate.', 'error'); return; }
+    importState.error = null;
+    $('#importDialog').showModal();
+    renderImport();
+    try { await refreshStored(); } catch (error) { importState.error = error.message; }
+    renderImport();
+}
+
+function renderImport() {
+    const dialog = $('#importDialog');
+    if (!dialog.open) return;
+    const busy = Boolean(importState.busy);
+    const rows = robots.map((robot) => {
+        const kept = importState.stored.get(`menagerie:${robot.folder}`);
+        const licence = importState.licences.get(robot.folder);
+        const commit = kept?.[0]?.details?.commit;
+        return `<li class="robotRow" data-folder="${robot.folder}">
+            <div><strong>${escapeHtml(robot.name)}</strong> <span class="muted">by ${escapeHtml(robot.maker)}</span><br><span class="muted small">${escapeHtml(robot.what)}${kept ? ` Kept on this computer (${kept.length} files, Menagerie at ${shortCommit(commit)}${kept[0].details.licence ? `, ${escapeHtml(kept[0].details.licence)}` : ''}).` : ''}</span></div>
+            <div class="buttons">
+                ${kept ? `<button type="button" class="primary" data-import="import"${busy ? ' disabled' : ''}>Import</button>` : ''}
+                ${kept ? '' : `<button type="button" class="tool" data-import="licence"${busy ? ' disabled' : ''}>${licence ? 'Hide licence' : 'Licence'}</button>`}
+                ${licence && !kept ? `<button type="button" class="primary" data-import="download"${busy ? ' disabled' : ''}>Download</button>` : ''}
+            </div>
+            ${licence && !kept ? `<div class="licence"><p>Licence: ${escapeHtml(licence.name ?? 'not recognised; read it below')}. From ${escapeHtml(repository.url)}, folder ${escapeHtml(robot.folder)}, at commit ${shortCommit(licence.commit)}. Downloading keeps its files on this computer; a project built from it carries its look and this licence.</p><pre>${escapeHtml(licence.text)}</pre></div>` : ''}
+        </li>`;
+    }).join('');
+    const disk = [...importState.stored].filter(([key]) => key.startsWith('disk:')).map(([key, files]) => `<li class="robotRow" data-batch="${escapeHtml(key.slice(5))}">
+        <div><strong>${escapeHtml(files[0].details.label ?? files[0].name)}</strong><br><span class="muted small">${files.length} files brought in from this computer.</span></div>
+        <div class="buttons"><button type="button" class="primary" data-import="import"${busy ? ' disabled' : ''}>Import</button></div>
+    </li>`).join('');
+    const report = importState.report;
+    $('#importBody').innerHTML = `
+        <h3>From MuJoCo Menagerie</h3>
+        <ul class="robots">${rows}</ul>
+        <h3>From this computer</h3>
+        <p class="muted small">A MuJoCo model: its MJCF (.xml) and the STL or OBJ meshes it reads, chosen together.</p>
+        <ul class="robots">${disk}</ul>
+        <div class="buttons"><button type="button" class="tool" data-import="disk"${busy ? ' disabled' : ''}>Choose its files…</button></div>
+        <p class="status" aria-live="polite">${escapeHtml(importState.busy ?? '')}${importState.progress ? ` ${importState.progress}` : ''}${importState.error ? `<span class="error">${escapeHtml(importState.error)}</span>` : ''}</p>
+        ${report ? `<div class="importReport"><p><strong>${escapeHtml(report.name)}</strong>: ${report.solids} solids and ${report.joints} joints, ${report.drives} driven by its actuators. Undo brings your drawing back.</p>
+            ${report.leftOut.length ? `<p>Left out or taken approximately:</p><ul>${report.leftOut.map((line) => `<li>${escapeHtml(line[0].toUpperCase() + line.slice(1))}.</li>`).join('')}</ul>` : '<p>Nothing was left out.</p>'}</div>` : ''}`;
+}
+
+async function importWork(label, work) {
+    if (importState.busy) return;
+    importState.busy = label;
+    importState.error = null;
+    importState.progress = null;
+    renderImport();
+    try {
+        await work();
+    } catch (error) {
+        importState.error = error.message;
+    } finally {
+        importState.busy = null;
+        importState.progress = null;
+        renderImport();
+    }
+}
+
+// The licence of the robot at Menagerie's current commit, which a download then pins to.
+function toggleLicence(folder) {
+    if (importState.licences.has(folder)) { importState.licences.delete(folder); renderImport(); return null; }
+    return importWork('Fetching its licence…', async () => {
+        const commit = await latestCommit(fetchJson);
+        const text = (await api.fetchText(rawUrl(commit, `${folder}/LICENSE`))).text;
+        importState.licences.set(folder, { commit, name: licenceName(text), text });
+    });
+}
+
+// Every file of the robot's folder at the licence's commit, into the store, each with where it belongs.
+function download(folder) {
+    const licence = importState.licences.get(folder);
+    if (!licence) return null;
+    return importWork('Downloading…', async () => {
+        const files = await modelFiles(fetchJson, licence.commit, folder);
+        let done = 0;
+        for (const file of files) {
+            importState.progress = `${done} of ${files.length} files`;
+            renderImport();
+            await api.downloadFile(file.url, { name: storedName(file.path), details: { robot: folder, commit: licence.commit, path: file.path, licence: licence.name } });
+            done += 1;
+        }
+        importState.licences.delete(folder);
+        await refreshStored();
+    });
+}
+
+// Files brought in from disk, kept as one batch, then imported.
+function fromDisk() {
+    return importWork('Bringing the files in…', async () => {
+        const batch = `b${Date.now().toString(36)}`;
+        const { files } = await api.storeFiles({ batch }, { accept: ['xml', 'stl', 'obj'], title: 'A MuJoCo model: its MJCF and its meshes' });
+        if (!files.length) return;
+        const main = files.find(({ name }) => /\.xml$/i.test(name));
+        for (const file of files) await api.describeStoredFile(file.id, { batch, label: main?.name ?? file.name });
+        await refreshStored();
+        await importFiles(importState.stored.get(`disk:${batch}`), null);
+    });
+}
+
+// Imports the stored files as the drawing: undoable, its looks shown and kept with the project.
+async function importFiles(files, folder) {
+    importState.busy = 'Importing…';
+    renderImport();
+    const robot = folder ? robotByFolder(folder) : null;
+    const commit = files[0]?.details?.commit;
+    await api.useStoredFiles('drawing', 'model', files.map(({ id }) => id));
+    const answer = await api.runImport('drawing', {
+        step: 'model', useBinaryFiles: true,
+        paths: Object.fromEntries(files.filter(({ details }) => details?.path).map(({ name, details }) => [name, details.path])),
+        ...(robot ? { name: robot.name, source: { kind: 'menagerie', repository: repository.url, folder, commit, licence: files[0].details.licence ?? null } } : {})
+    });
+    if (!answer.data?.drawing) throw new Error((answer.report?.errors ?? ['The model could not be imported.']).join(' '));
+    const { drawing: imported, looks, report } = answer.data;
+    state.looks = { ...state.looks, ...looks };
+    view.setLooks(state.looks);
+    state.selection = [];
+    setTool('select');
+    forgetPose();
+    change(readDrawing(imported), `Import ${imported.name}`);
+    view.fit();
+    importState.report = { name: imported.name, ...report };
+    toast(`Imported ${imported.name}: ${report.solids} solids and ${report.joints} joints.${state.history.undoStack.length > 1 ? ' Undo brings your drawing back.' : ''}`);
+}
+
+function importAction(action, row) {
+    if (action === 'licence') return toggleLicence(row.dataset.folder);
+    if (action === 'download') return download(row.dataset.folder);
+    if (action === 'disk') return fromDisk();
+    if (action === 'import') {
+        const files = row.dataset.folder ? importState.stored.get(`menagerie:${row.dataset.folder}`) : importState.stored.get(`disk:${row.dataset.batch}`);
+        return importWork('Importing…', () => importFiles(files, row.dataset.folder ?? null));
+    }
+    return null;
+}
+
+// The looks kept with the project, back for the imported solids when the window reopens.
+async function restoreLooks() {
+    if (!api?.runImport || !drawing().solids.some((solid) => solid.look?.key)) return;
+    try {
+        const answer = await api.runImport('drawing', { step: 'looks' });
+        state.looks = { ...state.looks, ...(answer.data?.looks ?? {}) };
+        view.setLooks(state.looks);
+    } catch {
+        // Without them the imported solids are shown as the boxes about them.
+    }
+}
+
 // ---- help -------------------------------------------------------------------------------------------------------------
 
 const helpRows = () => [
@@ -1119,6 +1311,7 @@ const helpRows = () => [
     ['Delete', `Delete; ${keys.deleteKeys}`],
     ['Undo, redo', `${keys.undo}; ${keys.redo}`],
     ['Back out', 'Escape: stop joining, put the handles away, then clear the selection'],
+    ['Import a robot from a MuJoCo model', 'Import robot…; I. From MuJoCo Menagerie (its licence shown first) or from its files on this computer'],
     ['Build into the canvas', `Build into canvas; ${keys.build}`],
     ['Will these motors do it?', 'Size; M opens and closes it, running the robot when it has not run as drawn. Run as drawn, or a what-if from a time; Show in canvas opens the runs there'],
     ['These keys', '?']
@@ -1143,6 +1336,11 @@ $('#viewSide').addEventListener('change', (event) => { if (event.target.value) v
 $('#snapToggle').addEventListener('change', (event) => view.setSnapping(event.target.checked));
 $('#buildButton').addEventListener('click', build);
 $('#openButton').addEventListener('click', openDrawing);
+$('#importButton').addEventListener('click', openImport);
+$('#importBody').addEventListener('click', (event) => {
+    const button = event.target.closest('button[data-import]');
+    if (button) importAction(button.dataset.import, button.closest('.robotRow') ?? button);
+});
 $('#exampleSelect').innerHTML += examples.map(({ id, name, description }) => `<option value="${id}" title="${escapeHtml(description)}">${escapeHtml(name)}</option>`).join('');
 $('#exampleSelect').addEventListener('change', (event) => {
     const chosen = examples.find(({ id }) => id === event.target.value);
@@ -1150,6 +1348,7 @@ $('#exampleSelect').addEventListener('change', (event) => {
     if (!chosen) return;
     state.selection = [];
     setTool('select');
+    forgetPose();
     change(exampleDrawing(chosen.id), `Start from the ${chosen.name.toLowerCase()}`);
     view.fit();
     toast(`${chosen.name}: ${chosen.description}${state.history.undoStack.length > 1 ? ' Undo brings your drawing back.' : ''}`);
@@ -1213,7 +1412,7 @@ $('#inspector').addEventListener('keydown', (event) => {
 const typing = (target) => target.matches?.('input[type="text"], input[type="number"], select, textarea') || target.isContentEditable;
 
 document.addEventListener('keydown', (event) => {
-    if ($('#helpDialog').open) return;
+    if ($('#helpDialog').open || $('#importDialog').open) return;
     const command = commandHeld(event, keys);
     const key = event.key.toLowerCase();
     if (command && key === 'z') { event.preventDefault(); if (event.shiftKey) redo(); else undo(); return; }
@@ -1233,7 +1432,7 @@ document.addEventListener('keydown', (event) => {
     if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(); return; }
     const shortcuts = { b: () => addShape('box'), c: () => addShape('cylinder'), s: () => addShape('sphere'), p: () => addShape('capsule'),
         j: () => setTool('join'), g: () => setTool('move'), r: () => setTool('turn'), f: () => view.fit(), '?': showHelp,
-        k: addPoseKeyframe, '[': () => stepKeyframe(-1), ']': () => stepKeyframe(1), m: toggleSizing };
+        k: addPoseKeyframe, '[': () => stepKeyframe(-1), ']': () => stepKeyframe(1), m: toggleSizing, i: openImport };
     if (shortcuts[event.key]) { event.preventDefault(); shortcuts[event.key](); }
 });
 
@@ -1241,3 +1440,4 @@ document.addEventListener('keydown', (event) => {
 window.roboticsWindow = { drawing, state, view };
 
 await restore();
+await restoreLooks();

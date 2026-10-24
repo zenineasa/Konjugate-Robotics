@@ -52,6 +52,7 @@
             <option value="">Examples…</option>
         </select>
         <button type="button" class="tool" id="openButton" title="Open a drawing from a JSON file">Open…</button>
+        <button type="button" class="tool" id="importButton" title="Import a robot from a MuJoCo model: from Menagerie or from its files (I)">Import robot…</button>
         <button type="button" class="tool" id="sizeButton" aria-pressed="false" title="Will these motors do it? Run the robot and size its motors (M)"><span class="glyph">⚡</span>Size</button>
         <button type="button" class="primary" id="buildButton" title="Build the robot into the canvas">Build into canvas</button>
         <button type="button" class="tool" id="helpButton" title="Keys and gestures (?)" aria-label="Keys and gestures">?</button>
@@ -81,6 +82,12 @@
     <dialog id="helpDialog">
         <h2>Keys and gestures</h2>
         <table id="helpTable"></table>
+        <form method="dialog"><button class="primary">Close</button></form>
+    </dialog>
+
+    <dialog id="importDialog" aria-label="Import a robot">
+        <h2>Import a robot</h2>
+        <div id="importBody"></div>
         <form method="dialog"><button class="primary">Close</button></form>
     </dialog>
 

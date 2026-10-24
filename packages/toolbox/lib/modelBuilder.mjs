@@ -47,6 +47,10 @@ export function camelKey(name, taken = new Set(), fallback = 'part') {
     return unique;
 }
 
+// A solid's inertia per kilogram about its centre, along its own axes: an imported solid's own (its frame its
+// principal one), or its shape's.
+export const inertiaOf = (solid) => (solid.shape === 'mesh' ? solid.unitInertia : unitInertia(solid.shape, solid.size));
+
 // A primitive's inertia per kilogram about its centre, along its own axes (a cylinder and a capsule along z).
 export function unitInertia(shape, size) {
     switch (shape) {
@@ -201,7 +205,9 @@ function symmetricSolver(define, prefix, D) {
 }
 
 // Builds the document. Returns { document, data, report } or throws with the drawing's first problem.
-export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInterval = 0.01 } = {}) {
+// `looks`: an imported solid's look by its key (`solid.look.key`; { mesh, color }, in the solid's frame), for its node in the canvas; a
+// solid with none is shown as the box about it.
+export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInterval = 0.01, looks = {} } = {}) {
     const check = checkDrawing(drawing);
     const problems = [...check.errors, ...simulationLimits(drawing)];
     if (problems.length) throw new Error(problems[0].message);
@@ -300,8 +306,8 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
             id: id(), name: solid.name, type: 'robotSolid', position: [5 * (depth + 1), -3.6 * row, 0], states: [], sourceTerms: [], bySymbol: new Map(),
             numerics: { substepsPerGlobalStep: 1, integration: 'semiImplicit' },
             appearance: {
-                type: 'primitive', shape: solid.shape === 'capsule' ? 'cylinder' : solid.shape, color: solid.color,
-                parts: [{ prefix: '', mesh: shapeMesh(solid.shape, solid.size), color: solid.color }]
+                type: 'primitive', shape: solid.shape === 'capsule' ? 'cylinder' : solid.shape === 'mesh' ? 'box' : solid.shape, color: solid.color,
+                parts: [{ prefix: '', mesh: solid.shape === 'mesh' ? (looks[solid.look?.key]?.mesh ?? shapeMesh('box', solid.size)) : shapeMesh(solid.shape, solid.size), color: solid.color }]
             }
         };
         // The joint's speeds first, then its coordinates from the new speeds, each from the ones updated before it.
@@ -513,7 +519,7 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         a = toLocal(parentPose, anchor.point).map(round);
         n = normalize(scale(directionToLocal(parentPose, anchor.axis), flipped ? -1 : 1)).map(round);
     }
-    const unit = unitInertia(child.shape, child.size).map(round);
+    const unit = inertiaOf(child).map(round);
 
     // ---- parameters ----------------------------------------------------------------------------------------------------------
     const parameters = [];

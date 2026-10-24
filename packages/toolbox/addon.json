@@ -10,7 +10,9 @@
         "data.import",
         "model.open",
         "project.data",
-        "scenario.run"
+        "scenario.run",
+        "files.store",
+        "network.fetch"
     ],
     "requires": [
         "projectSession",
@@ -19,7 +21,10 @@
         "parameterSchedules",
         "baselineRun",
         "scenarioForkTime",
-        "suppliedPerParameter"
+        "suppliedPerParameter",
+        "binaryInputs",
+        "multipleBinaryInputs",
+        "storedFiles"
     ],
     "contributes": {
         "toolstrip": [
@@ -43,6 +48,26 @@
                         "label": "Drawing",
                         "accept": ["json"],
                         "description": "A robot drawing as JSON (format konjugate.robotics.drawing, version 1): written by a script, or kept from another project. Opening one replaces the drawing in the window, and can be undone."
+                    },
+                    {
+                        "role": "model",
+                        "binary": true,
+                        "multiple": true,
+                        "label": "Robot model",
+                        "accept": ["xml", "stl", "obj"],
+                        "description": "A robot's MuJoCo model (its MJCF and the meshes it reads), kept on this computer: downloaded from MuJoCo Menagerie, each file named for its path in the model's folder with / written as ^, or brought in from disk. Importing one replaces the drawing in the window, and can be undone."
+                    },
+                    {
+                        "role": "looks",
+                        "label": "Looks",
+                        "accept": ["json"],
+                        "description": "How an imported robot's solids look, derived from its model's meshes when it is imported and kept with the project in their place."
+                    },
+                    {
+                        "role": "notice",
+                        "label": "Licence",
+                        "accept": ["txt"],
+                        "description": "The licence of a robot downloaded from MuJoCo Menagerie, kept with the project built from it."
                     }
                 ]
             }
@@ -104,6 +129,12 @@
                     }
                 ]
             }
+        ]
+    },
+    "network": {
+        "hosts": [
+            "api.github.com",
+            "raw.githubusercontent.com"
         ]
     }
 }

@@ -163,3 +163,17 @@ dialog::backdrop { background: rgba(0, 0, 0, 0.5); }
 .band circle.asDrawn { fill: var(--accent); opacity: 0.8; }
 .band circle.changed { fill: #f0883e; opacity: 0.8; }
 .band text { fill: var(--muted); font-size: 9px; }
+
+/* Importing a robot. */
+#importDialog { width: min(720px, 92vw); max-height: 86vh; overflow: auto; background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 8px; }
+#importDialog h3 { margin: 12px 0 6px; font-size: 13px; }
+#importDialog .robots { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+#importDialog .robotRow { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; padding: 6px 8px; background: var(--panelRaised); border: 1px solid var(--line); border-radius: 6px; }
+#importDialog .robotRow .licence { grid-column: 1 / -1; }
+#importDialog .licence pre { max-height: 160px; overflow: auto; white-space: pre-wrap; font-size: 11px; background: var(--background); padding: 6px; border-radius: 4px; }
+#importDialog .buttons { display: flex; gap: 4px; }
+#importDialog .status .error { color: var(--error); }
+#importDialog .importReport { margin-top: 8px; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+#importDialog .importReport ul { margin: 4px 0; padding-left: 18px; }
+#importDialog .muted { color: var(--muted); }
+#importDialog .small { font-size: 12px; }

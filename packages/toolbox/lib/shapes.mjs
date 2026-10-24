@@ -37,6 +37,8 @@ export const sizeFields = Object.freeze({
 
 // The reasons a size is not one a solid can have, or none.
 export function sizeProblems(kind, size) {
+    // A solid imported from a model is a mesh: its size is the box about its look, worked out on import.
+    if (kind === 'mesh') return ['x', 'y', 'z'].every((field) => Number.isFinite(size?.[field]) && size[field] >= 0) ? [] : ['Its size must be three lengths of zero or more.'];
     const fields = sizeFields[kind];
     if (!fields) return [`There is no shape "${kind}".`];
     return fields.filter(([field]) => !(Number.isFinite(size?.[field]) && size[field] > 0)).map(([, label]) => `${label} must be more than zero.`);
@@ -44,7 +46,8 @@ export function sizeProblems(kind, size) {
 
 export function volume(kind, size) {
     switch (kind) {
-    case 'box': return size.x * size.y * size.z;
+    case 'box':
+    case 'mesh': return size.x * size.y * size.z;
     case 'cylinder': return Math.PI * size.radius ** 2 * size.length;
     case 'sphere': return (4 / 3) * Math.PI * size.radius ** 3;
     case 'capsule': return Math.PI * size.radius ** 2 * size.length + (4 / 3) * Math.PI * size.radius ** 3;
@@ -55,7 +58,8 @@ export function volume(kind, size) {
 // MuJoCo's geom type and size attribute: half lengths for a box, radius and half length for a cylinder or capsule.
 export function mjcfGeometry(kind, size) {
     switch (kind) {
-    case 'box': return { type: 'box', size: [size.x / 2, size.y / 2, size.z / 2] };
+    case 'box':
+    case 'mesh': return { type: 'box', size: [size.x / 2, size.y / 2, size.z / 2] };
     case 'cylinder': return { type: 'cylinder', size: [size.radius, size.length / 2] };
     case 'sphere': return { type: 'sphere', size: [size.radius] };
     case 'capsule': return { type: 'capsule', size: [size.radius, size.length / 2] };
@@ -66,7 +70,8 @@ export function mjcfGeometry(kind, size) {
 // The half extents of the box that holds the shape, in its own frame.
 export function halfExtents(kind, size) {
     switch (kind) {
-    case 'box': return [size.x / 2, size.y / 2, size.z / 2];
+    case 'box':
+    case 'mesh': return [size.x / 2, size.y / 2, size.z / 2];
     case 'cylinder': return [size.radius, size.radius, size.length / 2];
     case 'sphere': return [size.radius, size.radius, size.radius];
     case 'capsule': return [size.radius, size.radius, size.length / 2 + size.radius];
@@ -77,7 +82,8 @@ export function halfExtents(kind, size) {
 // The direction straight out of the shape's surface at a point on it (or near it), in its own frame.
 export function surfaceNormal(kind, size, point) {
     switch (kind) {
-    case 'box': {
+    case 'box':
+    case 'mesh': {
         // The face the point is nearest, counted relative to the face's distance from the centre.
         const half = halfExtents(kind, size);
         let best = 0;
@@ -112,6 +118,8 @@ export function surfaceNormal(kind, size, point) {
 // end centres and the rim's quarter points of a cylinder, the six poles of a sphere, the ends and the middle's four
 // sides of a capsule.
 export function snapPoints(kind, size) {
+    // A mesh has no faces of its own to snap to: a click on it is taken where it lands.
+    if (kind === 'mesh') return [];
     const points = [];
     const push = (point, normal) => points.push({ point, normal });
     const half = halfExtents(kind, size);

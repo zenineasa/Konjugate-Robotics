@@ -2,10 +2,11 @@
 
 """MuJoCo on its own, as a reference for a drawn robot built into Konjugate and run by Konjugate's engine.
 
-Reads a JSON request {mjcf, joints: [{name, initialPosition, initialSpeed}], forces: {joint: value},
-controls: {actuator: value}, bodies: [name], times: [...]} and prints {joint: [position at each time]} and, for each body
-named, {body: [[x, y, z] at each time]}: the model stepped at its own timestep, with each joint's force and each
-actuator's control held constant throughout.
+Reads a JSON request {mjcf or mjcfPath, joints: [{name, initialPosition, initialSpeed}], forces: {joint: value},
+controls: {actuator: value}, bodies: [name], centres: [name], times: [...]} and prints {joint: [position at each time]}
+and, for each body named, {body: [[x, y, z] at each time]}: its frame's origin under bodies, its centre of mass under
+centres. The model is the text given or the file at the path (which may include others and read meshes beside it),
+stepped at its own timestep, with each joint's force and each actuator's control held constant throughout.
 """
 
 import json
@@ -17,7 +18,7 @@ import mujoco
 def main(path):
     with open(path, encoding="utf-8") as handle:
         request = json.load(handle)
-    model = mujoco.MjModel.from_xml_string(request["mjcf"])
+    model = mujoco.MjModel.from_xml_path(request["mjcfPath"]) if "mjcfPath" in request else mujoco.MjModel.from_xml_string(request["mjcf"])
     data = mujoco.MjData(model)
     joints = {}
     for joint in request["joints"]:
@@ -30,9 +31,11 @@ def main(path):
     for name, value in request.get("controls", {}).items():
         data.ctrl[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_ACTUATOR, name)] = value
     bodies = {name: mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in request.get("bodies", [])}
+    centres = {name: mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, name) for name in request.get("centres", [])}
     mujoco.mj_forward(model, data)
     positions = {name: [] for name in joints}
     places = {name: [] for name in bodies}
+    centred = {name: [] for name in centres}
     timestep = model.opt.timestep
     for time in request["times"]:
         while data.time < time - timestep / 2:
@@ -43,7 +46,9 @@ def main(path):
             positions[name].append(float(data.qpos[qpos]))
         for name, index in bodies.items():
             places[name].append([float(value) for value in data.xpos[index]])
-    json.dump({**positions, **places}, sys.stdout)
+        for name, index in centres.items():
+            centred[name].append([float(value) for value in data.xipos[index]])
+    json.dump({**positions, **places, **centred}, sys.stdout)
 
 
 if __name__ == "__main__":

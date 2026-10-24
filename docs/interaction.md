@@ -30,6 +30,7 @@ The command key is Ctrl on Windows and Linux and ⌘ on a Mac.
 |---|---|---|---|
 | Add a solid | Box, Cylinder, Sphere, Capsule | | `B`, `C`, `S`, `P` |
 | Start from an example | Examples… | | |
+| Import a robot from a MuJoCo model (Menagerie's, its licence first, or its files from this computer) | Import robot… | | `I` |
 | Select | Its row under Parts; a check about it | Click it in the view | Shift-click or command-click to add |
 | Rename, resize, change its shape, material, mass, colour | Its card | | |
 | Move or turn a solid (and the solids it carries) | Its card: position and turn; Move, Turn | Drag the handles | `G`, `R` |

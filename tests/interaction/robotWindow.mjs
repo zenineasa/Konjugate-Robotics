@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { installBuiltPackages } from '../../scripts/installDev.mjs';
-import { konjugateDir, konjugateModule } from '../../scripts/konjugatePaths.mjs';
+import { konjugateDir, konjugateModule, roboticsRoot } from '../../scripts/konjugatePaths.mjs';
 
 const require = createRequire(join(konjugateDir, 'package.json'));
 const { _electron: electron } = require('playwright');
@@ -361,6 +361,100 @@ try {
     await page.click('#sizingPanel button[data-sizing="close"]');
     assert.equal(await page.isHidden('#sizingPanel'), true);
 
+    // 15. Import a robot from a MuJoCo model. From Menagerie (answered here, as Konjugate's main process asks for it,
+    // with tests/fixtures/arm in the SO-ARM100's folder): its licence shown first, its files downloaded at that commit
+    // and kept on this computer, then imported, replacing the drawing (undo brings it back) and saying what was left
+    // out. Its looks show in the view, reach the canvas with Build and come back when the window is reopened. Then the
+    // same model's files brought in from this computer, without their folders, and imported from them.
+    const fixture = join(roboticsRoot, 'tests', 'fixtures', 'arm');
+    const fixtureFiles = { 'scene.xml': join(fixture, 'scene.xml'), 'arm.xml': join(fixture, 'arm.xml'), 'meshes/turret.stl': join(fixture, 'meshes', 'turret.stl') };
+    const commit = 'c0ffee'.padEnd(40, '0');
+    await app.evaluate((_electron, { files, commit: pinned }) => {
+        globalThis.roboticsRequests = [];
+        const folder = 'trs_so_arm100';
+        const licence = 'Apache License\nVersion 2.0, January 2004\nhttp://www.apache.org/licenses/\n';
+        const bytes = (base64) => Uint8Array.from(atob(base64), (character) => character.charCodeAt(0));
+        const all = { ...Object.fromEntries(Object.entries(files).map(([path, base64]) => [path, bytes(base64)])), LICENSE: new TextEncoder().encode(licence) };
+        const original = globalThis.fetch;
+        globalThis.fetch = async (url, options) => {
+            const address = new URL(url);
+            if (address.hostname !== 'api.github.com' && address.hostname !== 'raw.githubusercontent.com') return original(url, options);
+            globalThis.roboticsRequests.push(address.href);
+            const json = (value) => new Response(JSON.stringify(value), { status: 200, headers: { 'content-type': 'application/json' } });
+            if (address.pathname.endsWith('/commits/main')) return json({ sha: pinned });
+            const contents = address.pathname.match(/\/contents\/(.*)$/);
+            if (contents && address.searchParams.get('ref') === pinned) {
+                const directory = decodeURIComponent(contents[1]).slice(folder.length + 1);
+                const entries = new Map();
+                for (const path of Object.keys(all)) {
+                    if (directory && !path.startsWith(`${directory}/`)) continue;
+                    const rest = directory ? path.slice(directory.length + 1) : path;
+                    const name = rest.split('/')[0];
+                    const full = `${folder}/${directory ? `${directory}/` : ''}${name}`;
+                    entries.set(name, rest.includes('/') ? { type: 'dir', path: full } : { type: 'file', path: full, size: all[path].byteLength });
+                }
+                return json([...entries.values()]);
+            }
+            const raw = address.pathname.match(new RegExp(`/${pinned}/${folder}/(.*)$`));
+            if (raw && all[decodeURIComponent(raw[1])]) return new Response(all[decodeURIComponent(raw[1])], { status: 200, headers: { 'content-length': String(all[decodeURIComponent(raw[1])].byteLength) } });
+            return new Response('not found', { status: 404 });
+        };
+    }, { files: Object.fromEntries(await Promise.all(Object.entries(fixtureFiles).map(async ([path, file]) => [path, (await readFile(file)).toString('base64')]))), commit });
+    const beforeImport = (await drawing()).name;
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press('i');
+    await page.waitForSelector('#importDialog[open]');
+    const arm = '#importBody .robotRow[data-folder="trs_so_arm100"]';
+    await page.click(`${arm} button[data-import="licence"]`);
+    await page.waitForSelector(`${arm} .licence`, { timeout: 30000 });
+    assert.match(await page.textContent(`${arm} .licence`), /Licence: Apache-2\.0\. From https:\/\/github\.com\/google-deepmind\/mujoco_menagerie, folder trs_so_arm100, at commit c0ffee0/);
+    await page.click(`${arm} button[data-import="download"]`);
+    await page.waitForSelector(`${arm} button[data-import="import"]`, { timeout: 60000 });
+    assert.match(await page.textContent(arm), /Kept on this computer \(4 files, Menagerie at c0ffee0, Apache-2\.0\)/);
+    await page.click(`${arm} button[data-import="import"]`);
+    await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'SO-ARM100', null, { timeout: 60000 });
+    let importedDrawing = await drawing();
+    assert.deepEqual(importedDrawing.solids.map(({ name }) => name), ['Base', 'Turret', 'Upper arm', 'Forearm', 'Tip', 'Mount', 'Bob']);
+    assert.deepEqual(importedDrawing.source, { kind: 'menagerie', repository: 'https://github.com/google-deepmind/mujoco_menagerie', folder: 'trs_so_arm100', commit, licence: 'Apache-2.0' });
+    assert.match(await page.textContent('#importBody .importReport'), /SO-ARM100: 7 solids and 7 joints, 4 driven by its actuators\.[\s\S]*A tendon \(Coupling\)\.[\s\S]*Extend brake, a damper actuator the drawing cannot take yet\./);
+    const requests = await app.evaluate(() => globalThis.roboticsRequests);
+    assert.ok(requests.every((address) => address.includes('/commits/main') || address.includes(commit)), 'every file is fetched at the commit the licence was shown for');
+    await shot('11-import');
+    await page.click('#importDialog form button');
+    // The jog panel starts from the robot as drawn: nothing kept from the arm before, though its joints' ids are the same.
+    assert.deepEqual(await page.evaluate(() => window.roboticsWindow.state.pose.values), {});
+    assert.ok((await page.evaluate(() => [...document.querySelectorAll('#posePanel label.jog output')].map((output) => output.textContent))).every((shown) => /^0(°| mm)$/.test(shown)));
+    // The turret drawn as its model's mesh (a box of 8 corners here), not the box about it.
+    const turretId = importedDrawing.solids.find(({ name }) => name === 'Turret').id;
+    const corners = () => page.evaluate((id) => window.roboticsWindow.view.meshes.get(id).geometry.attributes.position.count, turretId);
+    assert.equal(await corners(), 8);
+    await shot('12-imported');
+    // Undo brings the drawing back; redo the robot.
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press(`${command}+z`);
+    assert.equal((await drawing()).name, beforeImport);
+    await page.keyboard.press(asMac ? 'Meta+Shift+z' : 'Control+y');
+    assert.equal((await drawing()).name, 'SO-ARM100');
+    // Built, the canvas shows each imported solid as its look.
+    await page.click('#buildButton');
+    const importedModel = await builtInCanvas((model) => model.nodes.some(({ name }) => name === 'Bob'));
+    assert.equal(importedModel.nodes.find(({ name }) => name === 'Turret').appearance.parts[0].mesh.index.length, 36);
+    // Reopened, the window has the robot back, its looks with it, though the model's files are not part of the project.
+    await page.close();
+    page = await openWindow();
+    await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'SO-ARM100');
+    await page.waitForFunction((id) => window.roboticsWindow.view.meshes.get(id)?.geometry.attributes.position.count === 8, turretId, { timeout: 30000 });
+    // From this computer: the MJCF the scene includes and its mesh, chosen together, their folders lost on the way.
+    await app.evaluate(({ dialog }, paths) => { dialog.showOpenDialog = async () => ({ canceled: false, filePaths: paths }); }, [fixtureFiles['arm.xml'], fixtureFiles['meshes/turret.stl']]);
+    await page.click('#importButton');
+    await page.waitForSelector('#importDialog[open]');
+    await page.click('#importBody button[data-import="disk"]');
+    await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Test arm', null, { timeout: 60000 });
+    importedDrawing = await drawing();
+    assert.equal(importedDrawing.solids.length, 7);
+    assert.match(await page.textContent('#importBody'), /arm\.xml\s*2 files brought in from this computer\./);
+    await page.click('#importDialog form button');
+
     assert.deepEqual(problems, [], `the page reported problems: ${problems.join(' | ')}`);
 
     // 13. Konjugate's engine accepts the models, when there is a build of it.
@@ -368,7 +462,7 @@ try {
     if (existsSync(engine)) {
         const { decodeValidationReport } = await import(pathToFileURL(konjugateModule('src/reportProtocol.mjs')));
         const directory = scratch;
-        for (const [name, built] of [['robot', document], ['linkage', linkage], ['pickAndPlace', pickAndPlace]]) {
+        for (const [name, built] of [['robot', document], ['linkage', linkage], ['pickAndPlace', pickAndPlace], ['imported', importedModel]]) {
             await writeFile(join(directory, `${name}.kjt`), await encodeProjectFile(JSON.stringify(built)));
             spawnSync(engine, ['validate', join(directory, `${name}.kjt`), '--report', join(directory, `${name}.report`)]);
             const report = decodeValidationReport(await readFile(join(directory, `${name}.report`)));
