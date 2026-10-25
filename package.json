@@ -1,6 +1,6 @@
 {
   "name": "konjugate-robotics",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "minimumKonjugateVersion": "1.2.6",
   "private": true,
   "type": "module",
