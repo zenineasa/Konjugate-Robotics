@@ -42,20 +42,23 @@ export const driveLabels = Object.freeze({ free: 'Free', torque: 'Torque', servo
 // ambient (K/W) and heat capacity (J/K).
 export function defaultMotor(kind) {
     return {
-        resistance: 2.5, torqueConstant: 0.02, gearRatio: kind === 'slider' ? 3142 : 100, rotorInertia: 1e-6,
+        resistance: 2.5, torqueConstant: 0.02, gearRatio: kind === 'slider' ? 3142 : 100, gearEfficiency: 1, rotorInertia: 1e-6,
         thermalResistance: 10, thermalCapacitance: 15, ambientTemperature: 293.15, windingLimit: 403.15
     };
 }
+// `gearEfficiency`: the share of the motor's torque the gearbox passes on to the joint (0 to 1; all of it by default).
+// The back-EMF is the motor's own, so a motor whose stall torque, stall current and no-load speed are known has all
+// three (lib/motors.mjs).
 // `windingLimit`: the hottest its winding may get (130 °C, a class B winding's, by default). Not part of the model: the
 // sizing view holds the run's winding temperature against it.
-export const motorFields = Object.freeze(['resistance', 'torqueConstant', 'gearRatio', 'rotorInertia', 'thermalResistance', 'thermalCapacitance', 'ambientTemperature', 'windingLimit']);
+export const motorFields = Object.freeze(['resistance', 'torqueConstant', 'gearRatio', 'gearEfficiency', 'rotorInertia', 'thermalResistance', 'thermalCapacitance', 'ambientTemperature', 'windingLimit']);
 
 // The robot's battery, which every motor draws from: its voltage full and empty (falling in a straight line with its
 // charge), and its capacity in ampere seconds (a 3-cell LiPo of 2.2 Ah by default).
 export const defaultBattery = Object.freeze({ fullVoltage: 12.6, emptyVoltage: 9.9, capacity: 7920 });
 export const batteryOf = (drawing) => ({ ...defaultBattery, ...(drawing.battery ?? {}) });
 const motorFieldNames = {
-    resistance: 'winding resistance', torqueConstant: 'torque constant', gearRatio: 'gear ratio', rotorInertia: 'rotor inertia',
+    resistance: 'winding resistance', torqueConstant: 'torque constant', gearRatio: 'gear ratio', gearEfficiency: 'gear efficiency', rotorInertia: 'rotor inertia',
     thermalResistance: 'thermal resistance', thermalCapacitance: 'heat capacity', ambientTemperature: 'ambient temperature',
     windingLimit: 'hottest winding'
 };
@@ -492,6 +495,7 @@ export function checkDrawing(drawing) {
                 const allowZero = field === 'rotorInertia';
                 if (!(Number.isFinite(value) && (allowZero ? value >= 0 : value > 0))) errors.push({ id: joint.id, message: `${joint.name}: its motor's ${motorFieldNames[field]} must be ${allowZero ? 'zero or more' : 'more than zero'}.` });
             }
+            if (motor.gearEfficiency > 1) errors.push({ id: joint.id, message: `${joint.name}: its motor's gear efficiency is at most 100%.` });
             if (motor.windingLimit > 0 && motor.ambientTemperature > 0 && !(motor.windingLimit > motor.ambientTemperature)) {
                 errors.push({ id: joint.id, message: `${joint.name}: its motor's hottest winding must be above the ambient temperature.` });
             }
@@ -524,7 +528,7 @@ export function checkDrawing(drawing) {
     const battery = batteryOf(drawing);
     if (drawing.joints.some((joint) => joint.drive?.mode === 'motor')) {
         if (!(battery.capacity > 0)) errors.push({ message: 'The battery\'s capacity must be more than zero.' });
-        if (!(battery.emptyVoltage > 0 && battery.fullVoltage > battery.emptyVoltage)) errors.push({ message: 'The battery\'s full voltage must be above its empty voltage, and both above zero.' });
+        if (!(battery.emptyVoltage > 0 && battery.fullVoltage >= battery.emptyVoltage)) errors.push({ message: 'The battery\'s full voltage must be at or above its empty voltage, and both above zero.' });
     }
     const driven = new Set(drivenJoints(drawing).map(({ id }) => id));
     const times = new Set();

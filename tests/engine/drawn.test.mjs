@@ -19,6 +19,7 @@ import { addFrameAt, addJoint, addKeyframe, addSolid, createDrawing, massOf, rev
 import { between, fromAxisAngle, scale } from '../../packages/toolbox/lib/math.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
 import { buildModel } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { motorById, servosToMotors } from '../../packages/toolbox/lib/motors.mjs';
 import { konjugateModule } from '../../scripts/konjugatePaths.mjs';
 import { mujocoMissing, runDocument, runReference } from './harness.mjs';
 import { inverseDynamics, restCoordinates, simulate, treeOf } from './newtonEuler.mjs';
@@ -392,6 +393,35 @@ test('a joint on a motor follows its keyframes, drawing current from the battery
     const document = build(drawing, 2);
     const shoulder = document.sharedParameters.find(({ name }) => name === 'Shoulder setpoint');
     assert.deepEqual(shoulder.schedule, { interpolation: 'linear', samples: [[0, 0], [1, 0.4]] });
+});
+
+// The two-link arm's servos made Feetech STS3215s on the SO-ARM100 kit's 5 V supply (lib/motors.mjs), keyframed
+// from rest to a pose: the gears passing on part of the motor's torque, a supply that does not sag.
+test('servos made catalog motors run as the reference runs them, their gears passing on part of the torque, on a supply that does not sag', async () => {
+    let drawing = exampleDrawing('twoLinkArm');
+    const id = (name) => jointNamed(drawing, name).id;
+    drawing = addKeyframe(drawing, { time: 0, setpoints: { [id('Waist')]: 0, [id('Shoulder')]: 0, [id('Elbow')]: 0 } }).drawing;
+    drawing = addKeyframe(drawing, { time: 1, setpoints: { [id('Waist')]: 0.5, [id('Shoulder')]: 0.3, [id('Elbow')]: 0.6 } }).drawing;
+    const done = servosToMotors(drawing, 'sts3215-c001', 'mains5');
+    drawing = done.drawing;
+    assert.deepEqual(done.turned.map(({ name }) => name), ['Waist', 'Shoulder', 'Elbow']);
+    assert.ok(drawing.joints.every((joint) => joint.drive.mode !== 'servo'));
+    assert.ok(drawing.joints.find(({ name }) => name === 'Shoulder').drive.motor.gearEfficiency < 1);
+    const { run, reference } = await matchesReference('stsArm', drawing, { Waist: 'Turret', Shoulder: 'Upper arm', Elbow: 'Forearm' }, 2);
+    for (const name of ['Waist', 'Shoulder', 'Elbow']) {
+        const motor = reference.motors[jointNamed(drawing, name).id];
+        for (const [state, key] of [['current', 'current'], ['torque', 'torque'], ['windingTemperature', 'temperature']]) {
+            const difference = largestDifference(run.series(`${name} motor.${state}`), motor[key]);
+            assert.ok(difference < 1e-9, `${name}'s motor's ${state} differs from the reference by ${difference}.`);
+        }
+    }
+    // The mains do not run down: the supply stays at 5 V.
+    assert.ok(Math.max(...run.series('Battery.voltage').map((volts) => Math.abs(volts - 5))) < 1e-9, 'The supply should stay at 5 V.');
+    // Held still at the end, a motor gives no more than its stall torque on 5 V: 5 / 7.4 of the datasheet's.
+    const stall = (motorById('sts3215-c001').stallTorque * 5) / 7.4;
+    assert.ok(Math.max(...run.series('Shoulder motor.torque').map(Math.abs)) <= stall + 1e-9, 'The shoulder should give no more than its stall torque.');
+    const end = run.times.length - 1;
+    assert.ok(Math.abs(run.series('Upper arm.jointAngle')[end] - 0.3) < 0.02 && Math.abs(run.series('Forearm.jointAngle')[end] - 0.6) < 0.02, 'The servos made motors should reach their keyframes.');
 });
 
 test('a pick-and-place cycle on motors runs as the reference runs it: the arm turns to each keyframe, the motors heat and the battery drains', async () => {

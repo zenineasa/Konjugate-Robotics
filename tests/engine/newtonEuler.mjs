@@ -439,11 +439,11 @@ export function simulate(drawing, times, timeStep = 0.001) {
         const position = q[index][0];
         const speed = qd[body.firstSpeed];
         const setpoint = schedules[joint.id] ? lookup(schedules[joint.id], at) : joint.drive.setpoint ?? 0;
-        const { resistance, torqueConstant, gearRatio } = joint.drive.motor;
+        const { resistance, torqueConstant, gearRatio, gearEfficiency = 1 } = joint.drive.motor;
         const duty = Math.max(-1, Math.min(1, joint.drive.proportional * (setpoint - position) - joint.drive.derivative * speed));
         const voltage = battery.emptyVoltage + (battery.fullVoltage - battery.emptyVoltage) * charge / 100;
         const current = (duty * voltage - torqueConstant * gearRatio * speed) / resistance;
-        return [joint.id, { duty, current, torque: gearRatio * torqueConstant * current }];
+        return [joint.id, { duty, current, torque: gearEfficiency * gearRatio * torqueConstant * current }];
     }));
     let time = 0;
     for (const target of times) {

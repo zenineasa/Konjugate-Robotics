@@ -1142,14 +1142,15 @@ function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symb
         const windingParameters = [
             { id: id(), ...linked(resistance, 'resistance') },
             { id: id(), ...linked(torqueConstant, 'torqueConstant') },
-            { id: id(), ...linked(gearRatio, 'gearRatio') }
+            { id: id(), ...linked(gearRatio, 'gearRatio') },
+            { id: id(), name: 'Gear efficiency', symbol: 'gearEfficiency', value: round(motor.gearEfficiency), unit: '', mode: 'constant' }
         ];
         document.edges.push(algebraicEdge(`${joint.name} windings`, solidNode, motorNode, id, windingParameters, (bind, output, define) => {
             const qd = bind(solidNode, 'source', 'jointSpeed', 'p');
             const duty = bind(motorNode, 'target', 'duty', 'c');
             const supply = bind(motorNode, 'target', 'supplyVoltage', 'c');
             const current = define('amps', E.divide(E.subtract(E.multiply(duty, supply), E.multiply('torqueConstant', 'gearRatio', qd)), 'resistance'));
-            const torque = define('tq', E.multiply('gearRatio', 'torqueConstant', current));
+            const torque = define('tq', E.multiply('gearEfficiency', 'gearRatio', 'torqueConstant', current));
             output(motorNode, 'target', 'current', current);
             output(motorNode, 'target', 'torque', torque);
             output(solidNode, 'source', 'motorTorque', torque);

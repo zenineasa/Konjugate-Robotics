@@ -462,6 +462,57 @@ try {
     assert.match(await page.textContent('#importBody'), /arm\.xml\s*2 files brought in from this computer\./);
     await page.click('#importDialog form button');
 
+    // 16. Size the imported robot on real servos. Size says its servos must be motors first; with nothing selected the
+    // robot's card turns them into Feetech STS3215s on the kit's 5 V supply, in one step to undo, the slider's servo
+    // left as it was. A joint's card knows its motor by name until a field changes, and sets another from the catalog;
+    // the battery's card sets a supply. Then Size runs it.
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press('Escape');
+    await page.keyboard.press('m');
+    assert.match(await page.textContent('#sizingPanel .status'), /make the servos motors first, under Servos to motors with nothing selected/);
+    await page.keyboard.press('m');
+    await page.selectOption('#inspector select[name="servosToMotors.motor"]', 'sts3215-c001');
+    await page.selectOption('#inspector select[name="servosToMotors.supply"]', 'mains5');
+    await page.focus('#inspector button[data-action="servosToMotors"]');
+    await page.keyboard.press('Enter');
+    await page.waitForFunction(() => window.roboticsWindow.drawing().joints.some((joint) => joint.drive?.mode === 'motor'));
+    const modes = async () => Object.fromEntries((await drawing()).joints.filter(({ drive }) => drive && drive.mode !== 'free').map(({ name, drive }) => [name, drive.mode]));
+    assert.deepEqual(await modes(), { Waist: 'motor', Shoulder: 'motor', Elbow: 'torque', Extend: 'servo' });
+    assert.match(await page.textContent('#toast'), /2 servos are Feetech STS3215 \(7\.4 V, 1:345\) now, on 5 V: each gives up to 1\.29 N·m held still, less than the most torque they had\. Extend is a slider's servo, left as it was\./);
+    assert.deepEqual((await drawing()).battery, { fullVoltage: 5, emptyVoltage: 5, capacity: 3600000 });
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press(`${command}+z`);
+    assert.deepEqual(await modes(), { Waist: 'servo', Shoulder: 'servo', Elbow: 'torque', Extend: 'servo' });
+    await page.keyboard.press(asMac ? 'Meta+Shift+z' : 'Control+y');
+    assert.equal((await modes()).Waist, 'motor');
+    const waistId = (await drawing()).joints.find(({ name }) => name === 'Waist').id;
+    await page.click(`#partsTree li[data-id="${waistId}"]`);
+    assert.equal(await page.inputValue('#inspector select[name="motor.catalog"]'), 'sts3215-c001');
+    assert.equal(Number(await page.inputValue('#inspector input[name="motor.gearEfficiency"]')), 56.38);
+    await page.fill('#inspector input[name="motor.gearEfficiency"]', '50');
+    await page.press('#inspector input[name="motor.gearEfficiency"]', 'Enter');
+    assert.equal((await drawing()).joints.find(({ id }) => id === waistId).drive.motor.gearEfficiency, 0.5);
+    assert.equal(await page.inputValue('#inspector select[name="motor.catalog"]'), '');
+    await page.selectOption('#inspector select[name="motor.catalog"]', 'sts3215-c018');
+    assert.equal((await drawing()).joints.find(({ id }) => id === waistId).drive.motor.resistance, 12 / 2.7);
+    await page.keyboard.press('Escape');
+    assert.equal(await page.inputValue('#inspector select[name="battery.supply"]'), 'mains5');
+    await page.selectOption('#inspector select[name="battery.supply"]', 'lipo2s');
+    assert.deepEqual((await drawing()).battery, { fullVoltage: 8.4, emptyVoltage: 6.6, capacity: 7920 });
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press(`${command}+z`);
+    assert.equal((await drawing()).battery.fullVoltage, 5);
+    await page.keyboard.press('Escape');
+    await page.fill('#inspector input[name="runTime"]', '2');
+    await page.press('#inspector input[name="runTime"]', 'Enter');
+    await page.click('#sizeButton');
+    await page.waitForFunction(() => window.roboticsWindow.state.sizing.asDrawn, null, { timeout: 120000 });
+    assert.equal(await page.locator('#sizingPanel .motorCard[data-joint]').count(), 2, 'a card for each servo made a motor');
+    const stsSized = await page.evaluate(() => window.roboticsWindow.state.sizing.asDrawn.motors.find(({ name }) => name === 'Shoulder'));
+    assert.ok(Math.abs(stsSized.stallTorque - (19.5 * 0.0980665 * 5) / 7.4) < 1e-9, 'on 5 V, the STS3215 gives 5 / 7.4 of its datasheet\'s stall torque');
+    await shot('13-sts3215');
+    await page.click('#sizingPanel button[data-sizing="close"]');
+
     assert.deepEqual(problems, [], `the page reported problems: ${problems.join(' | ')}`);
 
     // 13. Konjugate's engine accepts the models, when there is a build of it.

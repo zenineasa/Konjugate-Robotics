@@ -4,11 +4,11 @@
 // launcher host answers with (`branch.series[node][symbol] = [[time, value], ...]`, thinned by the host to a few
 // hundred points, so a share of time is counted from those and is about right, not exact), and the drawing.
 //
-// A motor in motor mode, at its joint: its current is (duty × supply voltage - kt N ω) / R and its torque N kt times
-// that (lib/modelBuilder.mjs), the duty held to ±1. So at a speed ω and a supply voltage V the torque it can give lies
-// between N kt (-V - kt N ω) / R and N kt (V - kt N ω) / R: a band of slope -(kt N)² / R, as wide as twice its stall
-// torque N kt V / R, and an operating point on its edge is a motor at full duty, giving all it can. The band narrows
-// as the battery drains. Pure, no dependencies.
+// A motor in motor mode, at its joint: its current is (duty × supply voltage - kt N ω) / R and its torque η N kt times
+// that (lib/modelBuilder.mjs; η its gear efficiency), the duty held to ±1. So at a speed ω and a supply voltage V the
+// torque it can give lies between η N kt (-V - kt N ω) / R and η N kt (V - kt N ω) / R: a band of slope -η (kt N)² / R,
+// as wide as twice its stall torque η N kt V / R, and an operating point on its edge is a motor at full duty, giving
+// all it can. The band narrows as the battery drains. Pure, no dependencies.
 
 import { batteryOf, defaultMotor, structure } from './drawing.mjs';
 
@@ -37,13 +37,13 @@ export function motorsOf(drawing) {
 // At its joint, on a supply of `voltage`: the torque it gives held still at full duty (stall), the speed it reaches
 // with no load (no-load), and the most and least torque it can give at a speed.
 export function envelope(motor, voltage) {
-    const { resistance: R, torqueConstant: kt, gearRatio: N } = motor;
+    const { resistance: R, torqueConstant: kt, gearRatio: N, gearEfficiency: efficiency = 1 } = motor;
     const constant = kt * N;
     return {
-        stallTorque: (constant * voltage) / R,
+        stallTorque: (efficiency * constant * voltage) / R,
         noLoadSpeed: voltage / constant,
-        most: (speed) => (constant * (voltage - constant * speed)) / R,
-        least: (speed) => (constant * (-voltage - constant * speed)) / R
+        most: (speed) => (efficiency * constant * (voltage - constant * speed)) / R,
+        least: (speed) => (efficiency * constant * (-voltage - constant * speed)) / R
     };
 }
 

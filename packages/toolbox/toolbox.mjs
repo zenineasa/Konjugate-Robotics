@@ -18,6 +18,7 @@ import { robotByFolder, robots, storedName } from './lib/catalog.mjs';
 import { latestCommit, licenceName, modelFilesFromModel, rawUrl, repository } from './lib/menagerie.mjs';
 import { exampleDrawing, examples } from './lib/examples.mjs';
 import { History } from './lib/history.mjs';
+import { catalogMotorOf, motorById, motorCatalog, motorFromDatasheet, servosToMotors, supplyCatalog, supplyOf } from './lib/motors.mjs';
 import { simulationLimits } from './lib/modelBuilder.mjs';
 import { conjugate, fromRollPitchYaw, multiply, normalizeQuaternion, subtract, toRollPitchYaw } from './lib/math.mjs';
 import { addsToSelection, commandHeld, platformKeys } from './lib/platform.mjs';
@@ -70,7 +71,9 @@ const state = {
     // `whatIf`: lib/sizing.mjs summaries), and a run under way.
     sizing: { open: false, running: false, status: '', error: null, from: null, asDrawn: null, whatIf: null },
     // Imported solids' looks by key ({ mesh, color }), from the importer: kept with the project, not in the drawing.
-    looks: {}
+    looks: {},
+    // The robot panel's choice of motor and supply for turning its servos into motors.
+    servosToMotors: { motor: motorCatalog[0].id, supply: 'mains5' }
 };
 const drawing = () => state.history.current;
 
@@ -417,17 +420,33 @@ function renderInspector() {
         <h2>Run</h2>
         ${field('Run time', numberInput('runTime', state.settings.runTime, { min: 0.01 }), 's')}
         ${field('Step', numberInput('timeStep', state.settings.timeStep * 1000, { min: 0.1, step: 0.1, title: 'The engine\'s step. Stiff servos and light solids need a short one; a millisecond suits most drawings.' }), 'ms')}
-        ${current.joints.some((joint) => joint.drive?.mode === 'motor') ? batteryFields(current) : ''}`;
+        ${current.joints.some((joint) => joint.drive?.mode === 'motor') ? batteryFields(current) : ''}
+        ${servoFields(current)}`;
+}
+
+// Turning the robot's servos into catalog motors, to size them: shown while a hinge has a servo.
+function servoFields(current) {
+    const servos = drivenJoints(current).filter((joint) => joint.drive.mode === 'servo' && joint.kind === 'hinge');
+    if (!servos.length) return '';
+    const choice = state.servosToMotors;
+    const entry = motorById(choice.motor);
+    return `<h2>Servos to motors</h2>
+        ${field('Motor', `<select name="servosToMotors.motor">${motorCatalog.filter(({ kind }) => kind === 'hinge').map((item) => `<option value="${item.id}"${item.id === choice.motor ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select>`)}
+        ${field('On', `<select name="servosToMotors.supply"><option value=""${choice.supply ? '' : ' selected'}>The battery as it is</option>${supplyCatalog.map((item) => `<option value="${item.id}"${item.id === choice.supply ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select>`)}
+        <p class="note">${escapeHtml(entry.what)} Its ${servos.length} servo${servos.length === 1 ? '' : 's'} become${servos.length === 1 ? 's' : ''} this motor, each holding as stiffly and with the damping it had, so Size can say whether the real ones will do it.</p>
+        <div class="buttons"><button type="button" class="tool" data-action="servosToMotors">Make them motors</button></div>`;
 }
 
 // The battery every motor draws from.
 function batteryFields(current) {
     const battery = batteryOf(current);
+    const supply = supplyOf(battery);
     return `<h2>Battery</h2>
+        ${field('Supply', `<select name="battery.supply"><option value=""${supply ? '' : ' selected'}>My own</option>${supplyCatalog.map((item) => `<option value="${item.id}"${supply?.id === item.id ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select>`)}
         ${field('Full', numberInput('battery.fullVoltage', battery.fullVoltage, { min: 0 }), 'V')}
         ${field('Empty', numberInput('battery.emptyVoltage', battery.emptyVoltage, { min: 0 }), 'V')}
         ${field('Capacity', numberInput('battery.capacity', Math.round((battery.capacity / 3600) * 1000) / 1000, { min: 0 }), 'Ah')}
-        <p class="note">Every motor draws from it: its voltage falls in a straight line from full to empty with its charge, a node in the canvas.</p>`;
+        <p class="note">Every motor draws from it: its voltage falls in a straight line from full to empty with its charge, a node in the canvas. A supply on the mains is full and empty at the same voltage.</p>`;
 }
 
 function solidInspector(solid) {
@@ -476,14 +495,19 @@ function motorFieldsOf(joint, show, unit) {
     const linear = joint.kind === 'slider';
     const drive = joint.drive;
     const motor = { ...defaultMotor(joint.kind), ...drive.motor };
+    const listed = catalogMotorOf(motor);
+    const choices = motorCatalog.filter(({ kind }) => kind === joint.kind);
     return [
         field('Setpoint', numberInput('drive.setpoint', show(drive.setpoint ?? 0)), unit),
         field('Proportional', numberInput('drive.proportional', drive.proportional ?? 0, { min: 0, title: 'Duty cycle per unit of the setpoint left to reach' }), linear ? '/m' : '/rad'),
         field('Derivative', numberInput('drive.derivative', drive.derivative ?? 0, { min: 0, title: 'Duty cycle taken off per unit of the joint\'s speed' }), linear ? 's/m' : 's/rad'),
         '<h2>Motor</h2>',
+        ...(choices.length ? [field('Motor', `<select name="motor.catalog"><option value=""${listed ? '' : ' selected'}>My own</option>${choices.map((item) => `<option value="${item.id}"${listed?.id === item.id ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}</select>`)] : []),
+        ...(listed ? [`<p class="note">${escapeHtml(listed.what)} From its maker: ${escapeHtml(listed.source)}.</p>`] : []),
         field('Winding resistance', numberInput('motor.resistance', motor.resistance, { min: 0 }), 'Ω'),
         field('Torque constant', numberInput('motor.torqueConstant', motor.torqueConstant, { min: 0, title: 'Torque per ampere at the motor, and back-EMF volts per radian per second' }), 'N·m/A'),
         field('Gear ratio', numberInput('motor.gearRatio', motor.gearRatio, { min: 0, title: linear ? 'Motor radians per metre of travel, as a lead screw\'s' : 'Motor turns per joint turn' }), linear ? 'rad/m' : ':1'),
+        field('Gear efficiency', numberInput('motor.gearEfficiency', Math.round(motor.gearEfficiency * 1e4) / 100, { min: 0, title: 'The share of the motor\'s torque its gears pass on to the joint' }), '%'),
         field('Rotor inertia', numberInput('motor.rotorInertia', motor.rotorInertia, { min: 0 }), 'kg·m²'),
         field('Thermal resistance', numberInput('motor.thermalResistance', motor.thermalResistance, { min: 0, title: 'From the winding to the air around it' }), 'K/W'),
         field('Heat capacity', numberInput('motor.thermalCapacitance', motor.thermalCapacitance, { min: 0, title: 'Of the winding' }), 'J/K'),
@@ -583,6 +607,17 @@ function inspectorChanged(input) {
     const solids = selectedSolids();
     const joints = selectedJoints();
     if (!state.selection.length) {
+        if (name === 'servosToMotors.motor' || name === 'servosToMotors.supply') {
+            state.servosToMotors[name.slice(15)] = value;
+            render();
+            return;
+        }
+        if (name === 'battery.supply') {
+            const supply = supplyCatalog.find(({ id }) => id === value);
+            if (supply) change(updateBattery(current, { fullVoltage: supply.fullVoltage, emptyVoltage: supply.emptyVoltage, capacity: supply.capacity }), 'Battery');
+            else render();
+            return;
+        }
         if (name.startsWith('battery.')) {
             const field = name.slice(8);
             if (!(number > 0)) { toast('This must be more than zero.'); render(); return; }
@@ -669,10 +704,17 @@ function inspectorChanged(input) {
             apply({ drive: { [name.slice(6)]: number } }, name === 'drive.proportional' ? 'Proportional gain' : 'Derivative gain');
             return;
         }
+        if (name === 'motor.catalog') {
+            const entry = motorById(value);
+            if (entry) apply({ drive: { motor: motorFromDatasheet(entry) } }, 'Motor');
+            else render();
+            return;
+        }
         if (name.startsWith('motor.')) {
             const field = name.slice(6);
-            const amount = field === 'ambientTemperature' || field === 'windingLimit' ? number + 273.15 : number;
+            const amount = field === 'ambientTemperature' || field === 'windingLimit' ? number + 273.15 : field === 'gearEfficiency' ? number / 100 : number;
             if (field === 'rotorInertia' ? amount < 0 : !(amount > 0)) { toast(field === 'rotorInertia' ? 'This must be zero or more.' : 'This must be more than zero.'); render(); return; }
+            if (field === 'gearEfficiency' && amount > 1) { toast('A gear efficiency is at most 100%.'); render(); return; }
             apply({ drive: { motor: { [field]: amount } } }, 'Motor');
             return;
         }
@@ -711,6 +753,7 @@ function inspectorAction(action) {
     if (action === 'duplicate') { duplicateSelection(); return; }
     if (action === 'move' || action === 'turn') { setTool(action); return; }
     if (action === 'join') { setTool('join'); return; }
+    if (action === 'servosToMotors') { makeServosMotors(); return; }
     const joint = jointById(current, selectedJoints()[0]);
     if (!joint) return;
     if (action === 'flipAxis') {
@@ -721,6 +764,18 @@ function inspectorAction(action) {
         const next = attempt(() => reverseJoint(current, joint.id));
         if (next) change(next, `Swap the solids of ${joint.name}`);
     }
+}
+
+// Every servo on a hinge becomes the chosen catalog motor, on the chosen supply, in one step to undo.
+function makeServosMotors() {
+    const { motor, supply } = state.servosToMotors;
+    const done = attempt(() => servosToMotors(drawing(), motor, supply || null));
+    if (!done) return;
+    if (!done.turned.length) { toast('There is no servo on a hinge to make a motor.'); return; }
+    change(done.drawing, `Make the servos ${done.motor.name}`);
+    const weaker = done.turned.filter(({ torqueLimit, stallTorque }) => stallTorque < torqueLimit);
+    const figure = (value) => String(Number(value.toPrecision(3)));
+    toast(`${done.turned.length} servo${done.turned.length === 1 ? ' is' : 's are'} ${done.motor.name} now, on ${figure(done.voltage)} V: each gives up to ${figure(done.turned[0].stallTorque)} N·m held still${weaker.length ? `, less than the most torque ${weaker.length === done.turned.length ? 'they' : weaker.map(({ name }) => name).join(', ')} had` : ''}.${done.left.length ? ` ${done.left.join(', ')} ${done.left.length === 1 ? 'is a slider\'s servo, left' : 'are sliders\' servos, left'} as ${done.left.length === 1 ? 'it was' : 'they were'}.` : ''}`);
 }
 
 // ---- messages ---------------------------------------------------------------------------------------------------------
@@ -946,12 +1001,16 @@ function openSizing() {
     // Opened with nothing run for this robot yet, it runs it as drawn.
     if (state.sizing.from !== buildInput() && !state.sizing.running && motorsOf(drawing()).length) runAsDrawn();
 }
+// What Size says of a robot with no motor: a robot on servos can have them made motors.
+const noMotors = () => (drivenJoints(drawing()).some((joint) => joint.drive.mode === 'servo' && joint.kind === 'hinge')
+    ? 'Sizing looks at motors: make the servos motors first, under Servos to motors with nothing selected.'
+    : 'Sizing looks at motors: drive a hinge or a slider in motor mode, and run it here.');
 function closeSizing() { state.sizing.open = false; renderSizing(); }
 const toggleSizing = () => (state.sizing.open ? closeSizing() : openSizing());
 
 async function sizingRun(label, work) {
     if (!api?.runBaseline) { toast('Sizing needs the Robotics window opened from Konjugate.', 'error'); return; }
-    if (!motorsOf(drawing()).length) { toast('Sizing looks at motors: drive a hinge or a slider in motor mode first.', 'error'); return; }
+    if (!motorsOf(drawing()).length) { toast(noMotors(), 'error'); return; }
     if (state.sizing.running) return;
     if (!progressHeard && api.onProgress) {
         progressHeard = true;
@@ -1135,7 +1194,7 @@ function renderSizing() {
             <button type="button" class="tool" data-sizing="show"${asDrawn && current && !state.sizing.running ? '' : ' disabled'} title="Open the model in the canvas with these runs as its branches">Show in canvas</button>
             <button type="button" class="tool close" data-sizing="close" title="Close (M, or Escape)" aria-label="Close sizing">✕</button>
         </header>
-        <p class="status" aria-live="polite">${escapeHtml(state.sizing.status || (state.sizing.error ? `Not run: ${state.sizing.error}` : !motors.length ? 'Sizing looks at motors: drive a hinge or a slider in motor mode, and run it here.'
+        <p class="status" aria-live="polite">${escapeHtml(state.sizing.status || (state.sizing.error ? `Not run: ${state.sizing.error}` : !motors.length ? noMotors()
             : !asDrawn ? 'Run the robot to see whether its motors do it.' : !current ? 'The robot has changed since this run: run it again to size it as drawn now.'
                 : `${state.settings.runTime} s as drawn${changed ? `, and with ${changed.change}` : ''}. Each motor's band is what it can give at its joint (full battery, solid; empty, dashed); a point on its edge is the motor giving all it can.`))}</p>
         <div class="cards${current ? '' : ' stale'}">${asDrawn ? asDrawn.motors.map(card).join('') + battery : ''}</div>`;

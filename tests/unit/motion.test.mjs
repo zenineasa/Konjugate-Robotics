@@ -51,9 +51,9 @@ test('checks name what a keyframe or a motor gets wrong', () => {
     const motorErrors = checkDrawing(motorised).errors.map(({ message }) => message).join(' ');
     assert.match(motorErrors, /Elbow: its motor's winding resistance must be more than zero/);
     assert.match(motorErrors, /proportional gain must be zero or more/);
-    // The battery: its defaults, and a full voltage that must be above its empty one.
+    // The battery: its defaults, and a full voltage that must be at or above its empty one.
     assert.deepEqual(batteryOf(motorised), { ...defaultBattery });
-    assert.match(checkDrawing(updateBattery(motorised, { fullVoltage: 5 })).errors.map(({ message }) => message).join(' '), /full voltage must be above its empty voltage/);
+    assert.match(checkDrawing(updateBattery(motorised, { fullVoltage: 5 })).errors.map(({ message }) => message).join(' '), /full voltage must be at or above its empty voltage/);
 });
 
 test('the joints keyframes set are those a servo or a motor drives, in the tree', () => {
