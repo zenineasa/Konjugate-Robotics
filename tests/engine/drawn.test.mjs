@@ -493,13 +493,29 @@ test('a joint\'s damping and a solid\'s mass, parameters in the canvas, reach th
     await matchesReference('changed', drawn, { Pivot: 'Arm' }, 2, document);
 });
 
-test('a joint stops at its limit', async () => {
+// A limit and a dry friction are held as MuJoCo holds them: soft rows, each in the regime the step before found (a
+// relationship holds its own joint's rows, so it cannot find their regimes in the step itself, as they hang on every
+// other joint's). The reference holds them the same way, to rounding. MuJoCo finds each step's regimes in the step,
+// so the two part where a row starts or stops holding: measured up to 3.8e-4 rad here, 3.8e-5 rad without the
+// friction (a step taken in the wrong regime as the arm bounces off its limit and sticks); held to that, the two
+// agree to 1e-12 (checked with MuJoCo's own solve of each step's regimes in a copy of the reference).
+const softBound = 1e-3;
+test('a joint stops at its limit and its dry friction holds it, as the reference and MuJoCo have them', async () => {
     let drawing = exampleDrawing('pendulum');
-    // Let go level, the arm swings down to positive angles; its limit stops it at 0.4 rad.
-    drawing = updateJoint(drawing, jointNamed(drawing, 'Pivot').id, { damping: 0.002, limits: { lower: -0.4, upper: 0.4 } });
-    const angles = (await runDocument(directory, 'limited', build(drawing, 2))).series('Arm.jointAngle');
+    // Let go level, the arm swings down to positive angles; its limit stops it at 0.4 rad, softly, and its friction
+    // holds it there.
+    drawing = updateJoint(drawing, jointNamed(drawing, 'Pivot').id, { damping: 0.002, friction: 0.01, limits: { lower: -0.4, upper: 0.4 } });
+    const { run, reference } = await matchesReference('limited', drawing, { Pivot: 'Arm' }, 2);
+    const angles = run.series('Arm.jointAngle');
     assert.ok(Math.max(...angles) < 0.45, `It passed its limit, to ${Math.max(...angles)} rad.`);
     assert.ok(Math.abs(angles.at(-1) - 0.4) < 0.02, `It should rest against its limit, not at ${angles.at(-1)} rad.`);
+    assert.ok(reference);
+    if (withoutMujoco) return;
+    const pivot = jointNamed(drawing, 'Pivot');
+    const mujoco = await runReference(directory, { mjcf: writeMjcf(drawing), joints: [{ name: pivot.id }], times: run.times });
+    const difference = largestDifference(angles, mujoco[pivot.id]);
+    console.log(`A limit and a dry friction: Konjugate and MuJoCo differ by up to ${difference.toExponential(2)} rad.`);
+    assert.ok(difference < softBound, `The pendulum at its limit differs from MuJoCo by ${difference} rad.`);
 });
 
 test('a drawn robot resumed from a checkpoint carries on exactly as the run that never stopped, a closed loop and ball joints too', async () => {

@@ -15,8 +15,12 @@
 // accelerations, then the coordinates from the new speeds, each coordinate from the ones updated before it.
 //
 // A joint's torque follows the drawing: a constant torque, or a servo stiffness times (setpoint minus position)
-// clamped to its limit; minus damping times speed and friction times tanh(100 speed), each axis of a ball on its own.
-// Joint limits are not modelled here, so drawings checked with it keep inside theirs.
+// clamped to its limit; minus damping times speed; a ball's friction times tanh(100 speed) on each axis. A hinge's or
+// a slider's dry friction and limits are MuJoCo's soft constraints, each row in the regime the step before found: while
+// it holds, an inertia D = imp / ((1 - imp) w) on the joint and a force D aref (aref = -B v - K imp r), w the joint's
+// inverse inertia where drawn, (M⁻¹)ᵢᵢ of this file's own mass matrix; a slipping friction its friction either way; a
+// limit let go, nothing (lib/modelBuilder.mjs's rowReference and impedanceAt give B, K and imp, which are numbers from
+// the joint's settings). A ball's limit is not modelled here, so drawings checked with it keep inside theirs.
 //
 // A joint that closes a loop holds what its kind holds, row by row along the first solid's frame axes (a ball its
 // point, a hinge its point and axis, a slider its axis's line and its turn, a fixed joint everything): each row's rate
@@ -27,7 +31,7 @@
 
 import { frameById, frameInWorld, groundId, massOf, poseOf, structure, treeOrder } from '../../packages/toolbox/lib/drawing.mjs';
 import { add, cross, dot, fromAxisAngle, multiply, normalize, rotate, scale, subtract } from '../../packages/toolbox/lib/math.mjs';
-import { closure, closureFrame, closureRate } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { closure, closureFrame, closureRate, impedanceAt, rowReference, softnessOf } from '../../packages/toolbox/lib/modelBuilder.mjs';
 
 export const gravity = 9.81;
 
@@ -230,7 +234,7 @@ export function jointTorque(joint, position, speed, setpoint = joint.drive?.setp
     if (drive.mode === 'torque') torque = drive.torque ?? 0;
     if (drive.mode === 'servo') torque = Math.max(-drive.torqueLimit, Math.min(drive.torqueLimit, servoRaw(drive, position, speed, setpoint)));
     if (drive.mode === 'motor') torque = motorTorque;
-    return torque - (joint.damping ?? 0) * speed - (joint.friction ?? 0) * Math.tanh(100 * speed);
+    return torque - (joint.damping ?? 0) * speed;
 }
 
 // A servo's torque before its limit: its stiffness times the setpoint left to reach, less its own damping times the
@@ -349,10 +353,14 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
     // A motor's rotor adds its inertia times the gear ratio squared.
     const rotor = (joint) => (joint.drive?.mode === 'motor' ? joint.drive.motor.rotorInertia * joint.drive.motor.gearRatio ** 2 : 0);
     const armature = bodies.flatMap((body, i) => Array(speedCount[body.kind]).fill(body.kind === 'free' ? 0 : (body.joint.armature ?? 0) + rotor(body.joint) + ((body.joint.damping ?? 0) + servoStepDamping(body, q[i], qd, inputs)) * timeStep));
+    // Each hinge's or slider's soft rows, in their regimes: the inertia each adds to its joint and the force it puts on.
+    const rows = softRows(bodies, q, qd, inputs.regimes ?? new Map(), inputs.invweight ?? [], timeStep);
+    for (const row of rows) armature[row.speed] += row.inertia;
     const matrix = zero.map((__, row) => zero.map((___, column) => columns[column][row] + (row === column ? armature[row] : 0)));
     const applied = appliedForces(bodies, q, qd, inputs);
+    for (const row of rows) applied[row.speed] += row.torque;
     const free = solve(matrix, applied.map((value, k) => value - bias[k]));
-    if (!loops.length) return free;
+    if (!loops.length) return { qdd: free, rows };
 
     // Every loop's rows: J's rows (each row's rate per unit speed of each joint), and, at the speeds, Ġ Δ and the gap,
     // and at q̈₀ the rows' accelerations.
@@ -365,7 +373,47 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
     const response = J.map((row) => solve(matrix, row));
     const K = J.map((row, i) => response.map((column) => dot3(row, column) + (i === response.indexOf(column) ? closure.compliance : 0)));
     const force = solve(K, wanted);
-    return free.map((value, k) => value + response.reduce((sum, column, row) => sum + column[k] * force[row], 0));
+    return { qdd: free.map((value, k) => value + response.reduce((sum, column, row) => sum + column[k] * force[row], 0)), rows };
+}
+
+// A hinge's or a slider's soft rows now: its dry friction (if it has one) and each limit it is past, each with the
+// inertia and force its regime puts on the joint, and how to find its next regime from the joint's acceleration.
+function softRows(bodies, q, qd, regimes, invweight, timeStep) {
+    const rows = [];
+    bodies.forEach((body, i) => {
+        if (!(body.kind === 'hinge' || body.kind === 'slider')) return;
+        const { joint } = body;
+        const speed = body.firstSpeed;
+        const v = qd[speed];
+        const soft = softnessOf(joint);
+        if (joint.friction > 0) {
+            const { B } = rowReference(soft.friction, timeStep);
+            const imp = impedanceAt(soft.friction.solimp, 0);
+            const D = imp / ((1 - imp) * invweight[speed]);
+            const regime = regimes.get(`friction:${joint.id}`) ?? 2;
+            const holding = Math.abs(regime) < 0.5;
+            rows.push({
+                key: `friction:${joint.id}`, speed, inertia: holding ? D : 0,
+                torque: holding ? -D * B * v : regime > 1.5 ? 0 : regime > 0.5 ? joint.friction : -joint.friction,
+                next: (qdd) => { const wanted = D * (-B * v - qdd); return wanted > joint.friction ? 1 : wanted < -joint.friction ? -1 : 0; }
+            });
+        }
+        if (joint.limits) {
+            const { B, K } = rowReference(soft.limit, timeStep);
+            for (const [side, sign] of [['lower', 1], ['upper', -1]]) {
+                const r = sign > 0 ? q[i][0] - joint.limits.lower - soft.margin : joint.limits.upper - q[i][0] - soft.margin;
+                const imp = impedanceAt(soft.limit.solimp, r);
+                const D = imp / ((1 - imp) * invweight[speed]);
+                const reference = -B * sign * v - K * imp * r;
+                const holding = r < 0 && (regimes.get(`${side}:${joint.id}`) ?? 1) > 0.5;
+                rows.push({
+                    key: `${side}:${joint.id}`, speed, inertia: holding ? D : 0, torque: holding ? sign * D * reference : 0,
+                    next: (qdd) => (r < 0 ? (sign * qdd - reference < 0 ? 1 : 0) : 1)
+                });
+            }
+        }
+    });
+    return rows;
 }
 
 const dot3 = (a, b) => a.reduce((sum, value, index) => sum + value * b[index], 0);
@@ -410,6 +458,16 @@ export function simulate(drawing, times, timeStep = 0.001) {
     const loops = loopsOf(drawing, bodies);
     let q = restCoordinates(bodies);
     let qd = Array(bodies.reduce((sum, body) => sum + speedCount[body.kind], 0)).fill(0);
+    // The soft rows' regimes, by row, as the step before found them; and each joint's inverse inertia where drawn.
+    const regimes = new Map();
+    const invweight = (() => {
+        const zero = Array(qd.length).fill(0);
+        const columns = zero.map((_, column) => inverseDynamics(bodies, q, zero, zero.map((__, k) => (k === column ? 1 : 0)), 0));
+        const rotor = (joint) => (joint.drive?.mode === 'motor' ? joint.drive.motor.rotorInertia * joint.drive.motor.gearRatio ** 2 : 0);
+        const armature = bodies.flatMap((body) => Array(speedCount[body.kind]).fill(body.kind === 'free' ? 0 : (body.joint.armature ?? 0) + rotor(body.joint)));
+        const M0 = zero.map((__, row) => zero.map((___, column) => columns[column][row] + (row === column ? armature[row] : 0)));
+        return zero.map((_, k) => solve(M0, zero.map((__, j) => (j === k ? 1 : 0)))[k]);
+    })();
     const out = Object.fromEntries([...bodies.filter(({ kind }) => kind !== 'fixed').map(({ joint }) => [joint.id, []]), ...bodies.map(({ id }) => [id, []])]);
     out.rotations = Object.fromEntries(bodies.map(({ id }) => [id, []]));
     out.gaps = [];
@@ -466,7 +524,8 @@ export function simulate(drawing, times, timeStep = 0.001) {
             const setpoints = Object.fromEntries(Object.entries(schedules).map(([jointId, samples]) => [jointId, lookup(samples, time)]));
             const now = motorsNow(time);
             const motorTorques = Object.fromEntries(Object.entries(now).map(([jointId, { torque }]) => [jointId, torque]));
-            const qdd = forwardDynamics(bodies, q, qd, loops, timeStep, { setpoints, motorTorques });
+            const { qdd, rows } = forwardDynamics(bodies, q, qd, loops, timeStep, { setpoints, motorTorques, regimes, invweight });
+            for (const row of rows) regimes.set(row.key, row.next(qdd[row.speed]));
             ({ q, qd } = step(bodies, q, qd, qdd, timeStep));
             for (const { joint } of motors) {
                 const { resistance, thermalResistance, thermalCapacitance, ambientTemperature } = joint.drive.motor;

@@ -316,6 +316,7 @@ export function updateJoint(drawing, id, changes) {
         joint.kind = changes.kind;
         joint.limits = null;
         joint.drive = defaultDrive(changes.kind);
+        delete joint.softness;
     }
     if (changes.name !== undefined) joint.name = String(changes.name);
     for (const field of ['damping', 'friction', 'armature']) if (changes[field] !== undefined) joint[field] = Number(changes[field]);
@@ -494,6 +495,11 @@ export function checkDrawing(drawing) {
         if (joint.limits && !(joint.limits.lower < joint.limits.upper)) errors.push({ id: joint.id, message: `${joint.name}: its lower limit must be below its upper limit.` });
         for (const field of ['damping', 'friction', 'armature']) {
             if (!(Number.isFinite(joint[field]) && joint[field] >= 0)) errors.push({ id: joint.id, message: `${joint.name}: its ${field} must be zero or more.` });
+        }
+        for (const which of ['limit', 'friction']) {
+            const soft = joint.softness?.[which];
+            if (soft?.solref && !(soft.solref.length === 2 && soft.solref.every(Number.isFinite))) errors.push({ id: joint.id, message: `${joint.name}: its ${which}'s solref is two numbers.` });
+            if (soft?.solimp && !(soft.solimp.length === 5 && soft.solimp.every(Number.isFinite) && soft.solimp[2] >= 0)) errors.push({ id: joint.id, message: `${joint.name}: its ${which}'s solimp is five numbers.` });
         }
         if (joint.kind === 'ball' && joint.drive?.mode && joint.drive.mode !== 'free') {
             const vector = joint.drive.mode === 'torque' ? joint.drive.torque : joint.drive.setpoint;

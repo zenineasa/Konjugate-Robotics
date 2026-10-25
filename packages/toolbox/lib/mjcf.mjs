@@ -167,11 +167,15 @@ export async function modelPaths(fetchText, main) {
 // - name, parent (an index into bodies, -1 for the world), local (its place in its parent, { position, quaternion },
 //   <frame>s included) and world (its place in the world with every joint at its ref);
 // - joints: each { name, kind (hinge, slide, ball or free), anchor and axis in the body's frame, range (radians or
-//   metres; a ball's most turn), damping, friction, armature, ref, stiffness, springref };
+//   metres; a ball's most turn), damping, friction, armature, ref, stiffness, springref, soft (how softly MuJoCo holds
+//   its limit and dry friction) };
 // - inertia: { mass, centre, tensor } in the body's frame, from its <inertial> or (with none, or inertiafromgeom true)
 //   its geoms; `inertiaFrom` says which ('inertial', 'geoms', 'meshes' when a mesh is among them, or 'none');
 // - geoms: the visible ones (groups 0 to 2, not fully transparent), { type, size, frame, mesh, color }, for its look.
 // `leftOut` lists, in words, what the model has that an import leaves out or takes approximately.
+const optionalNumbers = (text) => (text === undefined ? undefined : numbers(text));
+const solimpOf = (text) => (text === undefined ? undefined : [0.9, 0.95, 0.001, 0.5, 2].map((value, index) => numbers(text)[index] ?? value));
+
 export function readModel(files, main) {
     const root = resolveIncludes(main, files);
     for (const child of root.children) {
@@ -292,7 +296,14 @@ export function readModel(files, main) {
                     range: isLimited && range ? (kind === 'slide' ? range : range.map(angle)) : null,
                     damping: Number(get('damping') ?? 0), friction: Number(get('frictionloss') ?? 0), armature: Number(get('armature') ?? 0),
                     reference: kind === 'hinge' ? angle(reference) : reference,
-                    stiffness: Number(get('stiffness') ?? 0), springref: Number(get('springref') ?? 0)
+                    stiffness: Number(get('stiffness') ?? 0), springref: Number(get('springref') ?? 0),
+                    // How softly MuJoCo holds its limit and its dry friction (its solref and solimp for each, the
+                    // solimp's missing numbers MuJoCo's defaults), and its limit's margin; undefined where not given.
+                    soft: {
+                        limit: { solref: optionalNumbers(get('solreflimit')), solimp: solimpOf(get('solimplimit')) },
+                        friction: { solref: optionalNumbers(get('solreffriction')), solimp: solimpOf(get('solimpfriction')) },
+                        margin: get('margin') === undefined ? undefined : Number(get('margin'))
+                    }
                 });
             } else if (child.name === 'inertial' && entry) {
                 const frame = compose(outer, frameOf(child.attributes, placement));

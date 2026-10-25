@@ -487,6 +487,7 @@ try {
     assert.equal((await modes()).Waist, 'motor');
     const waistId = (await drawing()).joints.find(({ name }) => name === 'Waist').id;
     await page.click(`#partsTree li[data-id="${waistId}"]`);
+    assert.match(await page.textContent('#inspector'), /Its limits are held as MuJoCo holds them, softly\./);
     assert.equal(await page.inputValue('#inspector select[name="motor.catalog"]'), 'sts3215-c001');
     assert.equal(Number(await page.inputValue('#inspector input[name="motor.gearEfficiency"]')), 56.38);
     await page.fill('#inspector input[name="motor.gearEfficiency"]', '50');

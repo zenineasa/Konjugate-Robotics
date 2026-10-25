@@ -70,6 +70,12 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
         // A ball's range is its most turn, from 0.
         if (joint.limits) attributes.push('limited="true"', `range="${formatNumber(joint.kind === 'ball' ? 0 : joint.limits.lower)} ${formatNumber(joint.limits.upper)}"`);
         attributes.push(`damping="${formatNumber(joint.damping ?? 0)}"`, `frictionloss="${formatNumber(joint.friction ?? 0)}"`, `armature="${formatNumber(joint.armature ?? 0)}"`);
+        // How softly its limit and dry friction are held, where the drawing says other than MuJoCo's defaults.
+        for (const which of ['limit', 'friction']) {
+            if (joint.softness?.[which]?.solref) attributes.push(`solref${which}="${formatVector(joint.softness[which].solref)}"`);
+            if (joint.softness?.[which]?.solimp) attributes.push(`solimp${which}="${formatVector(joint.softness[which].solimp)}"`);
+        }
+        if (joint.softness?.margin) attributes.push(`margin="${formatNumber(joint.softness.margin)}"`);
         write(depth, `<joint ${attributes.join(' ')}/>`);
     };
     // A link with no mass (an imported body's joints but its last) is not a body of its own, which MuJoCo refuses: its

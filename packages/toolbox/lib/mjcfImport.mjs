@@ -270,6 +270,13 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
                 limits: null, damping: round(joint?.damping ?? 0), friction: round(joint?.friction ?? 0), armature: round(joint?.armature ?? 0),
                 drive: defaultDrive(kind)
             };
+            // How softly the model holds its limit and dry friction, where it says other than MuJoCo's defaults.
+            const softness = joint?.soft ? Object.fromEntries([
+                ...['limit', 'friction'].filter((which) => joint.soft[which].solref || joint.soft[which].solimp)
+                    .map((which) => [which, { ...(joint.soft[which].solref ? { solref: joint.soft[which].solref.map(round) } : {}), ...(joint.soft[which].solimp ? { solimp: joint.soft[which].solimp.map(round) } : {}) }]),
+                ...(joint.soft.margin !== undefined && joint.soft.margin !== 0 ? [['margin', round(joint.soft.margin)]] : [])
+            ]) : {};
+            if (Object.keys(softness).length && (kind === 'hinge' || kind === 'slider')) entry.softness = softness;
             if (joint?.range) {
                 entry.limits = kind === 'ball' ? { lower: 0, upper: round(joint.range[1]) } : { lower: round(joint.range[0] - joint.reference), upper: round(joint.range[1] - joint.reference) };
             }

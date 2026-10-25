@@ -602,6 +602,7 @@ function jointInspector(joint) {
         ${field('Damping', numberInput('damping', joint.damping, { min: 0 }), linear ? 'N·s/m' : 'N·m·s/rad')}
         ${field('Friction', numberInput('friction', joint.friction, { min: 0 }), linear ? 'N' : 'N·m')}
         ${field('Armature', numberInput('armature', joint.armature, { min: 0, title: 'The inertia of what turns with the joint inside it, such as a motor\'s rotor through its gearbox' }), linear ? 'kg' : 'kg·m²')}
+        ${joint.limits || joint.friction > 0 ? `<p class="note">Its ${joint.limits && joint.friction > 0 ? 'limits and dry friction are' : joint.limits ? 'limits are' : 'dry friction is'} held as MuJoCo holds them, softly${joint.softness ? ', as the model it came from sets them' : ''}.</p>` : ''}
         ${driveFields.join('')}` : ''}
         ${ball && !loop ? ballMotion(joint) : ''}
         <div class="buttons"><button type="button" class="tool" data-action="delete">Delete joint</button></div>`;
