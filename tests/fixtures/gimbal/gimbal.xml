@@ -1,0 +1,36 @@
+<!-- Copyright © 2026 Zenin Easa Panthakkalakath -->
+<!-- A small robot written for the import tests of bodies with more than one joint: two hinges one after the other at
+     different points (one with a ref), a hinge and a slide along one axis (a cylindrical joint), and three hinges at one
+     point (a gimbal), with servos on a hinge (a dampratio, worked out through the joints after it) and on the slide. No
+     joint reaches its range while the tests run it. -->
+<mujoco model="Gimbal test">
+  <compiler angle="degree"/>
+  <default>
+    <joint damping="0.02" armature="0.0005"/>
+  </default>
+  <worldbody>
+    <body name="Post" pos="0 0 0.3">
+      <inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+      <body name="Arm" pos="0 0 0.05" euler="0 0 30">
+        <joint name="Yaw" axis="0 0 1"/>
+        <joint name="Pitch" pos="0.02 0 0" axis="0 1 0" ref="15"/>
+        <inertial pos="0.1 0 0.01" mass="0.4" fullinertia="0.0004 0.002 0.0021 0.00001 0.00002 -0.00003"/>
+        <body name="Sleeve" pos="0.2 0 0">
+          <joint name="Twist" axis="1 0 0"/>
+          <joint name="Reach" type="slide" axis="1 0 0" range="-0.05 0.05"/>
+          <inertial pos="0.03 0.005 0" mass="0.15" diaginertia="0.0001 0.0002 0.00015"/>
+          <body name="Head" pos="0.06 0 0">
+            <joint name="Turn" axis="0 0 1"/>
+            <joint name="Nod" axis="0 1 0"/>
+            <joint name="Roll" axis="1 0 0"/>
+            <inertial pos="0.02 0.01 -0.01" mass="0.1" diaginertia="0.00005 0.00008 0.00006"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <actuator>
+    <position name="Yaw servo" joint="Yaw" kp="5" dampratio="1" forcerange="-3 3"/>
+    <position name="Reach servo" joint="Reach" kp="200" kv="5" forcerange="-20 20"/>
+  </actuator>
+</mujoco>

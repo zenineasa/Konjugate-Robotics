@@ -14,6 +14,8 @@
 //   turn, which with the loop's other joints parallel makes a planar linkage exact) for a hinge or a ball, `weld` for a
 //   fixed joint. MuJoCo has no equality for a slider, so a loop a slider closes is left open here.
 // - A solid joined to nothing on the Ground has a free joint, and falls.
+// - An imported link with no mass is not a body: its joint is the first of the body of the solid it carries, as the
+//   model it came from had it (MuJoCo refuses a moving body with no mass).
 // - A servo is a position actuator on its joint: its stiffness, and its torque limited.
 // - Contact is off: every geom has contype and conaffinity 0. Solids drawn touching at a joint would otherwise push each
 //   other apart. Contact comes with its own milestone (docs/direction.md).
@@ -55,27 +57,40 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
     const lines = [];
     const write = (depth, text) => lines.push(`${'  '.repeat(depth)}${text}`);
 
-    const body = (id, parent, depth, floating) => {
+    // A joint element in body `bodyId`'s frame, for `joint`, which carries solid `carried` (the body's own solid, or a
+    // link with no mass before it).
+    const writeJoint = (joint, carried, bodyId, depth) => {
+        if (joint.kind === 'fixed') return;
+        const anchor = frameInWorld(drawing, frameById(drawing, joint.parent));
+        const pose = poseOf(drawing, bodyId);
+        const flipped = solidOf.get(joint.child) !== carried;
+        const axis = normalize(scale(directionToLocal(pose, anchor.axis), flipped ? -1 : 1));
+        const attributes = [`name="${joint.id}"`, `type="${joint.kind === 'slider' ? 'slide' : joint.kind}"`, `pos="${formatVector(toLocal(pose, anchor.point))}"`];
+        if (joint.kind !== 'ball') attributes.push(`axis="${formatVector(axis)}"`);
+        // A ball's range is its most turn, from 0.
+        if (joint.limits) attributes.push('limited="true"', `range="${formatNumber(joint.kind === 'ball' ? 0 : joint.limits.lower)} ${formatNumber(joint.limits.upper)}"`);
+        attributes.push(`damping="${formatNumber(joint.damping ?? 0)}"`, `frictionloss="${formatNumber(joint.friction ?? 0)}"`, `armature="${formatNumber(joint.armature ?? 0)}"`);
+        write(depth, `<joint ${attributes.join(' ')}/>`);
+    };
+    // A link with no mass (an imported body's joints but its last) is not a body of its own, which MuJoCo refuses: its
+    // joint is written first in the body of the one solid it carries, as MuJoCo moves a body by its joints in turn.
+    // `before` are those joints, each with the link it carries.
+    const massless = (id) => { const solid = solidById(drawing, id); return solid.shape === 'mesh' && massOf(solid) === 0; };
+    const body = (id, parent, depth, floating, before = []) => {
         const solid = solidById(drawing, id);
+        const link = built.parentJoint.get(id);
+        if (massless(id) && link && !floating) {
+            const carried = children.get(id) ?? [];
+            if (carried.length !== 1) throw new Error(`${solid.name} has no mass and carries ${carried.length} solids; MuJoCo needs a mass for it.`);
+            if (built.loops.some((joint) => [solidOf.get(joint.parent), solidOf.get(joint.child)].includes(id))) throw new Error(`${solid.name} has no mass and a loop closes on it; MuJoCo needs a mass for it.`);
+            body(carried[0], parent, depth, false, [...before, { joint: link.joint, carried: id }]);
+            return;
+        }
         const local = relativePose(poseOf(drawing, parent), poseOf(drawing, id));
         write(depth, `<body name="${id}" pos="${formatVector(local.position)}" quat="${formatVector(local.rotation)}">`);
         if (floating) write(depth + 1, '<freejoint/>');
-        const link = built.parentJoint.get(id);
-        if (link && !floating) {
-            const { joint } = link;
-            if (joint.kind !== 'fixed') {
-                const anchor = frameInWorld(drawing, frameById(drawing, joint.parent));
-                const pose = poseOf(drawing, id);
-                const flipped = solidOf.get(joint.child) !== id;
-                const axis = normalize(scale(directionToLocal(pose, anchor.axis), flipped ? -1 : 1));
-                const attributes = [`name="${joint.id}"`, `type="${joint.kind === 'slider' ? 'slide' : joint.kind}"`, `pos="${formatVector(toLocal(pose, anchor.point))}"`];
-                if (joint.kind !== 'ball') attributes.push(`axis="${formatVector(axis)}"`);
-                // A ball's range is its most turn, from 0.
-                if (joint.limits) attributes.push('limited="true"', `range="${formatNumber(joint.kind === 'ball' ? 0 : joint.limits.lower)} ${formatNumber(joint.limits.upper)}"`);
-                attributes.push(`damping="${formatNumber(joint.damping ?? 0)}"`, `frictionloss="${formatNumber(joint.friction ?? 0)}"`, `armature="${formatNumber(joint.armature ?? 0)}"`);
-                write(depth + 1, `<joint ${attributes.join(' ')}/>`);
-            }
-        }
+        for (const step of before) writeJoint(step.joint, step.carried, id, depth + 1);
+        if (link && !floating) writeJoint(link.joint, id, id, depth + 1);
         const geometry = mjcfGeometry(solid.shape, solid.size);
         if (solid.shape === 'mesh') {
             // An imported solid: its inertia as it is, along its own (principal) axes, and the box about it to show.

@@ -18,7 +18,7 @@ import { robotByFolder, robots, storedName } from './lib/catalog.mjs';
 import { latestCommit, licenceName, modelFilesFromModel, rawUrl, repository } from './lib/menagerie.mjs';
 import { exampleDrawing, examples } from './lib/examples.mjs';
 import { History } from './lib/history.mjs';
-import { catalogMotorOf, motorById, motorCatalog, motorFromDatasheet, servosToMotors, supplyCatalog, supplyOf } from './lib/motors.mjs';
+import { batteryOfSupply, catalogMotorOf, motorById, motorCatalog, motorFromDatasheet, servosToMotors, supplyCatalog, supplyOf } from './lib/motors.mjs';
 import { simulationLimits } from './lib/modelBuilder.mjs';
 import { conjugate, fromRollPitchYaw, multiply, normalizeQuaternion, subtract, toRollPitchYaw } from './lib/math.mjs';
 import { addsToSelection, commandHeld, platformKeys } from './lib/platform.mjs';
@@ -446,7 +446,9 @@ function batteryFields(current) {
         ${field('Full', numberInput('battery.fullVoltage', battery.fullVoltage, { min: 0 }), 'V')}
         ${field('Empty', numberInput('battery.emptyVoltage', battery.emptyVoltage, { min: 0 }), 'V')}
         ${field('Capacity', numberInput('battery.capacity', Math.round((battery.capacity / 3600) * 1000) / 1000, { min: 0 }), 'Ah')}
-        <p class="note">Every motor draws from it: its voltage falls in a straight line from full to empty with its charge, a node in the canvas. A supply on the mains is full and empty at the same voltage.</p>`;
+        ${field('Internal resistance', numberInput('battery.internalResistance', battery.internalResistance, { min: 0, title: 'Its voltage sags by this times the current it gives' }), 'Ω')}
+        ${field('Most current', numberInput('battery.currentLimit', battery.currentLimit, { min: 0, title: 'It gives no more, its voltage falling as far as that takes; 0 for no limit' }), 'A')}
+        <p class="note">Every motor draws from it: its voltage falls in a straight line from full to empty with its charge, a node in the canvas, and sags under load by its internal resistance and, past its most current (0 for none), as far as it must to give no more. A supply on the mains is full and empty at the same voltage.</p>`;
 }
 
 function solidInspector(solid) {
@@ -460,7 +462,9 @@ function solidInspector(solid) {
     const shapeField = imported
         ? `<p class="note">Imported from ${solid.source?.body ? `body ${escapeHtml(solid.source.body)} of ` : ''}a model: its look is the model's, its place its centre of mass and its turn its axes of inertia.</p>`
         : field('Shape', `<select name="shape">${shapeKinds.map((kind) => `<option value="${kind}"${kind === solid.shape ? ' selected' : ''}>${shapeLabels[kind]}</option>`).join('')}</select>`);
-    const massFields = imported
+    const massFields = solid.source?.link
+        ? `<p class="note">A link with no mass of its own: body ${escapeHtml(solid.source.body)} of the model moves by several joints in turn, and this carries what comes after joint ${escapeHtml(solid.source.link)}.</p>`
+        : imported
         ? `${field('Mass', numberInput('massValue', solid.mass.value, { min: 0 }), 'kg')}
         <p class="note">Its inertia about its axes is ${solid.unitInertia.map((value) => (value * massOf(solid) * 1e4).toPrecision(3)).join(', ')} kg·cm²${inertiaFrom ? `, ${inertiaFrom}` : ''}; it grows with its mass.</p>`
         : `${field('Made of', `<select name="material">${materials.map((item) => `<option value="${item.id}"${item.id === material ? ' selected' : ''}>${escapeHtml(item.name)}</option>`).join('')}<option value="other"${material === 'other' ? ' selected' : ''}>Another density</option><option value="mass"${material === 'mass' ? ' selected' : ''}>A mass I give</option></select>`)}
@@ -512,7 +516,13 @@ function motorFieldsOf(joint, show, unit) {
         field('Thermal resistance', numberInput('motor.thermalResistance', motor.thermalResistance, { min: 0, title: 'From the winding to the air around it' }), 'K/W'),
         field('Heat capacity', numberInput('motor.thermalCapacitance', motor.thermalCapacitance, { min: 0, title: 'Of the winding' }), 'J/K'),
         field('Ambient', numberInput('motor.ambientTemperature', Math.round((motor.ambientTemperature - 273.15) * 100) / 100), '°C'),
-        field('Hottest winding', numberInput('motor.windingLimit', Math.round((motor.windingLimit - 273.15) * 100) / 100, { title: 'The hottest its winding may get (its insulation class): Size holds the run against it' }), '°C')
+        field('Hottest winding', numberInput('motor.windingLimit', Math.round((motor.windingLimit - 273.15) * 100) / 100, { title: 'The hottest its winding may get (its insulation class): Size holds the run against it' }), '°C'),
+        '<h2>Protection</h2>',
+        field('Most voltage', numberInput('motor.mostVoltage', motor.mostVoltage, { min: 0, title: 'The most it takes: the checks hold the battery against it; 0 for none given' }), 'V'),
+        field('Cut-off current', numberInput('motor.cutoffCurrent', motor.cutoffCurrent, { min: 0, title: 'Past this, for its cut-off time on end, it turns itself off; 0 for none' }), 'A'),
+        field('Cut-off duty', numberInput('motor.cutoffDuty', Math.round(motor.cutoffDuty * 1e4) / 100, { min: 0, title: 'Past this share of its full output, for its cut-off time on end, it turns itself off; 0 for none' }), '%'),
+        field('Cut-off time', numberInput('motor.cutoffTime', motor.cutoffTime, { min: 0 }), 's'),
+        '<p class="note">A smart servo turns itself off to protect itself; Size says when the run would have made it, though the run carries on as if it had not.</p>'
     ];
 }
 
@@ -614,13 +624,14 @@ function inspectorChanged(input) {
         }
         if (name === 'battery.supply') {
             const supply = supplyCatalog.find(({ id }) => id === value);
-            if (supply) change(updateBattery(current, { fullVoltage: supply.fullVoltage, emptyVoltage: supply.emptyVoltage, capacity: supply.capacity }), 'Battery');
+            if (supply) change(updateBattery(current, batteryOfSupply(supply)), 'Battery');
             else render();
             return;
         }
         if (name.startsWith('battery.')) {
             const field = name.slice(8);
-            if (!(number > 0)) { toast('This must be more than zero.'); render(); return; }
+            const zero = field === 'internalResistance' || field === 'currentLimit';
+            if (zero ? !(number >= 0) : !(number > 0)) { toast(zero ? 'This must be zero or more.' : 'This must be more than zero.'); render(); return; }
             change(updateBattery(current, { [field]: field === 'capacity' ? number * 3600 : number }), 'Battery', `battery:${field}`);
             return;
         }
@@ -712,9 +723,10 @@ function inspectorChanged(input) {
         }
         if (name.startsWith('motor.')) {
             const field = name.slice(6);
-            const amount = field === 'ambientTemperature' || field === 'windingLimit' ? number + 273.15 : field === 'gearEfficiency' ? number / 100 : number;
-            if (field === 'rotorInertia' ? amount < 0 : !(amount > 0)) { toast(field === 'rotorInertia' ? 'This must be zero or more.' : 'This must be more than zero.'); render(); return; }
-            if (field === 'gearEfficiency' && amount > 1) { toast('A gear efficiency is at most 100%.'); render(); return; }
+            const amount = field === 'ambientTemperature' || field === 'windingLimit' ? number + 273.15 : field === 'gearEfficiency' || field === 'cutoffDuty' ? number / 100 : number;
+            const zero = ['rotorInertia', 'mostVoltage', 'cutoffCurrent', 'cutoffDuty'].includes(field);
+            if (zero ? amount < 0 : !(amount > 0)) { toast(zero ? 'This must be zero or more.' : 'This must be more than zero.'); render(); return; }
+            if ((field === 'gearEfficiency' || field === 'cutoffDuty') && amount > 1) { toast('This is at most 100%.'); render(); return; }
             apply({ drive: { motor: { [field]: amount } } }, 'Motor');
             return;
         }
@@ -1177,11 +1189,17 @@ function renderSizing() {
             ${[entry, other].filter(Boolean).flatMap((summary) => summary.verdict.reasons.map((reason) => `<p class="reason ${summary.verdict.level}">${summary === other ? 'What if: ' : ''}${escapeHtml(reason[0].toUpperCase() + reason.slice(1))}.</p>`)).join('')}
         </article>`;
     };
+    const batteryRow = (label, shown, of = '') => `<tr><th>${label}</th><td>${shown(asDrawn)}</td>${changed ? `<td>${shown(changed.summary)}</td>` : ''}${of ? `<td class="muted">${of}</td>` : ''}</tr>`;
     const battery = asDrawn ? `<article class="motorCard batteryCard"><h3>Battery</h3><table>
         ${changed ? '<tr><th></th><td class="muted">As drawn</td><td class="muted">What if</td></tr>' : ''}
         <tr><th>Charge used</th><td>${figure(asDrawn.battery.chargeUsed, 3)}%</td>${changed ? `<td>${figure(changed.summary.battery.chargeUsed, 3)}%</td>` : ''}</tr>
         <tr><th>Lowest voltage</th><td>${figure(asDrawn.battery.lowestVoltage, 4)} V</td>${changed ? `<td>${figure(changed.summary.battery.lowestVoltage, 4)} V</td>` : ''}</tr>
-        </table></article>` : '';
+        ${batteryRow('Lowest at the motors', (summary) => `${figure(summary.battery.lowestAtMotors, 4)} V`)}
+        ${batteryRow('Most current', (summary) => `${figure(summary.battery.peakCurrent, 3)} A`, asDrawn.supply.currentLimit > 0 ? `of ${figure(asDrawn.supply.currentLimit, 3)} A` : '')}
+        ${asDrawn.supply.currentLimit > 0 ? batteryRow('At its most current', (summary) => `${(100 * summary.battery.atLimit).toFixed(0)}%`, 'of the run') : ''}
+        </table>
+        ${[asDrawn, changed?.summary].filter((summary) => summary?.battery.atLimit > 0).map((summary) => `<p class="reason over">${summary === asDrawn ? '' : 'What if: '}The supply gives all it can for ${(100 * summary.battery.atLimit).toFixed(0)}% of the run, its voltage at the motors falling to ${figure(summary.battery.lowestAtMotors, 3)} V.</p>`).join('')}
+        </article>` : '';
     panel.innerHTML = `<header>
             <h2>Will these motors do it?</h2>
             <button type="button" class="primary" data-sizing="run"${state.sizing.running ? ' disabled' : ''} title="Run the robot as drawn for its run time and size its motors">Run as drawn</button>

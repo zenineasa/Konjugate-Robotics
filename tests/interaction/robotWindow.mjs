@@ -479,7 +479,7 @@ try {
     const modes = async () => Object.fromEntries((await drawing()).joints.filter(({ drive }) => drive && drive.mode !== 'free').map(({ name, drive }) => [name, drive.mode]));
     assert.deepEqual(await modes(), { Waist: 'motor', Shoulder: 'motor', Elbow: 'torque', Extend: 'servo' });
     assert.match(await page.textContent('#toast'), /2 servos are Feetech STS3215 \(7\.4 V, 1:345\) now, on 5 V: each gives up to 1\.29 N·m held still, less than the most torque they had\. Extend is a slider's servo, left as it was\./);
-    assert.deepEqual((await drawing()).battery, { fullVoltage: 5, emptyVoltage: 5, capacity: 3600000 });
+    assert.deepEqual((await drawing()).battery, { fullVoltage: 5, emptyVoltage: 5, capacity: 3600000, internalResistance: 0, currentLimit: 4 });
     await page.click('#viewport', { position: { x: 10, y: 10 } });
     await page.keyboard.press(`${command}+z`);
     assert.deepEqual(await modes(), { Waist: 'servo', Shoulder: 'servo', Elbow: 'torque', Extend: 'servo' });
@@ -498,11 +498,17 @@ try {
     await page.keyboard.press('Escape');
     assert.equal(await page.inputValue('#inspector select[name="battery.supply"]'), 'mains5');
     await page.selectOption('#inspector select[name="battery.supply"]', 'lipo2s');
-    assert.deepEqual((await drawing()).battery, { fullVoltage: 8.4, emptyVoltage: 6.6, capacity: 7920 });
+    assert.deepEqual((await drawing()).battery, { fullVoltage: 8.4, emptyVoltage: 6.6, capacity: 7920, internalResistance: 0, currentLimit: 0 });
+    // A 2-cell LiPo is more than the 7.4 V the STS3215 takes: the checks say so.
+    assert.match(await page.textContent('#checksList'), /Shoulder: its motor takes up to 7\.4 V and the battery gives 8\.4 V/);
     await page.click('#viewport', { position: { x: 10, y: 10 } });
     await page.keyboard.press(`${command}+z`);
     assert.equal((await drawing()).battery.fullVoltage, 5);
     await page.keyboard.press('Escape');
+    // The supply's most current, typed: a supply of 1 A, which the arm's start asks more of.
+    await page.fill('#inspector input[name="battery.currentLimit"]', '1');
+    await page.press('#inspector input[name="battery.currentLimit"]', 'Enter');
+    assert.equal((await drawing()).battery.currentLimit, 1);
     await page.fill('#inspector input[name="runTime"]', '2');
     await page.press('#inspector input[name="runTime"]', 'Enter');
     await page.click('#sizeButton');
@@ -510,6 +516,9 @@ try {
     assert.equal(await page.locator('#sizingPanel .motorCard[data-joint]').count(), 2, 'a card for each servo made a motor');
     const stsSized = await page.evaluate(() => window.roboticsWindow.state.sizing.asDrawn.motors.find(({ name }) => name === 'Shoulder'));
     assert.ok(Math.abs(stsSized.stallTorque - (19.5 * 0.0980665 * 5) / 7.4) < 1e-9, 'on 5 V, the STS3215 gives 5 / 7.4 of its datasheet\'s stall torque');
+    const supplied = await page.evaluate(() => window.roboticsWindow.state.sizing.asDrawn.battery);
+    assert.ok(supplied.peakCurrent <= 1 + 1e-6 && supplied.lowestAtMotors < 5, `the supply gives no more than 1 A, its voltage sagging: ${JSON.stringify(supplied)}`);
+    assert.match(await page.textContent('#sizingPanel .batteryCard'), /Most current[\s\S]*of 1 A/);
     await shot('13-sts3215');
     await page.click('#sizingPanel button[data-sizing="close"]');
 

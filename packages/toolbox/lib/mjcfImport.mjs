@@ -13,6 +13,9 @@
 // - A hinge, slide or ball joint is the drawing's hinge, slider or ball, at the joint's anchor along its axis with the
 //   body where the model puts it; its range, damping, frictionloss and armature come with it. A joint's position in
 //   the drawing is counted from where the solid is drawn, which is the model's ref, so a range is moved by the ref.
+// - A body with several joints moves by each in turn, each joint's anchor and axis carried by those before it, as
+//   MuJoCo moves it: a chain of links with no mass, one after each joint but the last, each where the body is, the
+//   body's solid on the last.
 // - A body with no joint is welded to its parent (a fixed joint); a body on the world with a free joint is joined to
 //   nothing, and falls; a mocap body is fixed to the Ground.
 // - A position actuator on a joint is its servo: stiffness kp gear², setpoint its control (0, held to its control
@@ -164,6 +167,18 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
             if (looks[index]) lookParts.get(parent.solidId).push({ look: looks[index], frame: compose(parent.inBody, body.local) });
             return;
         }
+        // Links with no mass for each joint but its last, where the body is.
+        const steps = body.mocap ? [] : body.joints.filter(({ kind }) => kind !== 'free');
+        const links = steps.slice(0, -1).map((joint) => {
+            const linkId = take('s');
+            drawing.solids.push({
+                id: linkId, name: unique(`${joint.name} link`), shape: 'mesh', size: { x: 0.01, y: 0.01, z: 0.01 },
+                position: roundVector(body.world.position), rotation: roundVector(body.world.quaternion),
+                color: '#8a96a3', mass: { by: 'mass', value: 0 }, unitInertia: [0, 0, 0],
+                source: { body: body.name, link: joint.name }, look: null
+            });
+            return linkId;
+        });
         // The solid at the body's centre of mass, along its principal axes.
         const { moments, quaternion } = principal(body.inertia.tensor);
         const inBody = { position: body.inertia.centre, quaternion };
@@ -178,7 +193,7 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
         });
         // The body's frame relative to its solid's.
         const bodyInSolid = { position: rotate(conjugate(quaternion), inBody.position.map((value) => -value)), quaternion: conjugate(quaternion) };
-        solidOf.set(index, { solidId: id, inBody: { position: [0, 0, 0], quaternion: [1, 0, 0, 0] }, bodyInSolid, merged: false });
+        solidOf.set(index, { solidId: id, inBody: { position: [0, 0, 0], quaternion: [1, 0, 0, 0] }, bodyInSolid, merged: false, links });
         lookParts.set(id, looks[index] ? [{ look: looks[index], frame: { position: [0, 0, 0], quaternion: [1, 0, 0, 0] } }] : []);
         if (body.inertiaFrom === 'meshes') leftOut.push(`${body.name}'s inertia is worked out from its meshes' volumes, which may differ a little from MuJoCo's`);
         jointsOfBody.set(index, body);
@@ -186,6 +201,7 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
 
     // Each solid's look in its own frame, and its size.
     for (const solid of drawing.solids) {
+        if (solid.source?.link) continue;
         const index = [...solidOf].find(([, entry]) => entry?.solidId === solid.id && !entry.merged)[0];
         const { bodyInSolid } = solidOf.get(index);
         const position = [];
@@ -229,43 +245,42 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
     const jointOf = new Map();
     let joints = 0;
     for (const [index, body] of jointsOfBody) {
-        const solidId = solidOf.get(index).solidId;
+        const { solidId, links } = solidOf.get(index);
         const solid = drawing.solids.find((candidate) => candidate.id === solidId);
-        const parent = parentSolid(body);
-        const moving = body.joints.filter(({ kind }) => kind !== 'free');
         const free = body.joints.some(({ kind }) => kind === 'free');
         if (free) {
             if (body.parent >= 0) throw new Error(`Body ${body.name} has a free joint but is not on the world, which MuJoCo refuses too.`);
             continue;
         }
-        let kind = 'fixed';
-        let joint = null;
-        if (moving.length && !body.mocap) {
-            joint = moving[0];
-            kind = joint.kind === 'slide' ? 'slider' : joint.kind;
-        }
         if (body.mocap) leftOut.push(`${body.name} is moved by MuJoCo's mocap; here it is fixed to the Ground`);
-        const anchorWorld = joint ? compose(body.world, { position: joint.anchor, quaternion: [1, 0, 0, 0] }).position : solid.position;
-        const axisWorld = joint && joint.kind !== 'ball' ? rotate(body.world.quaternion, joint.axis) : [0, 0, 1];
-        const parentFrame = addFrame(parent, anchorWorld, axisWorld);
-        const childFrame = addFrame(solidId, anchorWorld, axisWorld.map((value) => -value));
-        const id = take('j');
-        const jointName = unique(joint?.name ?? `${solid.name} weld`);
-        const entry = {
-            id, name: jointName, kind, parent: parentFrame, child: childFrame,
-            limits: null, damping: round(joint?.damping ?? 0), friction: round(joint?.friction ?? 0), armature: round(joint?.armature ?? 0),
-            drive: defaultDrive(kind)
-        };
-        if (joint?.range) {
-            entry.limits = kind === 'ball' ? { lower: 0, upper: round(joint.range[1]) } : { lower: round(joint.range[0] - joint.reference), upper: round(joint.range[1] - joint.reference) };
+        const steps = body.mocap ? [] : body.joints;
+        // The solids each joint joins: the parent's, the links in turn, the body's.
+        const chain = [parentSolid(body), ...links, solidId];
+        for (let at = 0; at < Math.max(steps.length, 1); at += 1) {
+            const joint = steps[at] ?? null;
+            const kind = joint ? (joint.kind === 'slide' ? 'slider' : joint.kind) : 'fixed';
+            const anchorWorld = joint ? compose(body.world, { position: joint.anchor, quaternion: [1, 0, 0, 0] }).position : solid.position;
+            const axisWorld = joint && joint.kind !== 'ball' ? rotate(body.world.quaternion, joint.axis) : [0, 0, 1];
+            const parentFrame = addFrame(chain[at], anchorWorld, axisWorld);
+            const childFrame = addFrame(chain[at + 1], anchorWorld, axisWorld.map((value) => -value));
+            const id = take('j');
+            const jointName = unique(joint?.name ?? `${solid.name} weld`);
+            const entry = {
+                id, name: jointName, kind, parent: parentFrame, child: childFrame,
+                limits: null, damping: round(joint?.damping ?? 0), friction: round(joint?.friction ?? 0), armature: round(joint?.armature ?? 0),
+                drive: defaultDrive(kind)
+            };
+            if (joint?.range) {
+                entry.limits = kind === 'ball' ? { lower: 0, upper: round(joint.range[1]) } : { lower: round(joint.range[0] - joint.reference), upper: round(joint.range[1] - joint.reference) };
+            }
+            if (joint?.range && kind !== 'ball' && !(joint.range[0] <= joint.reference && joint.reference <= joint.range[1])) {
+                leftOut.push(`joint ${joint.name} is drawn outside its range (the model's reference pose is), so its limit pushes it back from the start, which MuJoCo does a little differently`);
+            }
+            if (joint && joint.reference) leftOut.push(`joint ${joint.name}'s ref: its position here is counted from ${round(joint.reference)} ${kind === 'slider' ? 'm' : 'rad'}, where the model puts its body`);
+            drawing.joints.push(entry);
+            if (joint) jointOf.set(joint.name, { entry, joint });
+            joints += 1;
         }
-        if (joint?.range && kind !== 'ball' && !(joint.range[0] <= joint.reference && joint.reference <= joint.range[1])) {
-            leftOut.push(`joint ${joint.name} is drawn outside its range (the model's reference pose is), so its limit pushes it back from the start, which MuJoCo does a little differently`);
-        }
-        if (joint && joint.reference) leftOut.push(`joint ${joint.name}'s ref: its position here is counted from ${round(joint.reference)} ${kind === 'slider' ? 'm' : 'rad'}, where the model puts its body`);
-        drawing.joints.push(entry);
-        if (joint) jointOf.set(joint.name, { entry, joint });
-        joints += 1;
     }
 
     // Actuators: each joint's first that the drawing can take, as its drive.

@@ -15,7 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { exampleDrawing, examples } from '../../packages/toolbox/lib/examples.mjs';
-import { addFrameAt, addJoint, addKeyframe, addSolid, createDrawing, massOf, reverseJoint, structure, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
+import { addFrameAt, addJoint, addKeyframe, addSolid, createDrawing, massOf, reverseJoint, structure, updateBattery, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
 import { between, fromAxisAngle, scale } from '../../packages/toolbox/lib/math.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
 import { buildModel } from '../../packages/toolbox/lib/modelBuilder.mjs';
@@ -397,31 +397,53 @@ test('a joint on a motor follows its keyframes, drawing current from the battery
 
 // The two-link arm's servos made Feetech STS3215s on the SO-ARM100 kit's 5 V supply (lib/motors.mjs), keyframed
 // from rest to a pose: the gears passing on part of the motor's torque, a supply that does not sag.
-test('servos made catalog motors run as the reference runs them, their gears passing on part of the torque, on a supply that does not sag', async () => {
+test('servos made catalog motors run as the reference runs them, their gears passing on part of the torque, on a supply held to its most current', async () => {
     let drawing = exampleDrawing('twoLinkArm');
     const id = (name) => jointNamed(drawing, name).id;
     drawing = addKeyframe(drawing, { time: 0, setpoints: { [id('Waist')]: 0, [id('Shoulder')]: 0, [id('Elbow')]: 0 } }).drawing;
     drawing = addKeyframe(drawing, { time: 1, setpoints: { [id('Waist')]: 0.5, [id('Shoulder')]: 0.3, [id('Elbow')]: 0.6 } }).drawing;
     const done = servosToMotors(drawing, 'sts3215-c001', 'mains5');
-    drawing = done.drawing;
+    // A supply of 0.8 A, less than the kit's, so the arm's start asks more of it than it gives.
+    drawing = updateBattery(done.drawing, { currentLimit: 0.8 });
     assert.deepEqual(done.turned.map(({ name }) => name), ['Waist', 'Shoulder', 'Elbow']);
     assert.ok(drawing.joints.every((joint) => joint.drive.mode !== 'servo'));
     assert.ok(drawing.joints.find(({ name }) => name === 'Shoulder').drive.motor.gearEfficiency < 1);
     const { run, reference } = await matchesReference('stsArm', drawing, { Waist: 'Turret', Shoulder: 'Upper arm', Elbow: 'Forearm' }, 2);
     for (const name of ['Waist', 'Shoulder', 'Elbow']) {
         const motor = reference.motors[jointNamed(drawing, name).id];
-        for (const [state, key] of [['current', 'current'], ['torque', 'torque'], ['windingTemperature', 'temperature']]) {
+        for (const [state, key] of [['current', 'current'], ['torque', 'torque'], ['supplyVoltage', 'voltage'], ['windingTemperature', 'temperature']]) {
             const difference = largestDifference(run.series(`${name} motor.${state}`), motor[key]);
             assert.ok(difference < 1e-9, `${name}'s motor's ${state} differs from the reference by ${difference}.`);
         }
     }
-    // The mains do not run down: the supply stays at 5 V.
+    // The mains do not run down: the supply stays at 5 V. Starting off, the three motors would draw more than its 0.8 A,
+    // so it gives 0.8 A and its voltage at the motors sags; it never gives more.
     assert.ok(Math.max(...run.series('Battery.voltage').map((volts) => Math.abs(volts - 5))) < 1e-9, 'The supply should stay at 5 V.');
+    const given = run.times.map((_, index) => ['Waist', 'Shoulder', 'Elbow'].reduce((sum, name) => sum + run.series(`${name} motor.duty`)[index] * run.series(`${name} motor.current`)[index], 0));
+    assert.ok(Math.max(...given) <= 0.8 + 1e-9, `The supply should give no more than 0.8 A, not ${Math.max(...given)}.`);
+    assert.ok(Math.max(...given) > 0.8 - 1e-9 && Math.min(...run.series('Shoulder motor.supplyVoltage')) < 4.9, `The supply should reach its most current and sag: it gives up to ${Math.max(...given)} A, down to ${Math.min(...run.series('Shoulder motor.supplyVoltage'))} V.`);
     // Held still at the end, a motor gives no more than its stall torque on 5 V: 5 / 7.4 of the datasheet's.
     const stall = (motorById('sts3215-c001').stallTorque * 5) / 7.4;
     assert.ok(Math.max(...run.series('Shoulder motor.torque').map(Math.abs)) <= stall + 1e-9, 'The shoulder should give no more than its stall torque.');
     const end = run.times.length - 1;
     assert.ok(Math.abs(run.series('Upper arm.jointAngle')[end] - 0.3) < 0.02 && Math.abs(run.series('Forearm.jointAngle')[end] - 0.6) < 0.02, 'The servos made motors should reach their keyframes.');
+});
+
+// The pick-and-place arm on a battery with an internal resistance: its voltage at the motors sags as they draw, as the
+// reference has it.
+test('a battery with an internal resistance sags under its motors\' load, as the reference has it', async () => {
+    const drawing = updateBattery(exampleDrawing('pickAndPlace'), { internalResistance: 0.5 });
+    const carried = { Waist: 'Turret', Shoulder: 'Upper arm', Elbow: 'Forearm', Wrist: 'Hand', 'Left finger slide': 'Left finger', 'Right finger slide': 'Right finger' };
+    const { run, reference } = await matchesReference('saggingBattery', drawing, carried, 3);
+    for (const name of ['Waist', 'Shoulder', 'Elbow', 'Wrist']) {
+        const motor = reference.motors[jointNamed(drawing, name).id];
+        for (const [state, key] of [['current', 'current'], ['supplyVoltage', 'voltage']]) {
+            const difference = largestDifference(run.series(`${name} motor.${state}`), motor[key]);
+            assert.ok(difference < 1e-9, `${name}'s motor's ${state} differs from the reference by ${difference}.`);
+        }
+    }
+    const sag = Math.max(...run.times.map((_, index) => run.series('Battery.voltage')[index] - run.series('Shoulder motor.supplyVoltage')[index]));
+    assert.ok(sag > 0.01, `The voltage at the motors should sag below the battery's own, by up to ${sag} V.`);
 });
 
 test('a pick-and-place cycle on motors runs as the reference runs it: the arm turns to each keyframe, the motors heat and the battery drains', async () => {

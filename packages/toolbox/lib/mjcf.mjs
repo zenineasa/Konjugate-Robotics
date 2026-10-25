@@ -236,7 +236,7 @@ export function readModel(files, main) {
     };
 
     const bodies = [];
-    const counts = { worldGeoms: 0, extraJoints: [], springs: [], gravcomp: [] };
+    const counts = { worldGeoms: 0, springs: [], gravcomp: [] };
     // A geom's frame and sizes, fromto read as MuJoCo reads it.
     const geomFrame = (type, get, outer) => {
         let size = numbers(get('size') ?? '0 0 0');
@@ -353,7 +353,6 @@ export function readModel(files, main) {
         else if (body.explicit) { body.inertia = body.explicit; body.inertiaFrom = 'inertial'; }
         delete body.explicit;
         delete body.inertialGeoms;
-        if (body.joints.filter(({ kind }) => kind !== 'free').length > 1) counts.extraJoints.push(body.name);
         for (const joint of body.joints) if (joint.stiffness) counts.springs.push(joint.name);
     }
 
@@ -417,7 +416,6 @@ export function readModel(files, main) {
         leftOut.push(name ? `the ${equality.name} constraint ${name}` : `the ${equality.name} constraint on ${between.join(' and ') || 'the model'}`);
     }
     if (children('contact').length) leftOut.push('the contact pairs and exclusions: nothing touches anything yet');
-    for (const name of counts.extraJoints) leftOut.push(`${name}'s joints after its first: a body takes one joint in the drawing`);
     for (const name of counts.springs) leftOut.push(`joint ${name}'s spring (its stiffness): the drawing's joints have none yet`);
     for (const name of counts.gravcomp) leftOut.push(`${name}'s gravity compensation`);
     if (gravity.some((value, axis) => Math.abs(value - [0, 0, -9.81][axis]) > 1e-9)) leftOut.push(`the model's gravity (${gravity.join(' ')}): a drawing has 9.81 m/s² downward`);

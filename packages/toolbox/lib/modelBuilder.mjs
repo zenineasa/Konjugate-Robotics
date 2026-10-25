@@ -1092,6 +1092,17 @@ function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symb
     const voltage = addState(store, 'voltage', battery.fullVoltage, 'V');
     addState(store, 'stateOfCharge', 100, '%');
     sourceTerm(store, voltage, E.add('empty', E.multiply(E.subtract('full', 'empty'), 0.01, 'stateOfCharge')), [linked(full, 'full'), linked(empty, 'empty')], true);
+    // A supply with an internal resistance or a most current sags under load. The motors' currents are each linear in
+    // the voltage at their terminals V (a motor at duty d with back-EMF e draws d (d V - e) / R from it), so the supply
+    // gives G V - J, G the sum of d² / R and J the sum of d e / R over the motors, each motor's load relationship adding
+    // its share to the battery's `loadConductance` and `loadCurrent` (values several relationships set add up, as currents
+    // at a junction). Through an internal resistance Rs: V = (open voltage + Rs J) / (1 + Rs G). Held to a most current
+    // I: when G V - J would be more, V = (I + J) / G. Each supply relationship works V out for its motor.
+    const sags = battery.internalResistance > 0 || battery.currentLimit > 0;
+    if (sags) {
+        addState(store, 'loadConductance', 0, 'S');
+        addState(store, 'loadCurrent', 0, 'A');
+    }
     document.nodes.push(store);
 
     for (const [solidId, joint] of motorDriven) {
@@ -1100,7 +1111,7 @@ function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symb
         const { motor } = drive;
         const linear = joint.kind === 'slider';
         const motorNode = nodeOf(`${joint.name} motor`, 'robotMotor', [solidNode.position[0] + 2.5, solidNode.position[1] - 1.8, 0], '#397b86', 'cylinder');
-        for (const [symbol, initial, unit] of [['supplyVoltage', battery.fullVoltage, 'V'], ['duty', 0, ''], ['current', 0, 'A'], ['torque', 0, linear ? 'N' : 'N·m'], ['windingTemperature', motor.ambientTemperature, 'K']]) {
+        for (const [symbol, initial, unit] of [['supplyVoltage', battery.fullVoltage, 'V'], ['duty', 0, ''], ['current', 0, 'A'], ['torque', 0, linear ? 'N' : 'N·m'], ['windingTemperature', motor.ambientTemperature, 'K'], ...(sags ? [['backEmf', 0, 'V']] : [])]) {
             addState(motorNode, symbol, initial, unit);
         }
         const resistance = share(`${joint.name} winding resistance`, motor.resistance, 'Ω');
@@ -1117,9 +1128,21 @@ function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symb
             ], false);
         document.nodes.push(motorNode);
 
-        // Supply: the battery's voltage, on the motor.
-        document.edges.push(algebraicEdge(`${joint.name} supply`, store, motorNode, id, [], (bind, output) => {
-            output(motorNode, 'target', 'supplyVoltage', bind(store, 'source', 'voltage', 'p'));
+        // Supply: the battery's voltage, on the motor, less what it sags under every motor's load.
+        const supplyParameters = sags ? [
+            { id: id(), name: 'Internal resistance', symbol: 'internalResistance', value: round(battery.internalResistance), unit: 'Ω', mode: 'constant' },
+            ...(battery.currentLimit > 0 ? [{ id: id(), name: 'Most current', symbol: 'currentLimit', value: round(battery.currentLimit), unit: 'A', mode: 'constant' }] : [])
+        ] : [];
+        document.edges.push(algebraicEdge(`${joint.name} supply`, store, motorNode, id, supplyParameters, (bind, output, define) => {
+            const open = bind(store, 'source', 'voltage', 'p');
+            if (!sags) { output(motorNode, 'target', 'supplyVoltage', open); return; }
+            const conductance = bind(store, 'source', 'loadConductance', 'p');
+            const load = bind(store, 'source', 'loadCurrent', 'p');
+            const throughResistance = define('throughResistance', E.divide(E.add(open, E.multiply('internalResistance', load)), E.add(1, E.multiply('internalResistance', conductance))));
+            const limited = battery.currentLimit > 0
+                ? E.cases([[E.greater(E.subtract(E.multiply(conductance, throughResistance), load), 'currentLimit'), E.divide(E.add('currentLimit', load), conductance)]], throughResistance)
+                : throughResistance;
+            output(motorNode, 'target', 'supplyVoltage', limited);
         }));
         // Controller: the duty cycle, from the setpoint left to reach and the joint's speed.
         const travel = joint.limits ?? (joint.kind === 'hinge' ? { lower: -Math.PI, upper: Math.PI } : { lower: -0.5, upper: 0.5 });
@@ -1130,14 +1153,26 @@ function motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symb
                 control: scheduled?.control ?? { minimum: round(travel.lower), maximum: round(travel.upper), step: round((travel.upper - travel.lower) / 400) },
                 ...(scheduled ? { sharedParameterId: scheduled.id } : {}) },
             { id: id(), name: 'Proportional gain', symbol: 'proportional', value: round(drive.proportional), unit: linear ? '1/m' : '1/rad', mode: 'constant' },
-            { id: id(), name: 'Derivative gain', symbol: 'derivative', value: round(drive.derivative), unit: linear ? 's/m' : 's/rad', mode: 'constant' }
+            { id: id(), name: 'Derivative gain', symbol: 'derivative', value: round(drive.derivative), unit: linear ? 's/m' : 's/rad', mode: 'constant' },
+            ...(sags ? [{ id: id(), ...linked(torqueConstant, 'torqueConstant') }, { id: id(), ...linked(gearRatio, 'gearRatio') }] : [])
         ];
         const position = linear ? 'jointPosition' : 'jointAngle';
         document.edges.push(algebraicEdge(`${joint.name} controller`, solidNode, motorNode, id, controllerParameters, (bind, output) => {
             const q = bind(solidNode, 'source', position, 'p');
             const qd = bind(solidNode, 'source', 'jointSpeed', 'p');
             output(motorNode, 'target', 'duty', E.max(-1, E.min(1, E.subtract(E.multiply('proportional', E.subtract('setpoint', q)), E.multiply('derivative', qd)))));
+            if (sags) output(motorNode, 'target', 'backEmf', E.multiply('torqueConstant', 'gearRatio', qd));
         }));
+        if (sags) {
+            // Load: the motor's share of what the supply gives, from its duty and back-EMF.
+            const loadParameters = [{ id: id(), ...linked(resistance, 'resistance') }];
+            document.edges.push(algebraicEdge(`${joint.name} load`, motorNode, store, id, loadParameters, (bind, output) => {
+                const duty = bind(motorNode, 'source', 'duty', 'p');
+                const backEmf = bind(motorNode, 'source', 'backEmf', 'p');
+                output(store, 'target', 'loadConductance', E.divide(E.multiply(duty, duty), 'resistance'));
+                output(store, 'target', 'loadCurrent', E.divide(E.multiply(duty, backEmf), 'resistance'));
+            }));
+        }
         // Windings: the current, and the torque it makes at the joint.
         const windingParameters = [
             { id: id(), ...linked(resistance, 'resistance') },

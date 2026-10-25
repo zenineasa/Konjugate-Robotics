@@ -203,3 +203,28 @@ test('the importer takes a model\'s files, keeps their looks for the project, an
     // Nothing to import, or two models with neither named, is said so.
     assert.match((await importDrawing({ files: [], options: { step: 'model' } })).report.errors[0], /Choose a robot's model first/);
 });
+
+test('a body with several joints is a chain of links with no mass, built and written back as one body', async () => {
+    const { writeMjcf } = await import('../../packages/toolbox/lib/mjcfWriter.mjs');
+    const { buildModel } = await import('../../packages/toolbox/lib/modelBuilder.mjs');
+    const gimbal = readModel({ 'gimbal.xml': await readFile(join(roboticsRoot, 'tests', 'fixtures', 'gimbal', 'gimbal.xml'), 'utf8') }, 'gimbal.xml');
+    assert.ok(!gimbal.leftOut.some((line) => /joints after its first/.test(line)), 'every joint comes in');
+    const { drawing, report } = importModel(gimbal, gimbal.bodies.map((body) => bodyLook(gimbal, body)), { name: 'Gimbal' });
+    assert.equal(report.joints, 8);
+    const head = drawing.solids.find(({ name }) => name === 'Head');
+    const links = drawing.solids.filter(({ source }) => source?.link);
+    assert.deepEqual(links.map(({ name, source }) => [name, source.body]), [['Yaw link', 'Arm'], ['Twist link', 'Sleeve'], ['Turn link', 'Head'], ['Nod link', 'Head']]);
+    // Each link is where its body is, so the joints after it are drawn where the model has them.
+    const headBody = gimbal.bodies.find(({ name }) => name === 'Head');
+    for (const link of links.filter(({ source }) => source.body === 'Head')) assert.deepEqual(poseOf(drawing, link.id).position, headBody.world.position.map((value) => Math.round(value * 1e12) / 1e12 + 0));
+    assert.equal(massOf(head), 0.1);
+    assert.deepEqual(checkDrawing(drawing).errors, []);
+    assert.ok(buildModel(drawing, { timeStep: 0.001, runTime: 1 }).document.nodes.some(({ name }) => name === 'Nod link'));
+    // Written back, Head's body holds its three joints in the model's order, and no link is a body.
+    const mjcf = writeMjcf(drawing);
+    const headXml = mjcf.slice(mjcf.indexOf(`<body name="${head.id}"`));
+    const names = ['Turn', 'Nod', 'Roll'].map((name) => drawing.joints.find((joint) => joint.name === name).id);
+    const at = names.map((id) => headXml.indexOf(`<joint name="${id}"`));
+    assert.ok(at.every((index) => index > 0 && index < headXml.indexOf('</body>')) && at[0] < at[1] && at[1] < at[2], 'Head holds Turn, Nod and Roll in turn');
+    for (const link of links) assert.ok(!mjcf.includes(`<body name="${link.id}"`));
+});

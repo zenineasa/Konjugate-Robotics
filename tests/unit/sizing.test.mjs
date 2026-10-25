@@ -5,10 +5,10 @@
 
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { batteryOf, checkDrawing, defaultMotor, massOf, updateJoint } from '../../packages/toolbox/lib/drawing.mjs';
+import { batteryOf, checkDrawing, defaultMotor, massOf, updateBattery, updateJoint } from '../../packages/toolbox/lib/drawing.mjs';
 import { exampleDrawing } from '../../packages/toolbox/lib/examples.mjs';
 import { buildModel } from '../../packages/toolbox/lib/modelBuilder.mjs';
-import { envelope, motorsOf, summarize, verdictOf, whatIf } from '../../packages/toolbox/lib/sizing.mjs';
+import { envelope, motorsOf, stretch, summarize, verdictOf, whatIf } from '../../packages/toolbox/lib/sizing.mjs';
 
 const close = (actual, expected, tolerance = 1e-12) => assert.ok(Math.abs(actual - expected) <= tolerance * Math.max(1, Math.abs(expected)), `${actual} is not ${expected}`);
 
@@ -71,6 +71,35 @@ test('a run summed up motor by motor: its operating points, how hard and how hot
     close(battery.chargeUsed, 1.8);
     close(battery.lowestVoltage, 12.54);
     assert.deepEqual(supply, batteryOf(drawing));
+});
+
+test('a servo\'s protection: past its cut-off current or duty for its time on end it would turn itself off, half that is close', () => {
+    assert.deepEqual(stretch([[0, 0], [1, 3], [2, 3], [3, 3], [4, 0]], (value) => value > 2, 2), { longest: 2, at: 3, time: 2 });
+    assert.deepEqual(stretch([[0, 3], [1, 0], [2, 3], [3, 0]], (value) => value > 2, 2), { longest: 0, at: null, time: 2 });
+    let drawing = exampleDrawing('pickAndPlace');
+    const shoulder = drawing.joints.find(({ name }) => name === 'Shoulder');
+    drawing = updateJoint(drawing, shoulder.id, { drive: { motor: { cutoffCurrent: 2, cutoffDuty: 0.8, cutoffTime: 2 } } });
+    const run = syntheticRun(drawing);
+    run.series['Shoulder motor'].current = [[0, 0.5], [1, 3], [2, 3.2], [3, 3], [4, 0.4]];
+    const sized = summarize(run, drawing).motors.find(({ name }) => name === 'Shoulder');
+    assert.deepEqual(sized.cutoffs, [{ kind: 'current', limit: 2, longest: 2, at: 3, time: 2 }, { kind: 'duty', limit: 0.8, longest: 1, at: null, time: 2 }]);
+    assert.ok(sized.verdict.reasons.includes('it would turn itself off at 3.00 s, past 2 A for 2 s on end (the run carries on as if it had not)'));
+    assert.ok(sized.verdict.reasons.includes('it is past 80% of its output for 1.00 s on end, of the 2 s that would turn it off'));
+    const motor = defaultMotor('hinge');
+    assert.equal(verdictOf({ motor, hottest: 300, atFullDuty: 0, cutoffs: [{ kind: 'duty', limit: 0.8, longest: 1.2, at: null, time: 2 }] }).level, 'close');
+    assert.equal(verdictOf({ motor, hottest: 300, atFullDuty: 0, cutoffs: [{ kind: 'duty', limit: 0.8, longest: 0.5, at: null, time: 2 }] }).level, 'ok');
+});
+
+test('what the supply gave: the most current, the share of the run at its most, and the lowest voltage at the motors', () => {
+    const drawing = updateBattery(exampleDrawing('pickAndPlace'), { currentLimit: 3.2 });
+    const run = syntheticRun(drawing);
+    for (const { node } of motorsOf(drawing)) run.series[node].supplyVoltage = [[0, 12.6], [1, 12.4], [2, 12.1], [3, 12.5], [4, 12.5]];
+    const { battery, supply } = summarize(run, drawing);
+    // At 2 s the shoulder gives all its duty: 1 × 3.2 A, and the others nothing; at 1 s 3 A and 4 × 0.1 × 0.05 (three).
+    close(battery.peakCurrent, 3.2);
+    close(battery.atLimit, 0.25);
+    close(battery.lowestAtMotors, 12.1);
+    assert.equal(supply.currentLimit, 3.2);
 });
 
 test('a verdict: warm or now and then at full duty is close; past its limit or at full duty for much of the run is over', () => {

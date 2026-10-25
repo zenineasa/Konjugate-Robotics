@@ -418,7 +418,7 @@ export function simulate(drawing, times, timeStep = 0.001) {
     const battery = { fullVoltage: 12.6, emptyVoltage: 9.9, capacity: 7920, ...(drawing.battery ?? {}) };
     let charge = 100;
     const temperatures = Object.fromEntries(motors.map(({ joint }) => [joint.id, joint.drive.motor.ambientTemperature]));
-    out.motors = Object.fromEntries(motors.map(({ joint }) => [joint.id, { duty: [], current: [], torque: [], temperature: [] }]));
+    out.motors = Object.fromEntries(motors.map(({ joint }) => [joint.id, { duty: [], current: [], torque: [], voltage: [], temperature: [] }]));
     out.charge = [];
     // Each keyframed joint's setpoint at a time: in straight lines between its keyframes, the nearest one's beyond them.
     const keyframes = [...(drawing.keyframes ?? [])].sort((a, b) => a.time - b.time);
@@ -433,18 +433,33 @@ export function simulate(drawing, times, timeStep = 0.001) {
         return v0 + (v1 - v0) * (at - t0) / (t1 - t0);
     };
     // The motors' duty, current and torque now, from the joints' positions and speeds and the battery's voltage.
-    const motorsNow = (at) => Object.fromEntries(motors.map((body) => {
-        const { joint } = body;
-        const index = bodies.indexOf(body);
-        const position = q[index][0];
-        const speed = qd[body.firstSpeed];
-        const setpoint = schedules[joint.id] ? lookup(schedules[joint.id], at) : joint.drive.setpoint ?? 0;
-        const { resistance, torqueConstant, gearRatio, gearEfficiency = 1 } = joint.drive.motor;
-        const duty = Math.max(-1, Math.min(1, joint.drive.proportional * (setpoint - position) - joint.drive.derivative * speed));
-        const voltage = battery.emptyVoltage + (battery.fullVoltage - battery.emptyVoltage) * charge / 100;
-        const current = (duty * voltage - torqueConstant * gearRatio * speed) / resistance;
-        return [joint.id, { duty, current, torque: gearEfficiency * gearRatio * torqueConstant * current }];
-    }));
+    // The supply sags under load: through its internal resistance, and held to its most current (each motor's current
+    // linear in the voltage at its terminals, the supply giving G V - J; see lib/modelBuilder.mjs).
+    const motorsNow = (at) => {
+        const each = motors.map((body) => {
+            const { joint } = body;
+            const index = bodies.indexOf(body);
+            const position = q[index][0];
+            const speed = qd[body.firstSpeed];
+            const setpoint = schedules[joint.id] ? lookup(schedules[joint.id], at) : joint.drive.setpoint ?? 0;
+            const duty = Math.max(-1, Math.min(1, joint.drive.proportional * (setpoint - position) - joint.drive.derivative * speed));
+            return { joint, duty, backEmf: joint.drive.motor.torqueConstant * joint.drive.motor.gearRatio * speed };
+        });
+        const open = battery.emptyVoltage + (battery.fullVoltage - battery.emptyVoltage) * charge / 100;
+        const { internalResistance = 0, currentLimit = 0 } = battery;
+        let voltage = open;
+        if (internalResistance > 0 || currentLimit > 0) {
+            const G = each.reduce((sum, { joint, duty }) => sum + duty * duty / joint.drive.motor.resistance, 0);
+            const J = each.reduce((sum, { joint, duty, backEmf }) => sum + duty * backEmf / joint.drive.motor.resistance, 0);
+            voltage = (open + internalResistance * J) / (1 + internalResistance * G);
+            if (currentLimit > 0 && G * voltage - J > currentLimit) voltage = (currentLimit + J) / G;
+        }
+        return Object.fromEntries(each.map(({ joint, duty, backEmf }) => {
+            const { resistance, torqueConstant, gearRatio, gearEfficiency = 1 } = joint.drive.motor;
+            const current = (duty * voltage - backEmf) / resistance;
+            return [joint.id, { duty, current, voltage, torque: gearEfficiency * gearRatio * torqueConstant * current }];
+        }));
+    };
     let time = 0;
     for (const target of times) {
         while (time < target - timeStep / 2) {
@@ -463,7 +478,7 @@ export function simulate(drawing, times, timeStep = 0.001) {
         }
         const now = motorsNow(time);
         for (const { joint } of motors) {
-            for (const key of ['duty', 'current', 'torque']) out.motors[joint.id][key].push(now[joint.id][key]);
+            for (const key of ['duty', 'current', 'torque', 'voltage']) out.motors[joint.id][key].push(now[joint.id][key]);
             out.motors[joint.id].temperature.push(temperatures[joint.id]);
         }
         out.charge.push(charge);

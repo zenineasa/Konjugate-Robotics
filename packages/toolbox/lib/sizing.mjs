@@ -75,32 +75,72 @@ export function summarize(branch, drawing) {
         const atFullDuty = total ? duties.reduce((sum, [, duty], index) => (Math.abs(duty ?? 0) >= fullDuty ? sum + weights[index] : sum), 0) / total : 0;
         const peak = (points) => points.reduce((largest, [, value]) => Math.max(largest, Math.abs(value ?? 0)), 0);
         const hottest = temperatures.length ? Math.max(...temperatures.map(([, value]) => value ?? -Infinity)) : entry.motor.ambientTemperature;
+        const { cutoffCurrent, cutoffDuty, cutoffTime } = entry.motor;
+        const cutoffs = [
+            ...(cutoffCurrent > 0 ? [{ kind: 'current', limit: cutoffCurrent, ...stretch(currents, (value) => Math.abs(value) > cutoffCurrent, cutoffTime) }] : []),
+            ...(cutoffDuty > 0 ? [{ kind: 'duty', limit: cutoffDuty, ...stretch(duties, (value) => Math.abs(value) > cutoffDuty, cutoffTime) }] : [])
+        ];
         const full = envelope(entry.motor, battery.fullVoltage);
         const empty = envelope(entry.motor, battery.emptyVoltage);
         const summary = {
             ...entry,
             points: torques.map(([time, torque], index) => [speeds[index]?.[1] ?? 0, torque ?? 0, time]),
-            peakTorque: peak(torques), peakSpeed: peak(speeds), peakCurrent: peak(currents), atFullDuty, hottest,
+            peakTorque: peak(torques), peakSpeed: peak(speeds), peakCurrent: peak(currents), atFullDuty, hottest, cutoffs,
             stallTorque: full.stallTorque, noLoadSpeed: full.noLoadSpeed, emptyStallTorque: empty.stallTorque
         };
         return { ...summary, verdict: verdictOf(summary) };
     });
     const charge = seriesOf(branch, 'Battery', 'stateOfCharge');
     const voltages = seriesOf(branch, 'Battery', 'voltage');
+    // What the supply gave: the sum of each motor's duty times its current, at each time the motors' runs share; and
+    // the voltage at the motors, which sags below the battery's own under load.
+    const drawn = new Map();
+    for (const entry of motors) {
+        const currents = seriesOf(branch, entry.node, 'current');
+        seriesOf(branch, entry.node, 'duty').forEach(([time, duty], index) => drawn.set(time, (drawn.get(time) ?? 0) + (duty ?? 0) * (currents[index]?.[1] ?? 0)));
+    }
+    const atMotors = motors.flatMap((entry) => seriesOf(branch, entry.node, 'supplyVoltage').map(([, value]) => value));
+    const given = [...drawn].sort(([a], [b]) => a - b);
+    const weights = spans(given);
+    const total = weights.reduce((sum, weight) => sum + weight, 0);
+    const limited = battery.currentLimit > 0 && total
+        ? given.reduce((sum, [, current], index) => (current >= battery.currentLimit * (1 - 1e-6) ? sum + weights[index] : sum), 0) / total
+        : 0;
     return {
         motors,
         // The battery the run had, full and empty, for the bands.
         supply: battery,
         battery: {
             chargeUsed: charge.length ? charge[0][1] - charge.at(-1)[1] : null,
-            lowestVoltage: voltages.length ? Math.min(...voltages.map(([, value]) => value)) : null
+            lowestVoltage: voltages.length ? Math.min(...voltages.map(([, value]) => value)) : null,
+            lowestAtMotors: atMotors.length ? Math.min(...atMotors) : null,
+            peakCurrent: given.length ? Math.max(...given.map(([, current]) => current)) : null,
+            atLimit: limited
         }
     };
 }
 
+// The longest stretch of `points` ([[time, value], ...]) for which `past(value)` holds, and the time a protection that
+// acts after `time` seconds of it on end would act (null if none). From the thinned points, so about right.
+export function stretch(points, past, time) {
+    let start = null;
+    let longest = 0;
+    let at = null;
+    for (const [moment, value] of points) {
+        if (past(value ?? 0)) {
+            start ??= moment;
+            longest = Math.max(longest, moment - start);
+            if (at === null && moment - start >= time) at = start + time;
+        } else {
+            start = null;
+        }
+    }
+    return { longest, at, time };
+}
+
 // What a motor's run says about it: `level` is 'ok', 'close' (warm, or at full duty now and then) or 'over' (its
 // winding past its limit, or at full duty for much of the run), with the reasons in words.
-export function verdictOf({ hottest, motor, atFullDuty }) {
+export function verdictOf({ hottest, motor, atFullDuty, cutoffs = [] }) {
     const reasons = [];
     let level = 'ok';
     const raise = (to) => { if (to === 'over' || level === 'ok') level = to; };
@@ -109,6 +149,11 @@ export function verdictOf({ hottest, motor, atFullDuty }) {
     else if (hottest > motor.windingLimit - closeToLimit) { raise('close'); reasons.push(`its winding reaches ${celsius(hottest)}, close to its ${celsius(motor.windingLimit)}`); }
     if (atFullDuty > struggling) { raise('over'); reasons.push(`it is at full duty ${(100 * atFullDuty).toFixed(0)}% of the run, giving all it can`); }
     else if (atFullDuty > 0) { raise('close'); reasons.push(`it is at full duty ${(100 * atFullDuty).toFixed(0)}% of the run`); }
+    for (const { kind, limit, longest, at, time } of cutoffs) {
+        const past = kind === 'current' ? `past ${limit} A` : `past ${(100 * limit).toFixed(0)}% of its output`;
+        if (at !== null) { raise('over'); reasons.push(`it would turn itself off at ${at.toFixed(2)} s, ${past} for ${time} s on end (the run carries on as if it had not)`); }
+        else if (longest >= time / 2) { raise('close'); reasons.push(`it is ${past} for ${longest.toFixed(2)} s on end, of the ${time} s that would turn it off`); }
+    }
     return { level, reasons };
 }
 

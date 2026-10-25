@@ -43,7 +43,8 @@ export const driveLabels = Object.freeze({ free: 'Free', torque: 'Torque', servo
 export function defaultMotor(kind) {
     return {
         resistance: 2.5, torqueConstant: 0.02, gearRatio: kind === 'slider' ? 3142 : 100, gearEfficiency: 1, rotorInertia: 1e-6,
-        thermalResistance: 10, thermalCapacitance: 15, ambientTemperature: 293.15, windingLimit: 403.15
+        thermalResistance: 10, thermalCapacitance: 15, ambientTemperature: 293.15, windingLimit: 403.15,
+        mostVoltage: 0, cutoffCurrent: 0, cutoffDuty: 0, cutoffTime: 2
     };
 }
 // `gearEfficiency`: the share of the motor's torque the gearbox passes on to the joint (0 to 1; all of it by default).
@@ -51,16 +52,23 @@ export function defaultMotor(kind) {
 // three (lib/motors.mjs).
 // `windingLimit`: the hottest its winding may get (130 °C, a class B winding's, by default). Not part of the model: the
 // sizing view holds the run's winding temperature against it.
-export const motorFields = Object.freeze(['resistance', 'torqueConstant', 'gearRatio', 'gearEfficiency', 'rotorInertia', 'thermalResistance', 'thermalCapacitance', 'ambientTemperature', 'windingLimit']);
+// Its protection, as a smart servo's (0 where it has none, as by default), not part of the model either: the most
+// voltage it takes (`mostVoltage`, which the checks hold the battery against), and the current (`cutoffCurrent`) and
+// share of full duty (`cutoffDuty`) past which, for `cutoffTime` seconds on end, it turns itself off (which the sizing
+// view looks for in the run).
+export const motorFields = Object.freeze(['resistance', 'torqueConstant', 'gearRatio', 'gearEfficiency', 'rotorInertia', 'thermalResistance', 'thermalCapacitance', 'ambientTemperature', 'windingLimit', 'mostVoltage', 'cutoffCurrent', 'cutoffDuty', 'cutoffTime']);
+const zeroAllowed = new Set(['rotorInertia', 'mostVoltage', 'cutoffCurrent', 'cutoffDuty']);
 
 // The robot's battery, which every motor draws from: its voltage full and empty (falling in a straight line with its
-// charge), and its capacity in ampere seconds (a 3-cell LiPo of 2.2 Ah by default).
-export const defaultBattery = Object.freeze({ fullVoltage: 12.6, emptyVoltage: 9.9, capacity: 7920 });
+// charge), and its capacity in ampere seconds (a 3-cell LiPo of 2.2 Ah by default). Under load its voltage sags by its
+// internal resistance times the current it gives, and a supply with a most current (`currentLimit`, amperes; 0 for
+// none) gives no more, its voltage falling as far as that takes (lib/modelBuilder.mjs).
+export const defaultBattery = Object.freeze({ fullVoltage: 12.6, emptyVoltage: 9.9, capacity: 7920, internalResistance: 0, currentLimit: 0 });
 export const batteryOf = (drawing) => ({ ...defaultBattery, ...(drawing.battery ?? {}) });
 const motorFieldNames = {
     resistance: 'winding resistance', torqueConstant: 'torque constant', gearRatio: 'gear ratio', gearEfficiency: 'gear efficiency', rotorInertia: 'rotor inertia',
     thermalResistance: 'thermal resistance', thermalCapacitance: 'heat capacity', ambientTemperature: 'ambient temperature',
-    windingLimit: 'hottest winding'
+    windingLimit: 'hottest winding', mostVoltage: 'most voltage', cutoffCurrent: 'cut-off current', cutoffDuty: 'cut-off duty', cutoffTime: 'cut-off time'
 };
 
 // Densities a solid may be made of, kilograms per cubic metre, from common tables; "Other" is typed.
@@ -465,9 +473,14 @@ export function checkDrawing(drawing) {
         else if (names.has(key)) errors.push({ id: item.id, message: `Two things are called "${item.name}"; give each its own name.` });
         names.set(key, item.id);
     }
+    // An imported link may have no mass (lib/mjcfImport.mjs: between two joints of one body of the model), as long as
+    // it hangs from a joint and carries a solid on another, as a frame does.
+    const tree = structure(drawing);
+    const carries = new Set([...tree.parentJoint.values()].map(({ parent }) => parent));
     for (const solid of drawing.solids) {
         for (const problem of sizeProblems(solid.shape, solid.size)) errors.push({ id: solid.id, message: `${solid.name}: ${problem}` });
-        if (!sizeProblems(solid.shape, solid.size).length && !(massOf(solid) > 0)) errors.push({ id: solid.id, message: `${solid.name}: its mass must be more than zero.` });
+        const link = solid.shape === 'mesh' && massOf(solid) === 0 && tree.parentJoint.has(solid.id) && carries.has(solid.id);
+        if (!sizeProblems(solid.shape, solid.size).length && !(massOf(solid) > 0) && !link) errors.push({ id: solid.id, message: `${solid.name}: its mass must be more than zero.` });
     }
     const solidOf = new Map(drawing.frames.map((frame) => [frame.id, frame.solid]));
     const pairs = new Set();
@@ -492,10 +505,11 @@ export function checkDrawing(drawing) {
             const motor = { ...defaultMotor(joint.kind), ...joint.drive.motor };
             for (const field of motorFields) {
                 const value = motor[field];
-                const allowZero = field === 'rotorInertia';
+                const allowZero = zeroAllowed.has(field);
                 if (!(Number.isFinite(value) && (allowZero ? value >= 0 : value > 0))) errors.push({ id: joint.id, message: `${joint.name}: its motor's ${motorFieldNames[field]} must be ${allowZero ? 'zero or more' : 'more than zero'}.` });
             }
             if (motor.gearEfficiency > 1) errors.push({ id: joint.id, message: `${joint.name}: its motor's gear efficiency is at most 100%.` });
+            if (motor.cutoffDuty > 1) errors.push({ id: joint.id, message: `${joint.name}: its motor's cut-off duty is at most 100%.` });
             if (motor.windingLimit > 0 && motor.ambientTemperature > 0 && !(motor.windingLimit > motor.ambientTemperature)) {
                 errors.push({ id: joint.id, message: `${joint.name}: its motor's hottest winding must be above the ambient temperature.` });
             }
@@ -529,6 +543,13 @@ export function checkDrawing(drawing) {
     if (drawing.joints.some((joint) => joint.drive?.mode === 'motor')) {
         if (!(battery.capacity > 0)) errors.push({ message: 'The battery\'s capacity must be more than zero.' });
         if (!(battery.emptyVoltage > 0 && battery.fullVoltage >= battery.emptyVoltage)) errors.push({ message: 'The battery\'s full voltage must be at or above its empty voltage, and both above zero.' });
+        for (const [field, label] of [['internalResistance', 'internal resistance'], ['currentLimit', 'most current']]) {
+            if (!(Number.isFinite(battery[field]) && battery[field] >= 0)) errors.push({ message: `The battery's ${label} must be zero or more.` });
+        }
+        for (const joint of drawing.joints.filter(({ drive }) => drive?.mode === 'motor')) {
+            const most = { ...defaultMotor(joint.kind), ...joint.drive.motor }.mostVoltage;
+            if (most > 0 && battery.fullVoltage > most) warnings.push({ id: joint.id, message: `${joint.name}: its motor takes up to ${most} V and the battery gives ${battery.fullVoltage} V; a real one may turn itself off or burn.` });
+        }
     }
     const driven = new Set(drivenJoints(drawing).map(({ id }) => id));
     const times = new Set();

@@ -69,7 +69,7 @@ test('every servo on a hinge becomes a catalog motor on a chosen supply, a slide
     assert.deepEqual(done.turned.map(({ name }) => name), ['Waist', 'Shoulder', 'Elbow', 'Wrist']);
     assert.deepEqual(done.left, ['Left finger slide', 'Right finger slide']);
     assert.equal(done.voltage, 5);
-    assert.deepEqual(batteryOf(done.drawing), { fullVoltage: 5, emptyVoltage: 5, capacity: 3600000 });
+    assert.deepEqual(batteryOf(done.drawing), { fullVoltage: 5, emptyVoltage: 5, capacity: 3600000, internalResistance: 0, currentLimit: 4 });
     for (const name of ['Waist', 'Shoulder', 'Elbow', 'Wrist']) {
         const joint = jointNamed(done.drawing, name);
         assert.equal(joint.drive.mode, 'motor');
@@ -82,6 +82,25 @@ test('every servo on a hinge becomes a catalog motor on a chosen supply, a slide
     assert.equal(servosToMotors(drawing, 'sts3215-c018').voltage, batteryOf(drawing).fullVoltage);
     assert.throws(() => servosToMotors(drawing, 'nothing'), /no motor nothing/);
     assert.throws(() => servosToMotors(drawing, 'sts3215-c001', 'nothing'), /no supply nothing/);
+});
+
+test('a motor\'s protection: the checks hold the battery against its most voltage, and its cut-offs are zero or more', () => {
+    let drawing = servosToMotors(exampleDrawing('twoLinkArm'), 'sts3215-c001', 'mains5').drawing;
+    const warnings = (next) => checkDrawing(next).warnings.map(({ message }) => message).join(' ');
+    assert.doesNotMatch(warnings(drawing), /takes up to/);
+    assert.match(warnings(updateBattery(drawing, { fullVoltage: 8.4, emptyVoltage: 6.6 })), /Shoulder: its motor takes up to 7.4 V and the battery gives 8.4 V/);
+    const shoulder = jointNamed(drawing, 'Shoulder').id;
+    const errors = (next) => checkDrawing(next).errors.map(({ message }) => message).join(' ');
+    assert.match(errors(updateJoint(drawing, shoulder, { drive: { motor: { cutoffDuty: 1.5 } } })), /cut-off duty is at most 100%/);
+    assert.match(errors(updateJoint(drawing, shoulder, { drive: { motor: { cutoffCurrent: -1 } } })), /cut-off current must be zero or more/);
+    assert.match(errors(updateJoint(drawing, shoulder, { drive: { motor: { cutoffTime: 0 } } })), /cut-off time must be more than zero/);
+    assert.match(errors(updateBattery(drawing, { currentLimit: -1 })), /most current must be zero or more/);
+    drawing = updateJoint(drawing, shoulder, { drive: { motor: { cutoffCurrent: 0, cutoffDuty: 0, mostVoltage: 0 } } });
+    assert.deepEqual(checkDrawing(drawing).errors, []);
+    const sts = motorFromDatasheet(motorById('sts3215-c001'));
+    assert.deepEqual([sts.mostVoltage, sts.cutoffCurrent, sts.cutoffDuty, sts.cutoffTime], [7.4, 2, 0.8, 2]);
+    const twelve = motorFromDatasheet(motorById('sts3215-c018'));
+    assert.deepEqual([twelve.mostVoltage, twelve.cutoffCurrent, twelve.cutoffDuty], [14, 0, 0]);
 });
 
 test('a gear efficiency is more than nothing and at most all, and a supply may hold one voltage', () => {
