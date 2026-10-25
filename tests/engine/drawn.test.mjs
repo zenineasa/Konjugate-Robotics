@@ -493,13 +493,11 @@ test('a joint\'s damping and a solid\'s mass, parameters in the canvas, reach th
     await matchesReference('changed', drawn, { Pivot: 'Arm' }, 2, document);
 });
 
-// A limit and a dry friction are held as MuJoCo holds them: soft rows, each in the regime the step before found (a
-// relationship holds its own joint's rows, so it cannot find their regimes in the step itself, as they hang on every
-// other joint's). The reference holds them the same way, to rounding. MuJoCo finds each step's regimes in the step,
-// so the two part where a row starts or stops holding: measured up to 3.8e-4 rad here, 3.8e-5 rad without the
-// friction (a step taken in the wrong regime as the arm bounces off its limit and sticks); held to that, the two
-// agree to 1e-12 (checked with MuJoCo's own solve of each step's regimes in a copy of the reference).
-const softBound = 1e-3;
+// A limit and a dry friction are held as MuJoCo holds them: soft rows, gathered into the Ground with every other
+// joint's and found there each step from the solids' inertia alone, the damping taken after (lib/modelBuilder.mjs).
+// The reference finds them the same way, to rounding; and MuJoCo agrees to about 1e-11 rad as the arm bounces off its
+// limit and sticks.
+const softBound = 1e-9;
 test('a joint stops at its limit and its dry friction holds it, as the reference and MuJoCo have them', async () => {
     let drawing = exampleDrawing('pendulum');
     // Let go level, the arm swings down to positive angles; its limit stops it at 0.4 rad, softly, and its friction
@@ -516,6 +514,20 @@ test('a joint stops at its limit and its dry friction holds it, as the reference
     const difference = largestDifference(angles, mujoco[pivot.id]);
     console.log(`A limit and a dry friction: Konjugate and MuJoCo differ by up to ${difference.toExponential(2)} rad.`);
     assert.ok(difference < softBound, `The pendulum at its limit differs from MuJoCo by ${difference} rad.`);
+});
+
+// A loop with joint rows: the loop's rows found with the constraint rows, taken out exactly, as MuJoCo finds its
+// equality constraints with its limits and friction.
+test('a four-bar with a dry friction on its crank and a limit on its rocker moves as the reference moves it', async () => {
+    let drawing = exampleDrawing('fourBar');
+    const tree = structure(drawing);
+    const hinges = drawing.joints.filter((joint) => joint.kind === 'hinge' && !tree.loops.includes(joint));
+    drawing = updateJoint(drawing, hinges[0].id, { friction: 0.02 });
+    drawing = updateJoint(drawing, hinges.at(-1).id, { limits: { lower: -0.3, upper: 0.3 } });
+    assert.ok(hinges.length >= 2);
+    const carried = Object.fromEntries(hinges.map((joint) => [joint.name, drawing.solids.find(({ id }) => id === drawing.frames.find(({ id: frameId }) => frameId === joint.child).solid).name]));
+    const { run } = await matchesReference('fourBarRows', drawing, carried, 2);
+    assert.ok(run.series(`${carried[hinges.at(-1).name]}.${coordinate(hinges.at(-1))}`).some((angle) => Math.abs(angle) > 0.29), 'The rocker should reach its limit.');
 });
 
 test('a drawn robot resumed from a checkpoint carries on exactly as the run that never stopped, a closed loop and ball joints too', async () => {
@@ -643,7 +655,9 @@ test('every equation a build writes reads back in the canvas as the same express
                 assert.equal(validation.valid, true, `${id}, ${edge.name}: ${item.latex} ${validation.errors.join(' ')}`);
                 const expected = evaluate(item.mathJson, values);
                 const actual = evaluate(validation.mathJson, values);
-                assert.ok(Math.abs(expected - actual) <= 1e-9 * Math.max(1, Math.abs(expected)), `${id}, ${edge.name}: ${item.latex} gives ${actual}, not ${expected}.`);
+                // A root of a negative random value is NaN either way, which reads back as the same expression.
+                const same = (Number.isNaN(expected) && Number.isNaN(actual)) || Math.abs(expected - actual) <= 1e-9 * Math.max(1, Math.abs(expected));
+                assert.ok(same, `${id}, ${edge.name}: ${item.latex} gives ${actual}, not ${expected}.`);
                 if (item.symbol) { readable.push({ symbol: item.symbol }); values.set(item.symbol, expected); }
             }
         }

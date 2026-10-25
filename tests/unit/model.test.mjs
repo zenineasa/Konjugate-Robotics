@@ -55,14 +55,16 @@ test('the model: the Ground and a node per solid, a relationship per joint betwe
     assert.ok(!base.states.some(({ symbol }) => symbol === 'jointAngle'), 'a solid carried by a fixed joint has no joint states');
     assert.equal(turret.appearance.parts[0].prefix, '');
     // Each relationship writes only onto the two solids it joins: the child, and the parent (its share of the
-    // articulated inertia and bias force), never the Ground.
+    // articulated inertia and bias force), never the Ground but what it gathers there of the joints' rows.
     const owner = new Map(document.nodes.flatMap((node) => node.states.map((state) => [state.id, node.id])));
+    const symbolOf = new Map(document.nodes.flatMap((node) => node.states.map((state) => [state.id, state.symbol])));
+    const gathered = /^(kr\d+c\d+|kb\d+|kc\d+|kn\d+|kx\d+|ks\d+)$/;
     for (const edge of document.edges) {
         for (const output of edge.equationModel.outputs) {
             const expected = output.role === 'target' ? edge.target.nodeId : edge.source.nodeId;
             assert.equal(owner.get(output.stateId), expected, `${edge.name}: ${output.role}`);
             assert.equal(output.setsValue, true);
-            assert.notEqual(owner.get(output.stateId), ground.id);
+            if (!gathered.test(symbolOf.get(output.stateId))) assert.notEqual(owner.get(output.stateId), ground.id);
         }
         for (const binding of edge.equationModel.bindings.filter(({ kind }) => kind === 'state')) {
             assert.ok([edge.source.nodeId, edge.target.nodeId].includes(owner.get(binding.stateId)), `${edge.name} reads ${binding.symbol} from a solid it does not join.`);

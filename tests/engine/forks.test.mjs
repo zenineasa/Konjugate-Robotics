@@ -15,7 +15,7 @@ import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 import { batteryOf, massOf, updateBattery, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
 import { exampleDrawing } from '../../packages/toolbox/lib/examples.mjs';
-import { buildModel } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { buildModel, inverseWeights } from '../../packages/toolbox/lib/modelBuilder.mjs';
 import { envelope, sizingSignals, summarize, whatIf } from '../../packages/toolbox/lib/sizing.mjs';
 import { konjugateDir, konjugateModule, roboticsRoot } from '../../scripts/konjugatePaths.mjs';
 import { runDocument } from './harness.mjs';
@@ -41,6 +41,8 @@ const held = (value) => [[0, value], [runTime - forkAt, value]];
 
 // Forks the baseline with `scenarioId`, the window's `supplied` data, and checks it against `changed` (the drawing with
 // the same change made), built and resumed from the fork's checkpoint. Returns the fork's and the baseline's samples.
+// The changed robot keeps the joints' inverse inertia where drawn as the robot was built (lib/modelBuilder.mjs): a
+// constant of the model, which a fork leaves as it was.
 async function forkMatches(scenarioId, supplied, changed) {
     const scenario = { ...scenarios.find((candidate) => candidate.scenarioId === scenarioId), forkAt, runTime };
     const interventions = resolveInterventions(scenario, built.parameterIndex, null, supplied);
@@ -48,7 +50,7 @@ async function forkMatches(scenarioId, supplied, changed) {
     try {
         assert.equal(forkTime, forkAt);
         const checkpoint = baseline.result.checkpoints.find((candidate) => Math.abs(candidate.time - forkAt) < 1e-9);
-        const expected = await runDocument(directory, scenarioId, buildModel(changed, { timeStep: 0.001, runTime }).document, { startCheckpoint: checkpoint });
+        const expected = await runDocument(directory, scenarioId, buildModel(changed, { timeStep: 0.001, runTime, inverseWeights: inverseWeights(drawing) }).document, { startCheckpoint: checkpoint });
         assert.equal(child.result.samples.length, expected.result.samples.length);
         let largest = 0;
         child.result.samples.forEach((sample, index) => {

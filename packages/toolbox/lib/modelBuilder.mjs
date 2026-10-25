@@ -20,6 +20,15 @@
 //
 // The Ground is a node too, holding still. Each solid's mass is a shared parameter; a joint's settings are its
 // relationship's parameters, the drive's torque or setpoint a live slider.
+//
+// Where a hinge or a slider has a dry friction or a limit, the joints' rows join the loops' and are found as MuJoCo
+// finds them: a first sweep from the solids' inertia alone gives each joint's acceleration q̈₀ and how it moves per
+// unit of each row's force (the loops' sensitivities, a column per row); each joint's relationship hands its own rows of
+// K = J M⁻¹ Jᵀ and its wanted acceleration inward, and the relationship of each solid hanging from the Ground solves
+// them from what the Ground gathered: the loops' rows taken out exactly, the joints' by projected Gauss-Seidel from the
+// step before's forces (kept on that solid) and then exactly for the rows it leaves inside their bounds. The forces
+// are handed out again, and a second sweep takes the damping at the step's end speed with them on: the acceleration
+// the step takes. All of it equations on the relationships, nothing solved outside the graph.
 
 import { batteryOf, checkDrawing, defaultDrive, drivenJoints, frameById, frameInWorld, groundId, keyframesOf, massOf, poseOf, structure, treeOrder } from './drawing.mjs';
 import * as E from './expressions.mjs';
@@ -126,8 +135,18 @@ const stateName = (symbol) => stateNames[symbol]
 // R by R coupling K (how each loop's held motion moves with each component), the accelerations wanted, and the forces.
 const sensitivitySymbols = (prefix, count) => [1, 2, 3, 4, 5, 6].map((row) => Array.from({ length: count }, (_, column) => `${prefix}${row}c${column + 1}`));
 const couplingSymbols = (count) => Array.from({ length: count }, (_, row) => Array.from({ length: count }, (__, column) => `kr${row + 1}c${column + 1}`));
+// K is symmetric: only its lower triangle (column at or before row) is gathered.
+const lowerCoupling = (count) => couplingSymbols(count).flatMap((row, r) => row.slice(0, r + 1));
 const wantedSymbols = (count) => Array.from({ length: count }, (_, row) => `kb${row + 1}`);
 const forceSymbols = (count) => Array.from({ length: count }, (_, row) => `lam${row + 1}`);
+// A joint row's settings, gathered into the Ground with its rows of K: its compliance R (1/D) and its force's bounds.
+const rowSettingSymbols = (types) => types.flatMap((type, index) => (type === 'loop' ? [] : [`kc${index + 1}`, `kn${index + 1}`, `kx${index + 1}`]));
+// Sweeps of projected Gauss-Seidel over the constraint rows at each instant, starting from the step before's forces;
+// then the rows it leaves strictly inside their bounds are solved exactly with the others held at theirs, and that is
+// taken where it is consistent (each solved force inside its bounds, each held one pushing against its bound), the
+// sweeps' forces where not. Measured on the robots of the tests, two sweeps already find the rows MuJoCo's own solve
+// holds, every step.
+export const constraintSweeps = 5;
 // What a joint closing a loop holds, by kind: its point (three linear rows) or the turn about its axes (angular rows),
 // along the first solid's frame axes t1, t2 and n (n the joint's axis). A ball holds its point; a hinge its point and its
 // axis; a slider its axis's line and the turn; a fixed joint everything.
@@ -146,6 +165,12 @@ export function closureFrame(n) {
 }
 const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const biasChangeSymbols = ['dp1', 'dp2', 'dp3', 'dp4', 'dp5', 'dp6'];
+// With joint rows (buildModel's `soft`), the second sweep's: each solid's articulated inertia and bias force with the
+// damping taken at the step's end speed and the rows' forces on, its acceleration, and the loops' forces on it.
+const dampedInertiaSymbol = (row, column) => `ib${Math.min(row, column)}${Math.max(row, column)}`;
+const dampedBiasSymbols = ['pq1', 'pq2', 'pq3', 'pq4', 'pq5', 'pq6'];
+const dampedAccelerationSymbols = ['aq1', 'aq2', 'aq3', 'aq4', 'aq5', 'aq6'];
+const externalSymbols = ['xf1', 'xf2', 'xf3', 'xf4', 'xf5', 'xf6'];
 const accelerationChangeSymbols = ['da1', 'da2', 'da3', 'da4', 'da5', 'da6'];
 const turnSymbols = { ball: ['jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ'], free: ['turnW', 'turnX', 'turnY', 'turnZ'] };
 const degreesOfFreedom = { hinge: 1, slider: 1, ball: 3, free: 6, fixed: 0 };
@@ -155,11 +180,11 @@ const centreVelocitySymbols = ['vc1', 'vc2', 'vc3'];
 // that every kind of joint can close a loop and a robot may have any number of them; kept for what comes next.
 // ---- joint limits and dry friction, held as MuJoCo holds them --------------------------------------------------------------
 // MuJoCo holds a hinge's or a slider's limit, once it is past it, and its dry friction always, by soft constraints:
-// each a row of force f on the joint, whose acceleration q̈ it sets as f = D (aref - q̈) while the row holds (as if an
-// inertia D were added to the joint and a force D aref put on it), a dry friction's held to ±its friction (slipping),
-// a limit's to pushing only. D = imp / ((1 - imp) w), w the joint's inverse inertia where the robot is drawn
-// (inverseWeights) and imp the row's impedance; aref = -B v - K imp r, v the row's speed and r how far past the limit
-// it is (0 for friction). B and K from the row's solref, imp from its solimp, as MuJoCo works them out.
+// each a row of generalized force f on the joint, a dry friction's held to ±its friction, a limit's to pushing only,
+// found with every other row from (A + R) f = aref - J q̈₀ within those bounds, A = J M⁻¹ Jᵀ (buildModel gathers it
+// into the Ground). R = (1 - imp) w / imp, w the joint's inverse inertia where the robot is drawn (inverseWeights) and
+// imp the row's impedance; aref = -B v - K imp r, v the row's speed and r how far past the limit it is (0 for
+// friction). B and K from the row's solref, imp from its solimp, as MuJoCo works them out.
 export const defaultSoftness = Object.freeze({ solref: Object.freeze([0.02, 1]), solimp: Object.freeze([0.9, 0.95, 0.001, 0.5, 2]) });
 const impedanceBound = (value) => Math.min(Math.max(value, 0.0001), 0.9999);
 // A joint's softness: its limit's and its friction's { solref, solimp }, and its limit's margin (lib/drawing.mjs's
@@ -324,7 +349,10 @@ function symmetricSolver(define, prefix, D) {
 // Builds the document. Returns { document, data, report } or throws with the drawing's first problem.
 // `looks`: an imported solid's look by its key (`solid.look.key`; { mesh, color }, in the solid's frame), for its node in the canvas; a
 // solid with none is shown as the box about it.
-export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInterval = 0.01, looks = {} } = {}) {
+// `inverseWeights`: each joint's inverse inertia where drawn (inverseWeights), as a model built before had it: a
+// constant of the model, as MuJoCo's dof_invweight0 is of its compiled model, which a change made later (a heavier
+// solid from a time on) leaves as it was. Worked out from this drawing otherwise.
+export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInterval = 0.01, looks = {}, inverseWeights: weightsGiven = null } = {}) {
     const check = checkDrawing(drawing);
     const problems = [...check.errors, ...simulationLimits(drawing)];
     if (problems.length) throw new Error(problems[0].message);
@@ -356,6 +384,26 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
         offset += rows.length;
         return loop;
     });
+    // ---- the joints' rows, where a hinge or a slider has a limit or a dry friction -----------------------------------
+    // Then every joint's soft rows (jointRows), as MuJoCo holds them, join the loops' rows, gathered into the Ground
+    // and found there with them from the solids' inertia alone; and a second sweep of the articulated-body method
+    // takes the damping at the step's end speed with the rows' and loops' forces on, as MuJoCo takes them.
+    const tree = order.map(({ id: solidId }) => parentOf.get(solidId).joint);
+    const soft = tree.some((joint) => (joint.kind === 'hinge' || joint.kind === 'slider') && (joint.friction > 0 || joint.limits) && !built.loops.includes(joint));
+    const jointRows = new Map();
+    if (soft) {
+        for (const { id: solidId } of order) {
+            const { joint } = parentOf.get(solidId);
+            if (!['hinge', 'slider', 'ball'].includes(joint.kind)) continue;
+            const own = [];
+            const add = (type, dof) => { own.push({ type, dof, index: offset }); offset += 1; };
+            if (joint.kind !== 'ball' && joint.friction > 0) add('friction', 0);
+            if (joint.kind !== 'ball' && joint.limits) add('limit', 0);
+            jointRows.set(solidId, own);
+        }
+    }
+    const rowTypes = Array(offset).fill('loop');
+    for (const own of jointRows.values()) for (const row of own) rowTypes[row.index] = row.type;
     const R = offset;
     const path = new Set();
     const affected = new Set();
@@ -364,7 +412,10 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
         for (const { solid } of loop.ends) for (let at = solid; at !== groundId; at = parentOf.get(at).parent) path.add(at);
         for (let at = loop.holderId; at !== groundId; at = parentOf.get(at).parent) gather.add(at);
     }
-    for (const { id: solidId } of order) if (path.has(solidId) || affected.has(parentOf.get(solidId).parent)) affected.add(solidId);
+    if (soft) for (const { id: solidId } of order) { path.add(solidId); gather.add(solidId); }
+    // Without joint rows, the loops' forces change the solids' accelerations by a sweep of their own (`affected`);
+    // with them, the second sweep takes them.
+    if (!soft) for (const { id: solidId } of order) if (path.has(solidId) || affected.has(parentOf.get(solidId).parent)) affected.add(solidId);
 
     // The joints a motor drives (each a hinge or a slider in the tree), by the solid each carries.
     const motorDriven = new Map(order.map(({ id: solidId }) => [solidId, parentOf.get(solidId).joint])
@@ -407,8 +458,9 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
     // Holding still under gravity is, in these terms, accelerating upward at g.
     accelerationSymbols.forEach((symbol, index) => addState(ground, symbol, index === 5 ? gravity : 0, index < 3 ? 'rad/s²' : 'm/s²'));
     if (R) {
-        couplingSymbols(R).flat().forEach((symbol) => addState(ground, symbol, 0));
+        lowerCoupling(R).forEach((symbol) => addState(ground, symbol, 0));
         wantedSymbols(R).forEach((symbol) => addState(ground, symbol, 0));
+        rowSettingSymbols(rowTypes).forEach((symbol) => addState(ground, symbol, 0));
     }
     nodes.set(groundId, ground);
 
@@ -436,17 +488,6 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
             addState(node, 'jointTorque', 0, linear ? 'N' : 'N·m');
             integrate(node, speed, acceleration.symbol);
             integrate(node, position, speed.symbol);
-            // Which way each of its soft rows holds this step: the regime its relationship found the step before
-            // (frictionTarget, ...), taken as the state's next value. A dry friction: 0 holding, 1 or -1 slipping at its
-            // friction either way, 2 not yet known (its first step, taken without it); a limit: 1 holding when past it, 0
-            // let go.
-            const regime = (symbol, initial) => {
-                const state = addState(node, `${symbol}Regime`, initial);
-                const target = addState(node, `${symbol}Target`, initial);
-                integrate(node, state, E.multiply(round(1 / timeStep), E.subtract(target.symbol, state.symbol)));
-            };
-            if (joint.friction > 0) regime('friction', 2);
-            if (joint.limits) { regime('lower', 1); regime('upper', 1); }
             rotationStates(node, pose);
             velocityStates(node);
         } else if (joint.kind === 'ball') {
@@ -484,13 +525,29 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
         if (path.has(solidId)) {
             sensitivitySymbols('lp', R).flat().forEach((symbol) => addState(node, symbol, 0));
             sensitivitySymbols('la', R).flat().forEach((symbol) => addState(node, symbol, 0));
-            biasChangeSymbols.forEach((symbol) => addState(node, symbol, 0));
+            if (!soft) biasChangeSymbols.forEach((symbol) => addState(node, symbol, 0));
+        }
+        if (soft) {
+            symmetric.forEach(([row, column]) => addState(node, dampedInertiaSymbol(row, column), 0));
+            dampedBiasSymbols.forEach((symbol) => addState(node, symbol, 0));
+            dampedAccelerationSymbols.forEach((symbol) => addState(node, symbol, 0));
+            externalSymbols.forEach((symbol) => addState(node, symbol, 0));
         }
         if (affected.has(solidId)) accelerationChangeSymbols.forEach((symbol) => addState(node, symbol, 0));
         if (gather.has(solidId)) {
-            couplingSymbols(R).flat().forEach((symbol) => addState(node, symbol, 0));
+            lowerCoupling(R).forEach((symbol) => addState(node, symbol, 0));
             wantedSymbols(R).forEach((symbol) => addState(node, symbol, 0));
             forceSymbols(R).forEach((symbol) => addState(node, symbol, 0, ''));
+            rowSettingSymbols(rowTypes).forEach((symbol) => addState(node, symbol, 0));
+            // On a solid hanging from the Ground, the constraint rows' forces the step before, where its search for
+            // them starts (each the force's value as the state's next).
+            if (soft && parentOf.get(solidId).parent === groundId) {
+                rowTypes.forEach((type, index) => {
+                    if (type !== 'friction' && type !== 'limit') return;
+                    const warm = addState(node, `warm${index + 1}`, 0);
+                    integrate(node, warm, E.multiply(round(1 / timeStep), E.subtract(forceSymbols(R)[index], warm.symbol)));
+                });
+            }
         }
         addState(node, 'kineticEnergy', 0, 'J');
         addState(node, 'potentialEnergy', 0, 'J');
@@ -545,16 +602,17 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
     }
 
     // ---- each joint, a relationship --------------------------------------------------------------------------------------
-    const weights = inverseWeights(drawing, built);
+    const weights = weightsGiven ?? inverseWeights(drawing, built);
     for (const { id: childId } of order) {
         const { joint, parent: parentId } = parentOf.get(childId);
         const roles = {
             onPath: path.has(childId), affected: affected.has(childId), parentAffected: affected.has(parentId), gathers: gather.has(childId), R, timeStep,
-            setpoint: setpoints.get(joint.id) ?? null, inverseWeight: weights.get(joint.id) ?? null
+            setpoint: setpoints.get(joint.id) ?? null, inverseWeight: weights.get(joint.id) ?? null,
+            soft, rows: jointRows.get(childId) ?? [], rowTypes
         };
         document.edges.push(jointRelationship(drawing, joint, nodes.get(parentId), nodes.get(childId), parentId, childId, masses.get(childId), id, roles));
     }
-    for (const loop of loops) document.edges.push(closingRelationship(drawing, loop, nodes, path, R, id, timeStep));
+    for (const loop of loops) document.edges.push(closingRelationship(drawing, loop, nodes, path, R, id, timeStep, soft));
 
     // ---- motors and their battery ----------------------------------------------------------------------------------------
     if (motorDriven.size) parameterIndex.push(...motorsAndBattery(drawing, motorDriven, nodes, document, setpoints, symbols, id));
@@ -853,29 +911,106 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     const loopAccelerationSymbols = sensitivitySymbols('la', roles.R);
     const loopColumns = Array.from({ length: roles.R }, (_, column) => column);
     const loopBias = roles.onPath ? loopBiasSymbols.map((row) => row.map((symbol) => bind(childNode, 'target', symbol, 'c'))) : null;
-    const biasChange = roles.onPath ? biasChangeSymbols.map((symbol) => bind(childNode, 'target', symbol, 'c')) : [0, 0, 0, 0, 0, 0];
+    const biasChange = roles.onPath && !roles.soft ? biasChangeSymbols.map((symbol) => bind(childNode, 'target', symbol, 'c')) : [0, 0, 0, 0, 0, 0];
     const parentOnPath = roles.onPath && !parentIsGround;
     const parentLoopAcceleration = parentOnPath ? loopAccelerationSymbols.map((row) => row.map((symbol) => bind(parentNode, 'source', symbol, 'p'))) : null;
     const parentAccelerationChange = roles.parentAffected ? accelerationChangeSymbols.map((symbol) => bind(parentNode, 'source', symbol, 'p')) : [0, 0, 0, 0, 0, 0];
     const columnOf = (matrix, column) => matrix.map((row) => row[column]);
     // What finds the loops' forces is passed in towards the Ground and gathered there; on a solid hanging from the
     // Ground, the forces are found from it (K + εI, by its L D Lᵀ factors) and handed out again, one solid to the next.
+    // The joint's own rows' entries of K, wanted accelerations and settings, by symbol, added to its child's as they
+    // pass inward (filled in once the joint's acceleration and sensitivities are known).
+    const ownGathered = new Map();
+    let foundForces = null;
+    const forcesOf = () => { foundForces ??= gatheredForces(); return foundForces; };
     const passGathered = () => {
         if (!roles.gathers) return;
-        const coupling = couplingSymbols(roles.R);
-        coupling.flat().forEach((symbol) => toParent(symbol, bind(childNode, 'target', symbol, 'c')));
-        wantedSymbols(roles.R).forEach((symbol) => toParent(symbol, bind(childNode, 'target', symbol, 'c')));
-        if (!parentIsGround) {
-            forceSymbols(roles.R).forEach((symbol) => toChild(symbol, bind(parentNode, 'source', symbol, 'p')));
-            return;
-        }
-        parameter('compliance', 'Loop compliance', closure.compliance, 'm/(s²·N)');
-        bindings.push({ symbol: 'compliance', kind: 'parameter', parameterId: parameters.at(-1).id });
-        const K = coupling.map((row, i) => row.map((symbol, j) => (j > i ? null : E.add(bind(parentNode, 'source', symbol, 'p'), i === j ? 'compliance' : 0))));
-        const solveLoops = symmetricSolver(define, 'kl', K.map((row, i) => row.map((_, j) => K[Math.max(i, j)][Math.min(i, j)])));
-        const forces = solveLoops(wantedSymbols(roles.R).map((symbol) => bind(parentNode, 'source', symbol, 'p')), 'lm');
+        const plus = (symbol) => (ownGathered.has(symbol) ? E.add(bind(childNode, 'target', symbol, 'c'), ownGathered.get(symbol)) : bind(childNode, 'target', symbol, 'c'));
+        lowerCoupling(roles.R).forEach((symbol) => toParent(symbol, plus(symbol)));
+        wantedSymbols(roles.R).forEach((symbol) => toParent(symbol, plus(symbol)));
+        rowSettingSymbols(roles.rowTypes).forEach((symbol) => toParent(symbol, plus(symbol)));
+        const forces = forcesOf();
         forceSymbols(roles.R).forEach((symbol, index) => toChild(symbol, forces[index]));
     };
+    // The rows' forces: handed out from the parent; or, on a solid hanging from the Ground, found from what the Ground
+    // gathered. Without joint rows, the loops' forces solve (K + εI) λ = wanted, by its L D Lᵀ factors. With them, as
+    // MuJoCo finds them: the loops' rows (held, as before) and the constraint rows (each a friction held to ±its friction,
+    // or a limit pushing only, with its compliance R) from the solids' inertia alone, the loops' rows taken out exactly
+    // and the constraint rows found by projected Gauss-Seidel, starting from the step before's forces, then polished.
+    function gatheredForces() {
+        if (!roles.gathers) return Array(roles.R).fill(0);
+        if (!parentIsGround) return forceSymbols(roles.R).map((symbol) => bind(parentNode, 'source', symbol, 'p'));
+        parameter('compliance', 'Loop compliance', closure.compliance, 'm/(s²·N)');
+        bindings.push({ symbol: 'compliance', kind: 'parameter', parameterId: parameters.at(-1).id });
+        const coupling = couplingSymbols(roles.R);
+        const K = (i, j) => bind(parentNode, 'source', coupling[Math.max(i, j)][Math.min(i, j)], 'p');
+        const wanted = wantedSymbols(roles.R).map((symbol) => bind(parentNode, 'source', symbol, 'p'));
+        if (!roles.soft) {
+            const lower = coupling.map((row, i) => row.map((_, j) => (j > i ? null : E.add(K(i, j), i === j ? 'compliance' : 0))));
+            const solveLoops = symmetricSolver(define, 'kl', lower.map((row, i) => row.map((_, j) => lower[Math.max(i, j)][Math.min(i, j)])));
+            return solveLoops(wanted, 'lm');
+        }
+        const types = roles.rowTypes;
+        const of = (type) => types.map((value, index) => (value === type ? index : -1)).filter((index) => index >= 0);
+        const held = of('loop');
+        const rows = types.map((value, index) => (value === 'friction' || value === 'limit' ? index : -1)).filter((index) => index >= 0);
+        const setting = (prefix, index) => bind(parentNode, 'source', `${prefix}${index + 1}`, 'p');
+        // The loops' rows taken out: X = (K_EE + εI)⁻¹ [w_E, K_EC].
+        let A = (r, c) => K(r, c);
+        let b = (r) => wanted[r];
+        let held0 = [];
+        let heldPer = () => [];
+        if (held.length) {
+            const solveHeld = symmetricSolver(define, 'ke', held.map((i) => held.map((j) => E.add(K(Math.max(i, j), Math.min(i, j)), i === j ? 'compliance' : 0))));
+            held0 = solveHeld(held.map((i) => wanted[i]), 'kew');
+            const columns = new Map(rows.map((c) => [c, solveHeld(held.map((i) => K(i, c)), `kec${c + 1}`)]));
+            heldPer = (c) => columns.get(c);
+            const reducedA = new Map();
+            A = (r, c) => {
+                const key = `${r},${c}`;
+                if (!reducedA.has(key)) reducedA.set(key, define(`ka${r + 1}x${c + 1}`, E.subtract(K(r, c), E.add(held.map((e, k) => E.multiply(K(r, e), columns.get(c)[k]))))));
+                return reducedA.get(key);
+            };
+            b = (r) => define(`kbr${r + 1}`, E.subtract(wanted[r], E.add(held.map((e, k) => E.multiply(K(r, e), held0[k])))));
+        }
+        // Projected Gauss-Seidel, from the step before's forces.
+        let f = new Map(rows.map((r) => [r, bind(childNode, 'target', `warm${r + 1}`, 'c')]));
+        const fixedB = new Map(rows.map((r) => [r, b(r)]));
+        for (let sweep = 0; sweep < constraintSweeps; sweep += 1) {
+            for (const r of rows) {
+                const compliance = setting('kc', r);
+                const residual = E.subtract(fixedB.get(r), E.add(...rows.map((c) => E.multiply(A(r, c), f.get(c))), E.multiply(compliance, f.get(r))));
+                const next = E.add(f.get(r), E.divide(residual, E.add(A(r, r), compliance)));
+                f.set(r, define(`pg${sweep + 1}x${r + 1}`, E.max(setting('kn', r), E.min(setting('kx', r), next))));
+                f = new Map(f);
+            }
+        }
+        // The rows inside their bounds solved exactly, the others held at theirs.
+        const low = (r) => setting('kn', r);
+        const high = (r) => setting('kx', r);
+        const inside = new Map(rows.map((r) => [r, define(`pin${r + 1}`, E.cases([[E.greater(f.get(r), low(r)), E.cases([[E.less(f.get(r), high(r)), 1]], 0)]], 0))]));
+        const out = (r) => E.subtract(1, inside.get(r));
+        const polished = rows.length ? symmetricSolver(define, 'kpo', rows.map((i) => rows.map((j) => (i === j
+            ? E.add(E.multiply(inside.get(i), E.add(A(i, i), setting('kc', i))), out(i))
+            : E.multiply(inside.get(i), inside.get(j), A(Math.max(i, j), Math.min(i, j)))))))(rows.map((i) => E.add(
+            E.multiply(inside.get(i), E.subtract(fixedB.get(i), E.add(...rows.filter((j) => j !== i).map((j) => E.multiply(out(j), A(i, j), f.get(j)))))),
+            E.multiply(out(i), f.get(i)))), 'kpg') : [];
+        const fits = rows.map((r, k) => {
+            const value = polished[k];
+            const residual = E.subtract(fixedB.get(r), E.add(...rows.map((c, m) => E.multiply(A(r, c), polished[m])), E.multiply(setting('kc', r), value)));
+            // A row with no room (a limit not reached, a friction of nothing) fits as it is.
+            return define(`pfit${r + 1}`, E.cases([
+                [E.less(E.subtract(high(r), low(r)), 1e-300), 1],
+                [E.greater(inside.get(r), 0.5), E.cases([[E.less(value, low(r)), 0], [E.greater(value, high(r)), 0]], 1)],
+                [E.greater(f.get(r), low(r)), E.cases([[E.less(residual, 0), 0]], 1)]
+            ], E.cases([[E.greater(residual, 0), 0]], 1)));
+        });
+        const allFit = rows.length ? define('pfit', E.multiply(...fits)) : 1;
+        const forces = Array(roles.R).fill(0);
+        rows.forEach((r, k) => { forces[r] = define(`pf${r + 1}`, E.cases([[E.greater(allFit, 0.5), polished[k]]], f.get(r))); });
+        held.forEach((e, k) => { forces[e] = define(`kh${e + 1}`, E.subtract(held0[k], E.add(...rows.map((c) => E.multiply(heldPer(c)[k], f.get(c)))))); });
+        return forces;
+    }
 
     // The articulated inertia and bias force the child has (its own and what its children pass up), as bound.
     const articulatedRow = (row) => [1, 2, 3, 4, 5, 6].map((column) => IA(row, column));
@@ -889,11 +1024,22 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         if (roles.onPath) {
             if (parentOnPath) {
                 loopBiasSymbols.forEach((row, r) => row.forEach((symbol, column) => toParent(symbol, loopBias[r][column])));
-                biasChangeSymbols.forEach((symbol, index) => toParent(symbol, biasChange[index]));
+                if (!roles.soft) biasChangeSymbols.forEach((symbol, index) => toParent(symbol, biasChange[index]));
             }
             loopAccelerationSymbols.forEach((row, r) => row.forEach((symbol, column) => toChild(symbol, parentOnPath ? parentLoopAcceleration[r][column] : 0)));
         }
         if (roles.affected) accelerationChangeSymbols.forEach((symbol, index) => toChild(symbol, parentAccelerationChange[index]));
+        if (roles.soft) {
+            // The second sweep: everything passed up, the parent's acceleration carried.
+            if (!parentIsGround) {
+                symmetric.forEach(([row, column]) => toParent(dampedInertiaSymbol(row, column), bind(childNode, 'target', dampedInertiaSymbol(row, column), 'c')));
+                dampedBiasSymbols.forEach((symbol) => toParent(symbol, bind(childNode, 'target', symbol, 'c')));
+            }
+            const parentDamped = parentIsGround ? parentAcceleration : dampedAccelerationSymbols.map((symbol) => bind(parentNode, 'source', symbol, 'p'));
+            dampedAccelerationSymbols.forEach((symbol, index) => toChild(symbol, parentDamped[index]));
+            symmetric.forEach(([row, column]) => toChild(dampedInertiaSymbol(row, column), I(row, column)));
+            dampedBiasSymbols.forEach((symbol, index) => toChild(symbol, E.add(forceCross[index], bind(childNode, 'target', externalSymbols[index], 'c'))));
+        }
         passGathered();
         return relationshipEdge();
     }
@@ -902,43 +1048,6 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     // the step's end speed (implicitly, as MuJoCo takes it), so a heavily damped light link stays stable.
     // A servo's own damping is taken at the end speed too, while the servo is within its limit; at its limit the torque
     // does not change with speed, as MuJoCo takes it.
-    // The joint's soft rows (its dry friction, and each limit it is past), each in the regime found the step before:
-    // holding, an inertia D on the joint and a force D aref; slipping, its friction either way; let go, nothing.
-    const soft = { inertia: 0, torque: 0, rows: [] };
-    if ((hinge || slider) && joint.friction > 0) {
-        const regime = bind(childNode, 'target', 'frictionRegime', 'c');
-        const qd = speeds[0];
-        const on = E.greater('friction', 0);
-        const holding = define('fh', E.cases([[on, E.cases([[E.greater(regime, 0.5), 0], [E.less(regime, -0.5), 0]], 1)]], 0));
-        soft.inertia = E.add(soft.inertia, E.multiply(holding, 'frictionInertia'));
-        soft.torque = E.add(soft.torque, define('ff', E.cases([[on, E.cases([
-            [E.greater(regime, 1.5), 0], [E.greater(regime, 0.5), 'friction'], [E.less(regime, -0.5), E.negate('friction')]
-        ], E.multiply(-1, 'frictionInertia', 'frictionDamping', qd))]], 0)));
-        // Next step's regime: the force it would take to hold, against its friction.
-        soft.rows.push((qdd) => {
-            const wanted = define('fw', E.multiply('frictionInertia', E.subtract(E.multiply(-1, 'frictionDamping', qd), qdd)));
-            return ['frictionTarget', E.cases([[E.greater(wanted, 'friction'), 1], [E.less(wanted, E.negate('friction')), -1]], 0)];
-        });
-    }
-    if ((hinge || slider) && joint.limits) {
-        const { solimp } = softnessOf(joint).limit;
-        const qd = speeds[0];
-        // Lower: past it by r = q - lower - margin < 0, its rate q̇; upper: r = upper - q - margin, its rate -q̇.
-        for (const [side, sign] of [['lower', 1], ['upper', -1]]) {
-            const tag = `q${side[0]}`;
-            const regime = bind(childNode, 'target', `${side}Regime`, 'c');
-            const r = define(`${tag}r`, sign > 0 ? E.subtract(E.subtract(q, 'lower'), 'margin') : E.subtract(E.subtract('upper', q), 'margin'));
-            const imp = define(`${tag}i`, impedanceAt(solimp, r));
-            const inertia = define(`${tag}d`, E.divide(imp, E.multiply(E.subtract(1, imp), 'inverseWeight')));
-            const rate = sign > 0 ? qd : E.negate(qd);
-            const reference = define(`${tag}aref`, E.subtract(E.multiply(-1, 'limitDamping', rate), E.multiply('limitStiffness', imp, r)));
-            const holding = define(`${tag}h`, E.cases([[E.less(r, 0), E.cases([[E.greater(regime, 0.5), 1]], 0)]], 0));
-            soft.inertia = E.add(soft.inertia, E.multiply(holding, inertia));
-            soft.torque = E.add(soft.torque, E.multiply(sign, holding, inertia, reference));
-            // Next step's regime: held while past it and pushing back (its acceleration along the row short of aref).
-            soft.rows.push((qdd) => [`${side}Target`, E.cases([[E.less(r, 0), E.cases([[E.less(E.subtract(E.multiply(sign, qdd), reference), 0), 1]], 0)]], 1)]);
-        }
-    }
     const servoDamped = (hinge || slider) && drive.mode === 'servo' && drive.damping > 0;
     const servoRaw = servoDamped ? define('servoRaw', E.subtract(E.multiply('stiffness', E.subtract('setpoint', q)), E.multiply('servoDamping', speeds[0]))) : null;
     const servoStep = servoDamped
@@ -947,7 +1056,9 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     const projected = motions.map((motion, k) => defineAll(dof === 1 ? 'u' : `u${k + 1}r`, [1, 2, 3, 4, 5, 6].map((row) => E.dot(articulatedRow(row), motion))));
     const D = motions.map((motion, i) => projected.map((column, j) => {
         const entry = E.dot(motion, column);
-        return i === j && !free ? E.add(entry, 'armature', E.multiply('damping', 'step'), servoStep, soft.inertia) : entry;
+        // With joint rows, the damping is a row of its own (rowsOf), taken after the rows' forces are found.
+        if (i !== j || free) return entry;
+        return roles.soft ? E.add(entry, 'armature') : E.add(entry, 'armature', E.multiply('damping', 'step'), servoStep);
     }));
     let solve;
     if (dof === 1) {
@@ -976,7 +1087,7 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         if (drive.mode === 'servo') {
             driveTorque = define('servo', E.max(E.negate('torqueLimit'), E.min('torqueLimit', servoRaw ?? E.multiply('stiffness', E.subtract('setpoint', q)))));
         }
-        forces = [define('tau', E.add(driveTorque, E.negate(E.multiply('damping', qd)), soft.torque))];
+        forces = [define('tau', E.add(driveTorque, E.negate(E.multiply('damping', qd))))];
         toChild('jointTorque', driveTorque);
     } else if (ball) {
         const [w, x, y, z] = turnSymbols.ball.map((symbol) => bind(childNode, 'target', symbol, 'c'));
@@ -1025,6 +1136,41 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
     // A free joint's axes move with its centre: Ṡ q̇ = [0; ċ × ω] in place of the parent's velocity cross the joint's.
     const bias = defineAll('c', free ? [0, 0, 0, ...E.cross(speeds.slice(3), speeds.slice(0, 3))] : motionCross);
 
+    // ---- the joint's own rows, where the joints' rows are found at the Ground (roles.soft) ------------------------------
+    // Each row's force acts on one of the joint's axes, J times it (J ±1). As a force on the joint, it changes what the
+    // joint passes inward and its acceleration outward, column by column (`ownForce`), as a loop's force does through
+    // its ends; its row of K is J times the joint's acceleration per unit of each row's force, and its wanted
+    // acceleration aref - J q̈₀, q̈₀ the joint's acceleration found from the solids' inertia alone.
+    const ownRows = (roles.rows ?? []).map((row) => {
+        const qd = speeds[row.dof];
+        if (row.type === 'friction') {
+            const on = E.greater('friction', 0);
+            return {
+                ...row, J: 1, compliance: E.divide(1, 'frictionInertia'),
+                low: E.cases([[on, E.negate('friction')]], 0), high: E.cases([[on, 'friction']], 0),
+                reference: E.multiply(-1, 'frictionDamping', qd)
+            };
+        }
+        // A limit: past its lower end by r = q - lower - margin < 0, or its upper by r = upper - q - margin < 0.
+        const { solimp } = softnessOf(joint).limit;
+        const lower = define('qlr', E.subtract(E.subtract(q, 'lower'), 'margin'));
+        const upper = define('qur', E.subtract(E.subtract('upper', q), 'margin'));
+        const past = define('qpr', E.cases([[E.less(lower, 0), lower], [E.less(upper, 0), upper]], 0));
+        const J = define('qj', E.cases([[E.less(lower, 0), 1], [E.less(upper, 0), -1]], 1));
+        const imp = define('qim', impedanceAt(solimp, past));
+        return {
+            ...row, J, compliance: E.divide(E.multiply(E.subtract(1, imp), 'inverseWeight'), imp),
+            low: 0, high: E.cases([[E.less(lower, 0), 1e30], [E.less(upper, 0), 1e30]], 0),
+            reference: E.subtract(E.multiply(-1, 'limitDamping', J, qd), E.multiply('limitStiffness', imp, past))
+        };
+    });
+    // The force on each of the joint's axes per unit of row `column`'s force, or null if it is not one of its own.
+    const ownForce = (column) => {
+        const row = ownRows.find(({ index }) => index === column);
+        return row ? speeds.map((_, k) => (k === row.dof ? row.J : 0)) : null;
+    };
+    const lessOwn = (values, column) => { const own = ownForce(column); return own ? values.map((value, k) => E.subtract(value, own[k])) : values; };
+
     // Inward: what the child passes to its parent (the Ground takes nothing): the articulated inertia less what the
     // joint lets go (IA - U D⁻¹ Uᵀ), and the bias force plus IA c plus U D⁻¹ (u - Uᵀ c).
     if (!parentIsGround) {
@@ -1051,33 +1197,84 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         : solve(remaining.map((value, k) => E.subtract(value, E.dot(projected[k], carried))), 'qa');
     accelerationSymbols.forEach((symbol, index) => toChild(symbol, E.add(carried[index], along(jointAcceleration)[index])));
 
+    // The rows' forces, as found at the Ground: from the parent, or found here on a solid hanging from the Ground; the
+    // joint's own rows' forces act on its axes.
+    const rowForces = forcesOf();
+    const ownTotal = speeds.map((_, k) => E.add(ownRows.filter(({ dof: axis }) => axis === k).map((row) => E.multiply(row.J, rowForces[row.index]))));
+    const lessOwnForces = (values) => (ownRows.length ? values.map((value, k) => E.subtract(value, ownTotal[k])) : values);
+    const movedColumns = [];
+
     // The loop, where this joint is on its way or below it: how the child's bias force and acceleration move with the
     // force that closes it (P inward: P + (I - U D⁻¹ Sᵀ) P; A outward: A - S D⁻¹ (Sᵀ P + Uᵀ A)), and, once that force
     // is known, the change it makes (inward, then outward), added to the joint's acceleration.
     let accelerationChange = [0];
     if (roles.onPath) {
-        const passed = loopColumns.map((column) => solve(motionTimes(columnOf(loopBias, column)), `pp${column + 1}`));
+        const passed = loopColumns.map((column) => solve(lessOwn(motionTimes(columnOf(loopBias, column)), column), `pp${column + 1}`));
         if (parentOnPath) {
             loopBiasSymbols.forEach((row, r) => row.forEach((symbol, column) => toParent(symbol,
                 E.subtract(loopBias[r][column], projectedAlong(passed[column])[r]))));
-            const passedChange = solve(motionTimes(biasChange), 'pc');
-            biasChangeSymbols.forEach((symbol, index) => toParent(symbol, E.subtract(biasChange[index], projectedAlong(passedChange)[index])));
+            if (!roles.soft) {
+                const passedChange = solve(lessOwnForces(motionTimes(biasChange)), 'pc');
+                biasChangeSymbols.forEach((symbol, index) => toParent(symbol, E.subtract(biasChange[index], projectedAlong(passedChange)[index])));
+            }
         }
         loopColumns.forEach((column) => {
             const parentColumn = parentOnPath ? columnOf(parentLoopAcceleration, column) : [0, 0, 0, 0, 0, 0];
-            const moved = solve(motionTimes(columnOf(loopBias, column)).map((value, k) => E.add(value, E.dot(projected[k], parentColumn))), `pa${column + 1}`);
+            const moved = solve(lessOwn(motionTimes(columnOf(loopBias, column)).map((value, k) => E.add(value, E.dot(projected[k], parentColumn))), column), `pa${column + 1}`);
+            movedColumns[column] = moved;
             loopAccelerationSymbols.forEach((row, r) => toChild(row[column], E.subtract(parentColumn[r], along(moved)[r])));
         });
     }
     if (roles.affected) {
-        accelerationChange = solve(motionTimes(biasChange).map((value, k) => E.negate(E.add(value, E.dot(projected[k], parentAccelerationChange)))), 'dq');
+        accelerationChange = solve(lessOwnForces(motionTimes(biasChange).map((value, k) => E.add(value, E.dot(projected[k], parentAccelerationChange)))).map(E.negate), 'dq');
         accelerationChangeSymbols.forEach((symbol, index) => toChild(symbol, E.add(parentAccelerationChange[index], along(accelerationChange)[index])));
     }
-    const total = jointAcceleration.map((value, k) => (roles.affected ? E.add(value, accelerationChange[k]) : value));
-    if (dof === 1) {
-        toChild('jointAcceleration', total[0]);
-        for (const row of soft.rows) { const [symbol, value] = row(total[0]); toChild(symbol, value); }
-    } else total.forEach((value, k) => toChild(`jointAcceleration${k + 1}`, value));
+    for (const row of ownRows) {
+        const J = row.J;
+        loopColumns.filter((column) => column <= row.index).forEach((column) => ownGathered.set(couplingSymbols(roles.R)[row.index][column], E.multiply(-1, J, movedColumns[column][row.dof])));
+        ownGathered.set(wantedSymbols(roles.R)[row.index], E.subtract(row.reference, E.multiply(J, jointAcceleration[row.dof])));
+        ownGathered.set(`kc${row.index + 1}`, row.compliance);
+        ownGathered.set(`kn${row.index + 1}`, row.low);
+        ownGathered.set(`kx${row.index + 1}`, row.high);
+    }
+    let total = jointAcceleration.map((value, k) => (roles.affected ? E.add(value, accelerationChange[k]) : value));
+    if (roles.soft) {
+        // The second sweep, with the joints' damping taken at the step's end speed (and a servo's within its limit),
+        // the rows' forces on the joints and the loops' on the solids: the joint's acceleration, the one the step takes.
+        const dampedIA = (row, column) => bind(childNode, 'target', dampedInertiaSymbol(row, column), 'c');
+        symmetric.forEach(([row, column]) => toChild(dampedInertiaSymbol(row, column), I(row, column)));
+        dampedBiasSymbols.forEach((symbol, index) => toChild(symbol, E.add(forceCross[index], bind(childNode, 'target', externalSymbols[index], 'c'))));
+        const dampedBias = dampedBiasSymbols.map((symbol) => bind(childNode, 'target', symbol, 'c'));
+        const dampedRow = (row) => [1, 2, 3, 4, 5, 6].map((column) => dampedIA(row, column));
+        const projected2 = motions.map((motion, k) => defineAll(dof === 1 ? 'uz' : `u${k + 1}z`, [1, 2, 3, 4, 5, 6].map((row) => E.dot(dampedRow(row), motion))));
+        const D2 = motions.map((motion, i) => projected2.map((column, j) => {
+            const entry = E.dot(motion, column);
+            return i === j && !free ? E.add(entry, 'armature', E.multiply('damping', 'step'), servoStep) : entry;
+        }));
+        let solve2;
+        if (dof === 1) {
+            const effective = define('dz', D2[0][0]);
+            solve2 = (b) => [E.divide(b[0], effective)];
+        } else {
+            const named = D2.map((row, i) => row.map((value, j) => (j < i ? null : define(`dz${i + 1}${j + 1}`, value))));
+            solve2 = symmetricSolver(define, 'lz', D2.map((row, i) => row.map((_, j) => named[Math.min(i, j)][Math.max(i, j)])));
+        }
+        const remaining2 = defineAll('uy', forces.map((force, k) => E.subtract(E.add(force, ownTotal[k]), E.dot(motions[k], dampedBias))));
+        if (!parentIsGround) {
+            const released = [1, 2, 3, 4, 5, 6].map((column) => solve2(projected2.map((u) => u[column - 1]), `wz${column}`));
+            symmetric.forEach(([row, column]) => toParent(dampedInertiaSymbol(row, column),
+                E.subtract(dampedIA(row, column), E.add(projected2.map((u, k) => E.multiply(u[row - 1], released[column - 1][k]))))));
+            const kept = solve2(remaining2.map((value, k) => E.subtract(value, E.dot(projected2[k], bias))), 'kz');
+            dampedBiasSymbols.forEach((symbol, index) => toParent(symbol, E.add(dampedBias[index], E.dot(dampedRow(index + 1), bias),
+                E.add(projected2.map((u, k) => E.multiply(u[index], kept[k]))))));
+        }
+        const parentDamped = parentIsGround ? parentAcceleration : dampedAccelerationSymbols.map((symbol) => bind(parentNode, 'source', symbol, 'p'));
+        const carried2 = defineAll('az', parentDamped.map((value, index) => E.add(value, bias[index])));
+        total = solve2(remaining2.map((value, k) => E.subtract(value, E.dot(projected2[k], carried2))), 'qz');
+        dampedAccelerationSymbols.forEach((symbol, index) => toChild(symbol, E.add(carried2[index], along(total)[index])));
+    }
+    if (dof === 1) toChild('jointAcceleration', total[0]);
+    else total.forEach((value, k) => toChild(`jointAcceleration${k + 1}`, value));
     passGathered();
     return relationshipEdge();
 
@@ -1103,7 +1300,7 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
 //   and of the acceleration wanted, -Ġ Δ - 2 ω c - ω² e - G (â₂ - â₁) (c = G Δ its rows' rates, e their gaps and
 //   twists), which the tree gathers into the Ground and solves there;
 // - reads its own forces back from its holder, and hands each end the change they make to its bias force.
-function closingRelationship(drawing, loop, nodes, path, R, id, timeStep) {
+function closingRelationship(drawing, loop, nodes, path, R, id, timeStep, soft = false) {
     const { bindings, outputs, bind, define, defineAll, defineMatrix, output, pruned } = equations();
     const parameters = [{ id: id(), name: 'Closure rate', symbol: 'rate', value: round(closureRate(timeStep)), unit: '1/s', mode: 'constant' }];
     for (const created of parameters) bindings.push({ symbol: created.symbol, kind: 'parameter', parameterId: created.id });
@@ -1181,7 +1378,7 @@ function closingRelationship(drawing, loop, nodes, path, R, id, timeStep) {
     const holder = ends.find((end) => end.solid === loop.holderId);
     const coupling = couplingSymbols(R);
     rows.forEach((row, k) => {
-        for (let column = 0; column < R; column += 1) {
+        for (let column = 0; column <= loop.offset + k; column += 1) {
             const moved = E.add(ends.map((end) => (end.onPath ? E.multiply(-end.sign, E.dot(row.G, end.sensitivity.map((line) => line[column]))) : 0)));
             output(holder.node, holder.role, coupling[loop.offset + k][column], moved);
         }
@@ -1191,7 +1388,8 @@ function closingRelationship(drawing, loop, nodes, path, R, id, timeStep) {
     const forces = rows.map((_, k) => bind(holder.node, holder.role, forceSymbols(R)[loop.offset + k], holder.prefix));
     for (const end of ends) {
         if (!end.onPath) continue;
-        biasChangeSymbols.forEach((symbol, index) => output(end.node, end.role, symbol, E.multiply(end.sign, E.add(rows.map((row, k) => E.multiply(row.G[index], forces[k]))))));
+        // With joint rows, as the force on the solid in the second sweep (lib/modelBuilder.mjs's `soft`).
+        (soft ? externalSymbols : biasChangeSymbols).forEach((symbol, index) => output(end.node, end.role, symbol, E.multiply(end.sign, E.add(rows.map((row, k) => E.multiply(row.G[index], forces[k]))))));
     }
     // What the second solid is pushed by: the linear rows' force at the point, the angular rows' moment; and the gap
     // and twist left.
