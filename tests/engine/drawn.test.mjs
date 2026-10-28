@@ -530,6 +530,23 @@ test('a four-bar with a dry friction on its crank and a limit on its rocker move
     assert.ok(run.series(`${carried[hinges.at(-1).name]}.${coordinate(hinges.at(-1))}`).some((angle) => Math.abs(angle) > 0.29), 'The rocker should reach its limit.');
 });
 
+// Where the sweeps leave a row's force short of where it settles, polishing finds it exactly; and the loops' forces are
+// worked out from the rows' forces as found, not from the sweeps'. So more sweeps change nothing.
+test('a four-bar\'s rows found from five sweeps and polishing are as three hundred sweeps find them', () => {
+    let drawing = exampleDrawing('fourBar');
+    const tree = structure(drawing);
+    const hinges = drawing.joints.filter((joint) => joint.kind === 'hinge' && !tree.loops.includes(joint));
+    drawing = updateJoint(drawing, hinges[0].id, { friction: 0.02 });
+    drawing = updateJoint(drawing, hinges.at(-1).id, { limits: { lower: -0.3, upper: 0.3 } });
+    const times = Array.from({ length: 200 }, (_, index) => (index + 1) * 0.01);
+    const few = simulate(drawing, times);
+    const many = simulate(drawing, times, 0.001, { sweeps: 300 });
+    for (const joint of hinges) {
+        const difference = largestDifference(few[joint.id], many[joint.id]);
+        assert.ok(difference < 1e-12, `${joint.name} differs by ${difference} with more sweeps.`);
+    }
+});
+
 test('a drawn robot resumed from a checkpoint carries on exactly as the run that never stopped, a closed loop and ball joints too', async () => {
     const cases = [
         ['cartPendulums', ['Cart.jointPosition', 'Front pendulum.jointAngle', 'Back pendulum.yaw']],

@@ -8,7 +8,7 @@
 // power user), works on the selection and can be undone, on Windows, Linux and macOS alike (docs/interaction.md).
 
 import {
-    addFrameAt, addJoint, addKeyframe, addSolid, batteryOf, checkDrawing, createDrawing, defaultMotor, driveLabels, driveModes, drivenJoints, duplicateSolids,
+    addCoupling, addFrameAt, addJoint, addKeyframe, addSolid, addTendon, batteryOf, couplingById, couplingsOf, removeCouplings, removeTendons, tendonById, tendonsOf, updateCoupling, updateTendon, checkDrawing, createDrawing, defaultMotor, driveLabels, driveModes, drivenJoints, duplicateSolids,
     frameById, groundId, jointById, jointKinds, jointLabels, keyframesOf, massOf, materials, moveSolids, nextKeyframeTime, poseOf, readDrawing, removeJoints,
     removeKeyframe, removeSolids, reverseJoint, solidById, structure, treeOrder, turnSolids, updateBattery, updateFrame, updateJoint, updateKeyframe, updateSolid
 } from './lib/drawing.mjs';
@@ -90,7 +90,7 @@ view.setSnapping($('#snapToggle').checked);
 // Makes `next` the drawing, as one undoable step called `label`.
 function change(next, label, coalesce = null) {
     state.history.change(next, label, coalesce);
-    const ids = new Set([...next.solids, ...next.joints].map(({ id }) => id));
+    const ids = partIds(next);
     state.selection = state.selection.filter((id) => ids.has(id));
     render();
     keepSessionSoon();
@@ -120,6 +120,35 @@ function select(ids, { add = false } = {}) {
 
 const selectedSolids = () => state.selection.filter((id) => solidById(drawing(), id));
 const selectedJoints = () => state.selection.filter((id) => jointById(drawing(), id));
+const selectedCouplings = () => state.selection.filter((id) => couplingById(drawing(), id));
+const selectedTendons = () => state.selection.filter((id) => tendonById(drawing(), id));
+// Every part a selection may hold: solids, joints, couplings and tendons.
+const partIds = (from) => new Set([...from.solids, ...from.joints, ...couplingsOf(from), ...tendonsOf(from)].map(({ id }) => id));
+// The hinges and sliders of the robot's tree, which couplings and tendons act on, among `ids`.
+const treeMovers = (ids) => {
+    const tree = new Set([...structure(drawing()).parentJoint.values()].map(({ joint }) => joint.id));
+    return ids.filter((id) => tree.has(id) && ['hinge', 'slider'].includes(jointById(drawing(), id)?.kind));
+};
+
+// Couples the first selected hinge or slider to the second, one to one.
+function coupleSelection() {
+    const joints = treeMovers(selectedJoints());
+    if (joints.length !== 2) { toast('Select two hinges or sliders of the robot to couple: the first follows the second.'); return; }
+    const result = attempt(() => addCoupling(drawing(), joints[0], joints[1]));
+    if (!result) return;
+    state.selection = [result.id];
+    change(result.drawing, `Couple ${jointById(drawing(), joints[0]).name} to ${jointById(drawing(), joints[1]).name}`);
+}
+
+// A tendon over the selected hinges and sliders, each its length's share 1.
+function tendonOverSelection() {
+    const joints = treeMovers(selectedJoints());
+    if (!joints.length) { toast('Select the hinges or sliders of the robot a tendon runs over.'); return; }
+    const result = attempt(() => addTendon(drawing(), joints.map((joint) => ({ joint, coef: 1 }))));
+    if (!result) return;
+    state.selection = [result.id];
+    change(result.drawing, `Run a tendon over ${joints.map((id) => jointById(drawing(), id).name).join(', ')}`);
+}
 
 // A free place on the floor for a new solid: along x, clear of every solid's middle by 15 cm.
 function freePlace() {
@@ -145,11 +174,16 @@ function addShape(shape) {
 function deleteSelection() {
     const solids = selectedSolids();
     const joints = selectedJoints();
-    if (!solids.length && !joints.length) { toast('Select a solid or a joint to delete.'); return; }
+    const couplings = selectedCouplings();
+    const tendons = selectedTendons();
+    if (!solids.length && !joints.length && !couplings.length && !tendons.length) { toast('Select a solid, a joint, a coupling or a tendon to delete.'); return; }
     let next = drawing();
+    if (couplings.length) next = removeCouplings(next, couplings);
+    if (tendons.length) next = removeTendons(next, tendons);
     if (joints.length) next = removeJoints(next, joints);
     if (solids.length) next = removeSolids(next, solids);
-    const names = [...solids.map((id) => solidById(drawing(), id).name), ...joints.map((id) => jointById(drawing(), id).name)];
+    const names = [...solids.map((id) => solidById(drawing(), id).name), ...joints.map((id) => jointById(drawing(), id).name),
+        ...couplings.map((id) => couplingById(drawing(), id).name), ...tendons.map((id) => tendonById(drawing(), id).name)];
     state.selection = [];
     change(next, `Delete ${names.join(', ')}`);
 }
@@ -175,7 +209,7 @@ function redo() {
 }
 
 function afterHistory(message) {
-    const ids = new Set([...drawing().solids, ...drawing().joints].map(({ id }) => id));
+    const ids = partIds(drawing());
     state.selection = state.selection.filter((id) => ids.has(id));
     state.joinFirst = null;
     view.showMarker('chosen', null);
@@ -280,7 +314,9 @@ function transformed(solidId, move) {
 function render() {
     const current = drawing();
     view.setDrawing(state.pose.active ? posedDrawing(current, state.pose.values) : current);
-    view.setSelection(state.selection);
+    // A coupling or a tendon shows as its joints.
+    view.setSelection(state.selection.flatMap((id) => couplingById(current, id) ? [couplingById(current, id).first, couplingById(current, id).second].filter(Boolean)
+        : tendonById(current, id) ? tendonById(current, id).parts.map(({ joint }) => joint) : [id]));
     const solids = selectedSolids();
     view.setTool(state.tool, solids.length === 1 ? carriedBy(solids[0]) : []);
     renderToolbar();
@@ -343,6 +379,12 @@ function renderTree() {
     }
     for (const joint of built.loops) {
         items.push(`<li class="jointItem${state.selection.includes(joint.id) ? ' selected' : ''}" data-id="${joint.id}" role="treeitem">⊕ ${escapeHtml(joint.name)} <span class="kind">closes a loop</span></li>`);
+    }
+    for (const coupling of couplingsOf(current)) {
+        items.push(`<li class="jointItem${state.selection.includes(coupling.id) ? ' selected' : ''}" data-id="${coupling.id}" role="treeitem">⇄ ${escapeHtml(coupling.name)} <span class="kind">coupling</span></li>`);
+    }
+    for (const tendon of tendonsOf(current)) {
+        items.push(`<li class="jointItem${state.selection.includes(tendon.id) ? ' selected' : ''}" data-id="${tendon.id}" role="treeitem">≈ ${escapeHtml(tendon.name)} <span class="kind">tendon</span></li>`);
     }
     list.innerHTML = items.join('');
 }
@@ -407,10 +449,17 @@ function renderInspector() {
     const solids = selectedSolids();
     const joints = selectedJoints();
     if (solids.length === 1 && !joints.length) { panel.innerHTML = solidInspector(solidById(current, solids[0])); return; }
-    if (joints.length === 1 && !solids.length) { panel.innerHTML = jointInspector(jointById(current, joints[0])); return; }
+    if (joints.length === 1 && state.selection.length === 1) { panel.innerHTML = jointInspector(jointById(current, joints[0])); return; }
+    if (state.selection.length === 1 && couplingById(current, state.selection[0])) { panel.innerHTML = couplingInspector(couplingById(current, state.selection[0])); return; }
+    if (state.selection.length === 1 && tendonById(current, state.selection[0])) { panel.innerHTML = tendonInspector(tendonById(current, state.selection[0])); return; }
     if (state.selection.length > 1) {
+        const movers = treeMovers(joints);
+        const together = movers.length && movers.length === state.selection.length
+            ? `<p class="note">Couple the first to the second, so it follows it, or run a tendon over them all.</p>
+            <div class="buttons">${movers.length === 2 ? `<button type="button" class="tool" data-action="couple" title="The first follows the second (U)">Couple</button>` : ''}<button type="button" class="tool" data-action="tendon" title="A tendon over these joints (T)">Tendon</button></div>`
+            : '';
         panel.innerHTML = `<h3>${state.selection.length} selected</h3><p class="note">Delete or duplicate them together, or select one to change it.</p>
-            <div class="buttons"><button type="button" class="tool" data-action="duplicate">Duplicate</button><button type="button" class="tool" data-action="delete">Delete</button></div>`;
+            <div class="buttons"><button type="button" class="tool" data-action="duplicate">Duplicate</button><button type="button" class="tool" data-action="delete">Delete</button></div>${together}`;
         return;
     }
     const built = structure(current);
@@ -603,9 +652,83 @@ function jointInspector(joint) {
         ${field('Friction', numberInput('friction', joint.friction, { min: 0 }), linear ? 'N' : 'N·m')}
         ${field('Armature', numberInput('armature', joint.armature, { min: 0, title: 'The inertia of what turns with the joint inside it, such as a motor\'s rotor through its gearbox' }), linear ? 'kg' : 'kg·m²')}
         ${joint.limits || joint.friction > 0 ? `<p class="note">Its ${joint.limits && joint.friction > 0 ? 'limits and dry friction are' : joint.limits ? 'limits are' : 'dry friction is'} held as MuJoCo holds them, softly${joint.softness ? ', as the model it came from sets them' : ''}.</p>` : ''}
-        ${driveFields.join('')}` : ''}
+        ${driveFields.join('')}
+        <div class="buttons"><button type="button" class="tool" data-action="tendon" title="A tendon over this joint (T); select more joints to run it over them too">Tendon</button></div>` : ''}
         ${ball && !loop ? ballMotion(joint) : ''}
         <div class="buttons"><button type="button" class="tool" data-action="delete">Delete joint</button></div>`;
+}
+
+// A coupling: its joints and its polynomial, q₁ = c₀ + c₁ q₂ + c₂ q₂² + c₃ q₂³ + c₄ q₂⁴, in radians and metres from
+// where the robot is drawn.
+function couplingInspector(coupling) {
+    const current = drawing();
+    const first = jointById(current, coupling.first);
+    const second = coupling.second ? jointById(current, coupling.second) : null;
+    return `<h3>${escapeHtml(coupling.name)}</h3>
+        ${field('Name', `<input type="text" name="name" value="${escapeHtml(coupling.name)}" spellcheck="false">`)}
+        <p class="note">Holds <strong>${escapeHtml(first?.name ?? '?')}</strong> to a polynomial of <strong>${escapeHtml(second?.name ?? 'nothing')}</strong>, each counted from where the robot is drawn, in radians or metres: q₁ = c₀ + c₁ q₂ + c₂ q₂² + c₃ q₂³ + c₄ q₂⁴. It holds as MuJoCo's joint equality holds, softly${coupling.softness ? ', as the model it came from sets it' : ''}: a row of its own, found at the Ground with the limits and dry frictions.</p>
+        <div class="fieldRow"><span>Polynomial</span>${coupling.polycoef.map((value, power) => `<label>c${power}${numberInput(`polycoef.${power}`, value)}</label>`).join('')}</div>
+        <div class="buttons"><button type="button" class="tool" data-action="swapCoupling" title="The second follows the first">Swap joints</button><button type="button" class="tool" data-action="delete">Delete coupling</button></div>`;
+}
+
+// A tendon: each joint's share of its length, its length where drawn, its spring, damping, dry friction, limits and
+// drive. In radians and metres, as its joints move.
+function tendonInspector(tendon) {
+    const current = drawing();
+    const drive = tendon.drive ?? { mode: 'free' };
+    const modes = { free: 'Nothing', torque: 'A force', servo: 'A servo' };
+    return `<h3>${escapeHtml(tendon.name)}</h3>
+        ${field('Name', `<input type="text" name="name" value="${escapeHtml(tendon.name)}" spellcheck="false">`)}
+        <p class="note">Its length is its length where the robot is drawn plus each joint's share times the joint's position from there, in radians or metres: as MuJoCo's fixed tendon. It pulls each joint by its share times its force.</p>
+        <h2>Joints</h2>
+        ${tendon.parts.map(({ joint, coef }, index) => field(escapeHtml(jointById(current, joint)?.name ?? '?'), numberInput(`parts.${index}`, coef, { title: 'Its share of the length' }))).join('')}
+        ${field('Length where drawn', numberInput('offset', tendon.offset))}
+        <h2>Spring, damping and friction</h2>
+        ${field('Stiffness', numberInput('stiffness', tendon.stiffness, { min: 0 }), 'per unit of length')}
+        ${field('Spring length', numberInput('springLength', tendon.springLength))}
+        ${field('Damping', numberInput('damping', tendon.damping, { min: 0 }))}
+        ${field('Friction', numberInput('friction', tendon.friction, { min: 0 }))}
+        <label class="field"><span>Limited</span><span><input type="checkbox" name="limited"${tendon.limits ? ' checked' : ''}></span></label>
+        ${tendon.limits ? `${field('Shortest', numberInput('limits.lower', tendon.limits.lower))}${field('Longest', numberInput('limits.upper', tendon.limits.upper))}` : ''}
+        <h2>Drive</h2>
+        ${field('Driven by', `<select name="drive.mode">${Object.entries(modes).map(([mode, label]) => `<option value="${mode}"${mode === drive.mode ? ' selected' : ''}>${label}</option>`).join('')}</select>`)}
+        ${drive.mode === 'torque' ? field('Force', numberInput('drive.torque', drive.torque ?? 0)) : ''}
+        ${drive.mode === 'servo' ? `${field('Setpoint length', numberInput('drive.setpoint', drive.setpoint ?? 0))}${field('Stiffness', numberInput('drive.gain', drive.gain, { min: 0 }))}${field('Most force', numberInput('drive.torqueLimit', drive.torqueLimit, { min: 0 }))}${field('Servo damping', numberInput('drive.damping', drive.damping ?? 0, { min: 0 }))}` : ''}
+        ${tendon.damping > 0 || (drive.mode === 'servo' && drive.damping > 0) ? '<p class="note">Its damping is taken at the step\'s end speed, as MuJoCo\'s implicitfast takes it, only between joints one carrying the other: two side by side, a gripper\'s fingers, are each damped alone.</p>' : ''}
+        <div class="buttons"><button type="button" class="tool" data-action="delete">Delete tendon</button></div>`;
+}
+
+// One field of a coupling's or a tendon's inspector changed.
+function partChanged(name, value, number) {
+    const current = drawing();
+    const id = state.selection[0];
+    const coupling = couplingById(current, id);
+    if (coupling) {
+        const apply = (changes, label) => { const next = attempt(() => updateCoupling(current, id, changes)); if (next) change(next, `${label} of ${coupling.name}`, `${id}:${name}`); };
+        if (name === 'name') { if (value.trim()) apply({ name: value.trim() }, 'Name'); else render(); return; }
+        if (name.startsWith('polycoef.')) {
+            const polycoef = [...coupling.polycoef];
+            polycoef[Number(name.slice(9))] = number;
+            apply({ polycoef }, 'Polynomial');
+        }
+        return;
+    }
+    const tendon = tendonById(current, id);
+    const apply = (changes, label) => { const next = attempt(() => updateTendon(current, id, changes)); if (next) change(next, `${label} of ${tendon.name}`, `${id}:${name}`); };
+    if (name === 'name') { if (value.trim()) apply({ name: value.trim() }, 'Name'); else render(); return; }
+    if (name.startsWith('parts.')) {
+        if (!number) { toast('A joint\'s share is a number other than zero.'); render(); return; }
+        apply({ parts: tendon.parts.map((part, index) => (index === Number(name.slice(6)) ? { ...part, coef: number } : part)) }, 'Share');
+        return;
+    }
+    if (['stiffness', 'damping', 'friction'].includes(name) && number < 0) { toast('This must be zero or more.'); render(); return; }
+    if (['offset', 'stiffness', 'springLength', 'damping', 'friction'].includes(name)) { apply({ [name]: number }, name[0].toUpperCase() + name.slice(1).replace(/([A-Z])/g, ' $1').toLowerCase()); return; }
+    if (name === 'limited') { apply({ limits: value ? { lower: tendon.offset - 0.5, upper: tendon.offset + 0.5 } : null }, 'Limits'); return; }
+    if (name === 'limits.lower' || name === 'limits.upper') { apply({ limits: { ...tendon.limits, [name.slice(7)]: number } }, 'Limits'); return; }
+    if (name === 'drive.mode') { apply({ drive: { mode: value } }, 'Drive'); return; }
+    if ((name === 'drive.gain' || name === 'drive.torqueLimit') && !(number > 0)) { toast('This must be more than zero.'); render(); return; }
+    if (name === 'drive.damping' && !(number >= 0)) { toast('This must be zero or more.'); render(); return; }
+    if (name.startsWith('drive.')) apply({ drive: { [name.slice(6)]: number } }, { torque: 'Force', setpoint: 'Setpoint', gain: 'Servo stiffness', torqueLimit: 'Servo limit', damping: 'Servo damping' }[name.slice(6)] ?? 'Drive');
 }
 
 // One field of the inspector changed: apply it as one step (typing in one field is one step).
@@ -617,6 +740,7 @@ function inspectorChanged(input) {
     if (input.type === 'number' && !Number.isFinite(number)) { toast('Type a number.'); render(); return; }
     const solids = selectedSolids();
     const joints = selectedJoints();
+    if (state.selection.length === 1 && (couplingById(current, state.selection[0]) || tendonById(current, state.selection[0]))) { partChanged(name, value, number); return; }
     if (!state.selection.length) {
         if (name === 'servosToMotors.motor' || name === 'servosToMotors.supply') {
             state.servosToMotors[name.slice(15)] = value;
@@ -767,6 +891,14 @@ function inspectorAction(action) {
     if (action === 'move' || action === 'turn') { setTool(action); return; }
     if (action === 'join') { setTool('join'); return; }
     if (action === 'servosToMotors') { makeServosMotors(); return; }
+    if (action === 'couple') { coupleSelection(); return; }
+    if (action === 'tendon') { tendonOverSelection(); return; }
+    if (action === 'swapCoupling') {
+        const coupling = couplingById(current, state.selection[0]);
+        if (!coupling?.second) { toast('A coupling with one joint has no other to swap with.'); return; }
+        change(updateCoupling(current, coupling.id, { first: coupling.second, second: coupling.first }), `Swap the joints of ${coupling.name}`);
+        return;
+    }
     const joint = jointById(current, selectedJoints()[0]);
     if (!joint) return;
     if (action === 'flipAxis') {
@@ -1405,6 +1537,8 @@ const helpRows = () => [
     ['Move or turn a solid', 'Move (G) or Turn (R), then drag the handles; or type its place and turn'],
     ['Join two solids', 'Join (J), then click a point on each; start on the floor to fix one to the Ground. Shift-click the second to leave it where it is'],
     ['Change a joint', 'Select it: its kind, point and axis, limits, damping and drive (free, a torque, a servo or a motor)'],
+    ['Couple one joint to another', 'Select two hinges or sliders (the first follows the second), then Couple; U'],
+    ['Run a tendon over joints', 'Select the hinges or sliders, then Tendon; T. Select a coupling or a tendon in Parts to change it'],
     ['Pose the robot', 'The jog sliders under Pose; Escape or As drawn goes back to the robot as drawn'],
     ['Keyframe a pose', 'Add keyframe; K. Show, Replace or remove one in Keyframes, or click it; [ and ] show the one before and after'],
     ['Duplicate', `Duplicate; ${keys.duplicate}`],
@@ -1532,7 +1666,7 @@ document.addEventListener('keydown', (event) => {
     if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(); return; }
     const shortcuts = { b: () => addShape('box'), c: () => addShape('cylinder'), s: () => addShape('sphere'), p: () => addShape('capsule'),
         j: () => setTool('join'), g: () => setTool('move'), r: () => setTool('turn'), f: () => view.fit(), '?': showHelp,
-        k: addPoseKeyframe, '[': () => stepKeyframe(-1), ']': () => stepKeyframe(1), m: toggleSizing, i: openImport };
+        k: addPoseKeyframe, '[': () => stepKeyframe(-1), ']': () => stepKeyframe(1), m: toggleSizing, i: openImport, u: coupleSelection, t: tendonOverSelection };
     if (shortcuts[event.key]) { event.preventDefault(); shortcuts[event.key](); }
 });
 

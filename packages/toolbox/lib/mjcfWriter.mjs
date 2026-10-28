@@ -17,13 +17,17 @@
 // - An imported link with no mass is not a body: its joint is the first of the body of the solid it carries, as the
 //   model it came from had it (MuJoCo refuses a moving body with no mass).
 // - A servo is a position actuator on its joint: its stiffness, and its torque limited.
+// - A coupling is a joint equality, its polynomial as it is (both joints counted from where they are drawn, as MuJoCo
+//   counts them from qpos0). A tendon is a fixed tendon; MuJoCo counts its length from nothing where the robot is
+//   drawn, so its spring length and range are written less its offset. Its drive is a general actuator on it: a force,
+//   or a servo kp (setpoint - L) - kv L̇ as gain 0 and an affine bias, its force limited.
 // - Contact is off: every geom has contype and conaffinity 0. Solids drawn touching at a joint would otherwise push each
 //   other apart. Contact comes with its own milestone (docs/direction.md).
 //
 // Names: each body is named by its solid's id and each joint by its joint's id (`s3`, `j2`), so names in the drawing
 // can be anything; the model builder knows them by the same ids.
 
-import { structure, solidById, frameById, frameInWorld, groundId, massOf, poseOf } from './drawing.mjs';
+import { couplingsOf, structure, solidById, frameById, frameInWorld, groundId, massOf, poseOf, tendonsOf } from './drawing.mjs';
 import { directionToLocal, formatNumber, formatVector, normalize, relativePose, scale, toLocal } from './math.mjs';
 import { mjcfGeometry } from './shapes.mjs';
 
@@ -124,8 +128,28 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
     write(1, '</worldbody>');
 
     const loops = built.loops.filter((joint) => joint.kind !== 'slider');
-    if (loops.length) {
+    const softAttributes = (softness, suffix = '') => ['solref', 'solimp'].filter((key) => softness?.[key]).map((key) => `${key}${suffix}="${formatVector(softness[key])}"`);
+    const tendons = tendonsOf(drawing);
+    if (tendons.length) {
+        write(1, '<tendon>');
+        for (const tendon of tendons) {
+            const attributes = [`name="${tendon.id}"`, `stiffness="${formatNumber(tendon.stiffness)}"`, `springlength="${formatNumber(tendon.springLength - tendon.offset)}"`,
+                `damping="${formatNumber(tendon.damping)}"`, `frictionloss="${formatNumber(tendon.friction)}"`];
+            if (tendon.limits) attributes.push('limited="true"', `range="${formatNumber(tendon.limits.lower - tendon.offset)} ${formatNumber(tendon.limits.upper - tendon.offset)}"`);
+            for (const which of ['limit', 'friction']) attributes.push(...softAttributes(tendon.softness?.[which], which));
+            if (tendon.softness?.margin) attributes.push(`margin="${formatNumber(tendon.softness.margin)}"`);
+            write(2, `<fixed ${attributes.join(' ')}>`);
+            for (const { joint, coef } of tendon.parts) write(3, `<joint joint="${joint}" coef="${formatNumber(coef)}"/>`);
+            write(2, '</fixed>');
+        }
+        write(1, '</tendon>');
+    }
+    const couplings = couplingsOf(drawing);
+    if (loops.length || couplings.length) {
         write(1, '<equality>');
+        for (const coupling of couplings) {
+            write(2, `<joint ${[`name="${coupling.id}"`, `joint1="${coupling.first}"`, ...(coupling.second ? [`joint2="${coupling.second}"`] : []), `polycoef="${formatVector(coupling.polycoef)}"`, ...softAttributes(coupling.softness)].join(' ')}/>`);
+        }
         for (const joint of loops) {
             const anchor = frameInWorld(drawing, frameById(drawing, joint.parent));
             const first = solidOf.get(joint.parent);
@@ -143,11 +167,20 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
     }
 
     const servos = treeJoints(drawing, built).filter(({ joint, type }) => type !== 'ball' && joint.drive?.mode === 'servo');
-    if (servos.length) {
+    const pulled = tendons.filter(({ drive }) => drive?.mode === 'servo' || drive?.mode === 'torque');
+    if (servos.length || pulled.length) {
         write(1, '<actuator>');
         for (const { joint } of servos) {
             const limit = joint.drive.torqueLimit;
             write(2, `<position name="${joint.id}" joint="${joint.id}" kp="${formatNumber(joint.drive.gain)}"${joint.drive.damping > 0 ? ` kv="${formatNumber(joint.drive.damping)}"` : ''} forcelimited="true" forcerange="${formatNumber(-limit)} ${formatNumber(limit)}"/>`);
+        }
+        for (const { id, drive, offset } of pulled) {
+            if (drive.mode === 'torque') {
+                write(2, `<general name="${id}" tendon="${id}" gainprm="0" biastype="affine" biasprm="${formatNumber(drive.torque ?? 0)} 0 0"/>`);
+                continue;
+            }
+            const bias = [drive.gain * (drive.setpoint - offset), -drive.gain, -(drive.damping ?? 0)];
+            write(2, `<general name="${id}" tendon="${id}" gainprm="0" biastype="affine" biasprm="${formatVector(bias)}" forcelimited="true" forcerange="${formatNumber(-drive.torqueLimit)} ${formatNumber(drive.torqueLimit)}"/>`);
         }
         write(1, '</actuator>');
     }

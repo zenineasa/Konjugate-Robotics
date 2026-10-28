@@ -37,6 +37,9 @@ The command key is Ctrl on Windows and Linux and ⌘ on a Mac.
 | Join two solids | Join (with the kind beside it), then click a point on each | Click a point on each | `J` |
 | Join without moving | | Shift-click the second point | |
 | Change a joint: kind, point, axis, limits, damping, drive (free, torque, servo or motor) | Its card | Click its mark to select it | |
+| Couple one hinge or slider to another (the first follows the second, by a polynomial) | Select both, then Couple on the card | Click the two joints' marks | `U` |
+| Run a tendon over hinges and sliders (its spring, damping, friction, limits and drive on its card) | Select them, then Tendon on the card | Click the joints' marks | `T` |
+| Change a coupling or a tendon | Its row under Parts, then its card | Its joints show selected in the view | |
 | Set the battery the motors draw from (its voltages, capacity, internal resistance and most current), or a supply by name | The robot's card (nothing selected) | | |
 | Set a joint's motor by name (a Feetech STS3215, say), and its protection (most voltage, cut-off current, duty and time) | Its card: Motor, Protection | | |
 | Make every servo on a hinge a motor by name, on a supply, to size them | The robot's card: Servos to motors, Make them motors | | |

@@ -312,6 +312,41 @@ try {
     assert.equal(pickAndPlace.sharedParameters.find(({ name }) => name === 'Waist setpoint').schedule.samples.length, 8);
     await shot('08-pick-and-place');
 
+    // 12b. Couplings and tendons: the gripper's fingers coupled one to the other by the Couple button, a tendon over them
+    // by its key (T), each changed on its card, deleted by its key and brought back by undo; built, a tendon is a node.
+    await page.selectOption('#exampleSelect', 'gripperArm');
+    await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Arm with gripper');
+    const fingerIds = (await drawing()).joints.filter(({ name }) => /finger slide/.test(name)).map(({ id }) => id);
+    await page.click('#partsTree li:has-text("Left finger slide")');
+    await page.click('#partsTree li:has-text("Right finger slide")', { modifiers: ['Shift'] });
+    await page.click('#inspector button[data-action="couple"]');
+    let coupling = (await drawing()).couplings[0];
+    assert.deepEqual([coupling.first, coupling.second, coupling.polycoef], [...fingerIds, [0, 1, 0, 0, 0]]);
+    assert.match(await page.textContent('#inspector'), /Holds Left finger slide to a polynomial of Right finger slide/);
+    await page.fill('#inspector input[name="polycoef.1"]', '-1');
+    await page.press('#inspector input[name="polycoef.1"]', 'Enter');
+    assert.deepEqual((await drawing()).couplings[0].polycoef, [0, -1, 0, 0, 0]);
+    await page.click('#partsTree li:has-text("Left finger slide")');
+    await page.click('#partsTree li:has-text("Right finger slide")', { modifiers: ['Shift'] });
+    await page.keyboard.press('t');
+    let tendon = (await drawing()).tendons[0];
+    assert.deepEqual(tendon.parts.map(({ joint }) => joint), fingerIds);
+    await page.selectOption('#inspector select[name="drive.mode"]', 'servo');
+    await page.fill('#inspector input[name="drive.setpoint"]', '0.01');
+    await page.press('#inspector input[name="drive.setpoint"]', 'Enter');
+    tendon = (await drawing()).tendons[0];
+    assert.deepEqual([tendon.drive.mode, tendon.drive.setpoint], ['servo', 0.01]);
+    await page.click('#partsTree li:has-text("Tendon")');
+    await page.keyboard.press('Delete');
+    assert.equal((await drawing()).tendons.length, 0);
+    await page.keyboard.press(`${command}+z`);
+    assert.equal((await drawing()).tendons.length, 1);
+    assert.match(await page.textContent('#checksList'), /Ready to build/);
+    await page.click('#buildButton');
+    const gripper = await builtInCanvas((model) => model.nodes.some(({ type }) => type === 'robotTendon'));
+    assert.ok(gripper.edges.some(({ name }) => name === coupling.name), 'the coupling is a relationship');
+    await shot('08b-tendon');
+
     // 14. Will these motors do it? M opens the sizing panel and, as nothing has been run as drawn, Konjugate runs the
     // pick-and-place arm (runBaseline): a card per motor, its run inside its band. A heavier part from 2 s is a what-if
     // forked from that run in Konjugate, shown beside it; Show in canvas opens both, a branch each; M closes the panel.
@@ -420,7 +455,7 @@ try {
     let importedDrawing = await drawing();
     assert.deepEqual(importedDrawing.solids.map(({ name }) => name), ['Base', 'Turret', 'Upper arm', 'Forearm', 'Tip', 'Mount', 'Bob']);
     assert.deepEqual(importedDrawing.source, { kind: 'menagerie', repository: 'https://github.com/google-deepmind/mujoco_menagerie', folder: 'trs_so_arm100', commit, licence: 'Apache-2.0' });
-    assert.match(await page.textContent('#importBody .importReport'), /SO-ARM100: 7 solids and 7 joints, 4 driven by its actuators\.[\s\S]*A tendon \(Coupling\)\.[\s\S]*Extend brake, a damper actuator the drawing cannot take yet\./);
+    assert.match(await page.textContent('#importBody .importReport'), /SO-ARM100: 7 solids and 7 joints, 4 driven by its actuators\.[\s\S]*The joint constraint Lock, which starts inactive\.[\s\S]*Extend brake, a damper actuator the drawing cannot take yet\./);
     const requests = await app.evaluate(() => globalThis.roboticsRequests);
     assert.ok(requests.every((address) => address.includes('/commits/main') || address.includes(commit)), 'every file is fetched at the commit the licence was shown for');
     // GitHub's API is asked for the commit alone (it answers only so many requests an hour): the files the model reads
@@ -530,7 +565,7 @@ try {
     if (existsSync(engine)) {
         const { decodeValidationReport } = await import(pathToFileURL(konjugateModule('src/reportProtocol.mjs')));
         const directory = scratch;
-        for (const [name, built] of [['robot', document], ['linkage', linkage], ['pickAndPlace', pickAndPlace], ['imported', importedModel]]) {
+        for (const [name, built] of [['robot', document], ['linkage', linkage], ['pickAndPlace', pickAndPlace], ['gripper', gripper], ['imported', importedModel]]) {
             await writeFile(join(directory, `${name}.kjt`), await encodeProjectFile(JSON.stringify(built)));
             spawnSync(engine, ['validate', join(directory, `${name}.kjt`), '--report', join(directory, `${name}.report`)]);
             const report = decodeValidationReport(await readFile(join(directory, `${name}.report`)));

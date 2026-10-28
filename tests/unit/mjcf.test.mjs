@@ -72,7 +72,7 @@ test('a model is read as MuJoCo reads it: included files, default classes, a fra
     assert.equal(model.actuators.find(({ name }) => name === 'Waist servo').dampratio, 1);
     assert.deepEqual(model.actuators.map(({ kind }) => kind), ['position', 'position', 'motor', 'other', 'position']);
     assert.deepEqual(model.leftOut, [
-        'a geom of the world (a floor, say): nothing touches anything yet', 'a tendon (Coupling)', 'the joint constraint Lock'
+        'a geom of the world (a floor, say): nothing touches anything yet', 'the joint constraint Lock, which starts inactive'
     ]);
 });
 
@@ -148,11 +148,17 @@ test('an import makes a drawing of the model: its solids at their centres of mas
     assert.deepEqual(report, {
         solids: 7, joints: 7, drives: 4,
         leftOut: [
-            'a geom of the world (a floor, say): nothing touches anything yet', 'a tendon (Coupling)', 'the joint constraint Lock',
+            'a geom of the world (a floor, say): nothing touches anything yet', 'the joint constraint Lock, which starts inactive',
             'joint Shoulder\'s ref: its position here is counted from 0.174532925199 rad, where the model puts its body',
             'Extend brake, a damper actuator the drawing cannot take yet'
         ]
     });
+    // The fixed tendon, its length counted as MuJoCo counts it: from the joints' own zeros, so the shoulder's ref is in
+    // its offset; nothing on it yet but its parts.
+    const coupling = drawing.tendons.find(({ name }) => name === 'Coupling');
+    assert.deepEqual(coupling.parts.map(({ joint: id, coef }) => [drawing.joints.find((candidate) => candidate.id === id).name, coef]), [['Shoulder', 1], ['Elbow', -1]]);
+    close(coupling.offset, 0.174532925199, 1e-9);
+    assert.deepEqual([coupling.stiffness, coupling.damping, coupling.friction, coupling.limits, coupling.drive.mode], [0, 0, 0, null, 'free']);
     // A look is the body's visible geoms in its solid's frame: the turret's mesh box, corner for corner, where the model
     // puts it in the world.
     const turret = drawing.solids.find(({ name }) => name === 'Turret');

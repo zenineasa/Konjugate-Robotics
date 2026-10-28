@@ -377,6 +377,9 @@ export function readModel(files, main) {
             let kind;
             let damping = 0;
             let dampratio = 0;
+            // A servo's target is controlScale times its control plus controlOffset.
+            let controlScale = 1;
+            let controlOffset = 0;
             if (element.name === 'position') {
                 gain = Number(get('kp') ?? 1);
                 damping = Number(get('kv') ?? 0);
@@ -392,7 +395,16 @@ export function readModel(files, main) {
                 const gainParameters = numbers(get('gainprm') ?? '1');
                 const biasParameters = numbers(get('biasprm') ?? '0');
                 gain = gainParameters[0] ?? 1;
-                if (gainType === 'fixed' && biasType === 'affine' && gain > 0 && (biasParameters[1] ?? 0) === -gain && (biasParameters[0] ?? 0) === 0) { kind = 'position'; damping = -(biasParameters[2] ?? 0); }
+                // gain times the control plus b₀ + b₁ length + b₂ speed, b₁ < 0: a servo of stiffness -b₁ and damping
+                // -b₂ to (gain control + b₀) / -b₁.
+                const stiffness = -(biasParameters[1] ?? 0);
+                if (gainType === 'fixed' && biasType === 'affine' && stiffness > 0 && gainParameters.slice(1).every((value) => value === 0)) {
+                    kind = 'position';
+                    damping = -(biasParameters[2] ?? 0);
+                    controlScale = gain / stiffness;
+                    controlOffset = (biasParameters[0] ?? 0) / stiffness;
+                    gain = stiffness;
+                }
                 else if (biasType === 'none' && gainType === 'fixed') kind = 'motor';
                 else kind = 'other';
             } else {
@@ -408,7 +420,8 @@ export function readModel(files, main) {
             const gear = numbers(get('gear') ?? '1')[0] ?? 1;
             const target = element.attributes.joint ?? null;
             actuators.push({
-                name: element.attributes.name ?? '', element: element.name, joint: target, kind, gain, damping, dampratio, gear,
+                name: element.attributes.name ?? '', element: element.name, joint: target, tendon: element.attributes.tendon ?? null,
+                kind, gain, damping, dampratio, gear, controlScale, controlOffset,
                 forceRange: rangeOf('force'), controlRange: rangeOf('ctrl'),
                 transmission: target ? 'joint' : ['tendon', 'site', 'body', 'jointinparent'].find((key) => element.attributes[key] !== undefined) ?? 'none'
             });
@@ -417,20 +430,58 @@ export function readModel(files, main) {
 
     // What the model has that the drawing cannot hold yet.
     const children = (name) => root.children.filter((child) => child.name === name).flatMap((child) => child.children);
-    const tendons = children('tendon');
+    const tendonElements = children('tendon');
     const equalities = children('equality');
     if (counts.worldGeoms) leftOut.push(`${counts.worldGeoms === 1 ? 'a geom' : `${counts.worldGeoms} geoms`} of the world (a floor, say): nothing touches anything yet`);
-    if (tendons.length) leftOut.push(`${tendons.length === 1 ? 'a tendon' : `${tendons.length} tendons`} (${tendons.map((tendon) => tendon.attributes.name ?? tendon.name).join(', ')})`);
+    // Fixed tendons: a weighted sum of joints' positions (MuJoCo's qpos, not counted from the ref), with a spring, a
+    // damping, a dry friction and a range, softened as a joint's are.
+    const tendons = [];
+    for (const element of tendonElements) {
+        const label = element.attributes.name ? `tendon ${element.attributes.name}` : 'a tendon';
+        if (element.name !== 'fixed') { leftOut.push(`${label}, a ${element.name} tendon (only fixed ones, over joints, come in)`); continue; }
+        const className = element.attributes.class ?? 'main';
+        const get = (attribute) => resolve(element, 'tendon', className, attribute);
+        const rangeText = get('range');
+        const limited = get('limited') ?? 'auto';
+        const range = rangeText === undefined ? null : numbers(rangeText);
+        const springLength = get('springlength') === undefined ? null : numbers(get('springlength'));
+        if (springLength && springLength.length > 1 && springLength[0] !== springLength[1]) leftOut.push(`${label}'s spring's dead band: its spring pulls to ${springLength[0]}`);
+        tendons.push({
+            name: element.attributes.name ?? `Tendon ${tendons.length + 1}`,
+            parts: element.children.filter((child) => child.name === 'joint').map((child) => ({ joint: child.attributes.joint, coef: Number(child.attributes.coef ?? 1) })),
+            range: limited === 'true' || (limited === 'auto' && autolimits && range !== null && !(range[0] === 0 && range[1] === 0)) ? range : null,
+            stiffness: Number(get('stiffness') ?? 0), springLength: springLength ? springLength[0] : null, damping: Number(get('damping') ?? 0),
+            friction: Number(get('frictionloss') ?? 0),
+            soft: {
+                limit: { solref: optionalNumbers(get('solreflimit')), solimp: solimpOf(get('solimplimit')) },
+                friction: { solref: optionalNumbers(get('solreffriction')), solimp: solimpOf(get('solimpfriction')) },
+                margin: get('margin') === undefined ? undefined : Number(get('margin'))
+            }
+        });
+    }
+    // Joint equalities: one joint's position a polynomial of another's (or held), softened by its solref and solimp.
+    const couplings = [];
     for (const equality of equalities) {
         const { name, joint1, joint2, body1, body2 } = equality.attributes;
+        const className = equality.attributes.class ?? 'main';
+        const get = (attribute) => resolve(equality, 'equality', className, attribute);
+        if (equality.name === 'joint' && (get('active') ?? 'true') === 'true') {
+            couplings.push({
+                name: name ?? `${joint1}${joint2 ? ` with ${joint2}` : ''}`, joint1, joint2: joint2 ?? null,
+                polycoef: [0, 1, 0, 0, 0].map((value, index) => numbers(get('polycoef') ?? '0 1 0 0 0')[index] ?? value),
+                soft: { solref: optionalNumbers(get('solref')), solimp: solimpOf(get('solimp')) }
+            });
+            continue;
+        }
         const between = [joint1 ?? body1, joint2 ?? body2].filter(Boolean);
-        leftOut.push(name ? `the ${equality.name} constraint ${name}` : `the ${equality.name} constraint on ${between.join(' and ') || 'the model'}`);
+        const inactive = (get('active') ?? 'true') !== 'true';
+        leftOut.push(`${name ? `the ${equality.name} constraint ${name}` : `the ${equality.name} constraint on ${between.join(' and ') || 'the model'}`}${inactive ? ', which starts inactive' : ''}`);
     }
     if (children('contact').length) leftOut.push('the contact pairs and exclusions: nothing touches anything yet');
     for (const name of counts.springs) leftOut.push(`joint ${name}'s spring (its stiffness): the drawing's joints have none yet`);
     for (const name of counts.gravcomp) leftOut.push(`${name}'s gravity compensation`);
     if (gravity.some((value, axis) => Math.abs(value - [0, 0, -9.81][axis]) > 1e-9)) leftOut.push(`the model's gravity (${gravity.join(' ')}): a drawing has 9.81 m/s² downward`);
-    return { name: root.attributes.model ?? null, bodies, actuators, gravity, timestep, leftOut, meshTriangles };
+    return { name: root.attributes.model ?? null, bodies, actuators, tendons, couplings, gravity, timestep, leftOut, meshTriangles };
 }
 
 // Each body's look: a mesh of its visible geoms in its own frame, merged, and the colour of the largest; null for a

@@ -105,7 +105,7 @@ function take(drawing, prefix) {
 
 // A name not yet used by a solid or joint: `base`, or `base 2`, `base 3` and so on.
 export function uniqueName(drawing, base) {
-    const taken = new Set([...drawing.solids, ...drawing.joints].map(({ name }) => name.toLowerCase()));
+    const taken = new Set([...drawing.solids, ...drawing.joints, ...couplingsOf(drawing), ...tendonsOf(drawing)].map(({ name }) => name.toLowerCase()));
     if (!taken.has(base.toLowerCase())) return base;
     for (let suffix = 2; ; suffix += 1) if (!taken.has(`${base} ${suffix}`.toLowerCase())) return `${base} ${suffix}`;
 }
@@ -197,7 +197,7 @@ export function removeSolids(drawing, ids) {
     next.solids = next.solids.filter((solid) => !ids.includes(solid.id));
     next.frames = next.frames.filter((frame) => !removedFrames.has(frame.id));
     next.joints = next.joints.filter((joint) => !removedFrames.has(joint.parent) && !removedFrames.has(joint.child));
-    return next;
+    return withoutGoneJoints(next);
 }
 
 // Copies of solids, a little to the side, with their frames (not their joints). Returns { drawing, ids }.
@@ -396,7 +396,93 @@ export function removeJoints(drawing, ids) {
     next.joints = next.joints.filter((joint) => !ids.includes(joint.id));
     const used = new Set(next.joints.flatMap((joint) => [joint.parent, joint.child]));
     next.frames = next.frames.filter((frame) => used.has(frame.id));
+    return withoutGoneJoints(next);
+}
+
+// ---- couplings and tendons ----------------------------------------------------------------------------------------
+// A coupling holds one hinge's or slider's position to a polynomial of another's, q₁ = c₀ + c₁ q₂ + c₂ q₂² + c₃ q₂³ +
+// c₄ q₂⁴ (each counted from where the robot is drawn), or to c₀ with no second joint, as MuJoCo's joint equality
+// does: { id, name, first, second (joint ids; second may be null), polycoef [c₀ … c₄], softness { solref, solimp } }.
+// A tendon is a weighted sum of hinges' and sliders' positions, its length L = offset + Σ coef q (offset its length
+// where the robot is drawn), as MuJoCo's fixed tendon is: { id, name, parts [{ joint, coef }], offset, stiffness and
+// springLength (a spring pulling it to that length), damping, friction (a dry friction), limits ({ lower, upper } or
+// null), softness ({ limit, friction, margin }, as a joint's), drive }. Its drive: free; a force (torque, along it); or
+// a servo pulling it to its setpoint length with stiffness `gain`, damping `damping`, up to `torqueLimit`.
+export const couplingsOf = (drawing) => drawing.couplings ?? [];
+export const tendonsOf = (drawing) => drawing.tendons ?? [];
+export const couplingById = (drawing, id) => couplingsOf(drawing).find((coupling) => coupling.id === id) ?? null;
+export const tendonById = (drawing, id) => tendonsOf(drawing).find((tendon) => tendon.id === id) ?? null;
+export const defaultTendonDrive = () => ({ mode: 'free', torque: 0, setpoint: 0, gain: 100, damping: 0, torqueLimit: 100 });
+
+// Couples `first` to `second` (or holds `first` still, with none), one to one by default. Returns { drawing, id }.
+export function addCoupling(drawing, first, second = null, { name, polycoef } = {}) {
+    const next = structuredClone(drawing);
+    const id = take(next, 'c');
+    const firstJoint = jointById(next, first);
+    const secondJoint = second ? jointById(next, second) : null;
+    if (!firstJoint || (second && !secondJoint)) throw new Error('Choose the joints to couple.');
+    next.couplings = [...couplingsOf(next), {
+        id, name: uniqueName(next, name ?? `${firstJoint.name} with ${secondJoint?.name ?? 'still'}`),
+        first, second: second ?? null, polycoef: polycoef ?? [0, second ? 1 : 0, 0, 0, 0]
+    }];
+    return { drawing: next, id };
+}
+
+export function updateCoupling(drawing, id, changes) {
+    const next = structuredClone(drawing);
+    const coupling = couplingById(next, id);
+    if (!coupling) throw new Error(`There is no coupling ${id}.`);
+    if (changes.name !== undefined) coupling.name = String(changes.name);
+    if (changes.polycoef !== undefined) coupling.polycoef = changes.polycoef.map(Number);
+    if (changes.first !== undefined) coupling.first = changes.first;
+    if (changes.second !== undefined) coupling.second = changes.second;
     return next;
+}
+
+export function removeCouplings(drawing, ids) {
+    const next = structuredClone(drawing);
+    next.couplings = couplingsOf(next).filter(({ id }) => !ids.includes(id));
+    return next;
+}
+
+// A tendon over `parts` ([{ joint, coef }]), its length where the robot is drawn `offset`. Returns { drawing, id }.
+export function addTendon(drawing, parts, { name, offset = 0 } = {}) {
+    const next = structuredClone(drawing);
+    if (!parts.length || parts.some(({ joint }) => !jointById(next, joint))) throw new Error('Choose the joints the tendon runs over.');
+    const id = take(next, 't');
+    next.tendons = [...tendonsOf(next), {
+        id, name: uniqueName(next, name ?? 'Tendon'), parts: parts.map(({ joint, coef }) => ({ joint, coef: Number(coef) })), offset,
+        stiffness: 0, springLength: offset, damping: 0, friction: 0, limits: null, drive: defaultTendonDrive()
+    }];
+    return { drawing: next, id };
+}
+
+export function updateTendon(drawing, id, changes) {
+    const next = structuredClone(drawing);
+    const tendon = tendonById(next, id);
+    if (!tendon) throw new Error(`There is no tendon ${id}.`);
+    if (changes.name !== undefined) tendon.name = String(changes.name);
+    for (const field of ['stiffness', 'springLength', 'damping', 'friction', 'offset']) if (changes[field] !== undefined) tendon[field] = Number(changes[field]);
+    if (changes.limits !== undefined) tendon.limits = changes.limits ? { lower: Number(changes.limits.lower), upper: Number(changes.limits.upper) } : null;
+    if (changes.parts !== undefined) tendon.parts = changes.parts.map(({ joint, coef }) => ({ joint, coef: Number(coef) }));
+    if (changes.drive) tendon.drive = { ...defaultTendonDrive(), ...tendon.drive, ...changes.drive };
+    return next;
+}
+
+export function removeTendons(drawing, ids) {
+    const next = structuredClone(drawing);
+    next.tendons = tendonsOf(next).filter(({ id }) => !ids.includes(id));
+    return next;
+}
+
+// With joints gone: couplings on them go, and so do tendons' parts over them (a tendon over none goes).
+function withoutGoneJoints(drawing) {
+    const ids = new Set(drawing.joints.map(({ id }) => id));
+    if (drawing.couplings) drawing.couplings = drawing.couplings.filter(({ first, second }) => ids.has(first) && (!second || ids.has(second)));
+    if (drawing.tendons) {
+        drawing.tendons = drawing.tendons.map((tendon) => ({ ...tendon, parts: tendon.parts.filter(({ joint }) => ids.has(joint)) })).filter(({ parts }) => parts.length);
+    }
+    return drawing;
 }
 
 // ---- structure --------------------------------------------------------------------------------------------------
@@ -468,7 +554,7 @@ export function checkDrawing(drawing) {
     const notes = [];
     if (!drawing.solids.length) errors.push({ message: 'Add a solid to start: a box, a cylinder, a sphere or a capsule.' });
     const names = new Map();
-    for (const item of [...drawing.solids, ...drawing.joints]) {
+    for (const item of [...drawing.solids, ...drawing.joints, ...couplingsOf(drawing), ...tendonsOf(drawing)]) {
         const key = item.name.trim().toLowerCase();
         if (!key) errors.push({ id: item.id, message: 'Everything needs a name.' });
         else if (names.has(key)) errors.push({ id: item.id, message: `Two things are called "${item.name}"; give each its own name.` });
@@ -535,6 +621,36 @@ export function checkDrawing(drawing) {
         if (gap > 1e-4) notes.push({ id: joint.id, message: `${joint.name}: its two frames are ${(gap * 1000).toFixed(1)} mm apart; the joint turns about the first one's point.` });
     }
     const built = structure(drawing);
+    // A coupling's and a tendon's joints: hinges or sliders of the tree.
+    const inTree = new Set([...built.parentJoint.values()].map(({ joint }) => joint.id));
+    const movable = (id, owner) => {
+        const joint = jointById(drawing, id);
+        if (!joint) return `${owner}: one of its joints is gone.`;
+        if (joint.kind !== 'hinge' && joint.kind !== 'slider') return `${owner}: ${joint.name} is a ${joint.kind} joint; it couples hinges and sliders.`;
+        if (!inTree.has(joint.id)) return `${owner}: ${joint.name} closes a loop; couple another joint of the loop.`;
+        return null;
+    };
+    for (const coupling of couplingsOf(drawing)) {
+        for (const id of [coupling.first, coupling.second].filter(Boolean)) {
+            const problem = movable(id, coupling.name);
+            if (problem) errors.push({ id: coupling.id, message: problem });
+        }
+        if (coupling.first === coupling.second) errors.push({ id: coupling.id, message: `${coupling.name}: it couples a joint with itself.` });
+        if (!(Array.isArray(coupling.polycoef) && coupling.polycoef.length === 5 && coupling.polycoef.every(Number.isFinite))) errors.push({ id: coupling.id, message: `${coupling.name}: its polynomial is five numbers.` });
+    }
+    for (const tendon of tendonsOf(drawing)) {
+        if (!tendon.parts?.length) errors.push({ id: tendon.id, message: `${tendon.name}: it runs over no joint.` });
+        for (const { joint: id, coef } of tendon.parts ?? []) {
+            const problem = movable(id, tendon.name);
+            if (problem) errors.push({ id: tendon.id, message: problem });
+            if (!(Number.isFinite(coef) && coef !== 0)) errors.push({ id: tendon.id, message: `${tendon.name}: each joint's share of it is a number other than zero.` });
+        }
+        if (new Set((tendon.parts ?? []).map(({ joint }) => joint)).size !== (tendon.parts ?? []).length) errors.push({ id: tendon.id, message: `${tendon.name}: it runs over a joint twice.` });
+        for (const field of ['stiffness', 'damping', 'friction']) if (!(Number.isFinite(tendon[field]) && tendon[field] >= 0)) errors.push({ id: tendon.id, message: `${tendon.name}: its ${field} must be zero or more.` });
+        if (tendon.limits && !(tendon.limits.lower < tendon.limits.upper)) errors.push({ id: tendon.id, message: `${tendon.name}: its shortest length must be below its longest.` });
+        const drive = tendon.drive ?? { mode: 'free' };
+        if (drive.mode === 'servo' && !(drive.gain > 0 && drive.torqueLimit > 0 && drive.damping >= 0)) errors.push({ id: tendon.id, message: `${tendon.name}: its servo's stiffness and most force must be more than zero, its damping zero or more.` });
+    }
     for (const joint of built.loops) {
         const held = {
             ball: 'together at its point, free to turn there',

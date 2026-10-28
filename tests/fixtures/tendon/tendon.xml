@@ -1,0 +1,44 @@
+<!-- Copyright © 2026 Zenin Easa Panthakkalakath -->
+<!-- An arm with a fixed tendon over its shoulder and elbow (a spring, damping, a dry friction and a limit), and two
+     fingers held mirrored by a joint equality and closed by a servo on a tendon over both, as the Panda's are. -->
+<mujoco model="tendon">
+  <compiler angle="radian"/>
+  <option timestep="0.001" integrator="implicitfast"><flag contact="disable"/></option>
+  <worldbody>
+    <body name="Base" pos="0 0 0.5">
+      <inertial pos="0 0 0" mass="1" diaginertia="0.01 0.01 0.01"/>
+      <body name="Upper arm">
+        <joint name="Shoulder" axis="0 1 0" damping="0.05" range="-1.2 1.2"/>
+        <inertial pos="0.15 0 0" mass="0.8" diaginertia="0.002 0.006 0.006"/>
+        <body name="Forearm" pos="0.3 0 0">
+          <joint name="Elbow" axis="0 1 0" damping="0.02"/>
+          <inertial pos="0.12 0 0.01" mass="0.5" diaginertia="0.001 0.003 0.003"/>
+          <body name="Left finger" pos="0.25 0.02 0">
+            <joint name="Left" type="slide" axis="0 1 0" range="-0.01 0.04"/>
+            <inertial pos="0 0.005 -0.02" mass="0.05" diaginertia="1e-5 1e-5 1e-5"/>
+          </body>
+          <body name="Right finger" pos="0.25 -0.02 0">
+            <joint name="Right" type="slide" axis="0 -1 0" range="-0.01 0.04"/>
+            <inertial pos="0 -0.005 -0.02" mass="0.05" diaginertia="1e-5 1e-5 1e-5"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <tendon>
+    <fixed name="Strap" stiffness="2" springlength="0.1" damping="0.3" frictionloss="0.05" range="-0.6 0.6">
+      <joint joint="Shoulder" coef="1"/>
+      <joint joint="Elbow" coef="0.5"/>
+    </fixed>
+    <fixed name="Grip">
+      <joint joint="Left" coef="0.5"/>
+      <joint joint="Right" coef="0.5"/>
+    </fixed>
+  </tendon>
+  <equality>
+    <joint name="Mirror" joint1="Right" joint2="Left" polycoef="0 1 0 0 0" solref="0.005 1" solimp="0.95 0.99 0.001"/>
+  </equality>
+  <actuator>
+    <general name="Grip servo" tendon="Grip" ctrlrange="0 255" gainprm="0.0156862745" biastype="affine" biasprm="3 -100 -10" forcerange="-20 20"/>
+  </actuator>
+</mujoco>

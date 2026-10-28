@@ -27,7 +27,7 @@
 
 import { compose, rotate } from './frames.mjs';
 import { principal } from './inertia.mjs';
-import { createDrawing, defaultDrive, groundId } from './drawing.mjs';
+import { createDrawing, defaultDrive, defaultTendonDrive, groundId } from './drawing.mjs';
 
 const conjugate = ([w, x, y, z]) => [w, -x, -y, -z];
 const subtract = (a, b) => a.map((value, axis) => value - b[axis]);
@@ -127,7 +127,12 @@ function massMatrix(model) {
             for (let c = 0; c < 2 * n; c += 1) inverse[r][c] -= factor * inverse[column][c];
         }
     }
-    return { dofOf: (name) => named.get(name) ?? null, inertia: (dof) => 1 / inverse[dof][n + dof] };
+    return {
+        dofOf: (name) => named.get(name) ?? null,
+        inertia: (dof) => 1 / inverse[dof][n + dof],
+        // Along a tendon, its coefficients by degree of freedom: 1 / (cᵀ M⁻¹ c).
+        inertiaAlong: (coefs) => 1 / coefs.reduce((sum, [a, ca]) => sum + coefs.reduce((inner, [b, cb]) => inner + ca * inverse[a][n + b] * cb, 0), 0)
+    };
 }
 
 // The drawing a model makes, as { drawing, looks, report }. `model` is lib/mjcf.mjs's readModel; `looks` maps each
@@ -290,25 +295,73 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
         }
     }
 
-    // Actuators: each joint's first that the drawing can take, as its drive.
+    // Couplings (joint equalities) and fixed tendons, over the joints that came in.
+    const couplingIds = new Map();
+    for (const coupling of model.couplings ?? []) {
+        const first = jointOf.get(coupling.joint1);
+        const second = coupling.joint2 ? jointOf.get(coupling.joint2) : null;
+        if (!first || (coupling.joint2 && !second) || [first, second].some((target) => target && target.entry.kind !== 'hinge' && target.entry.kind !== 'slider')) {
+            leftOut.push(`the joint constraint ${coupling.name}, on joints that did not come in as hinges or sliders`);
+            continue;
+        }
+        // MuJoCo counts both from their qpos0, the ref, as the drawing counts its joints from where they are drawn.
+        const entry = { id: take('c'), name: unique(coupling.name), first: first.entry.id, second: second?.entry.id ?? null, polycoef: coupling.polycoef.map(round) };
+        const softness = Object.fromEntries(['solref', 'solimp'].filter((key) => coupling.soft?.[key]).map((key) => [key, coupling.soft[key].map(round)]));
+        if (Object.keys(softness).length) entry.softness = softness;
+        (drawing.couplings ??= []).push(entry);
+        couplingIds.set(coupling.name, entry.id);
+    }
+    const tendonOf = new Map();
+    for (const tendon of model.tendons ?? []) {
+        const parts = tendon.parts.map(({ joint, coef }) => ({ target: jointOf.get(joint), coef }));
+        if (!parts.length || parts.some(({ target }) => !target || (target.entry.kind !== 'hinge' && target.entry.kind !== 'slider'))) {
+            leftOut.push(`tendon ${tendon.name}, over joints that did not come in as hinges or sliders`);
+            continue;
+        }
+        // Its length as MuJoCo has it (over each joint's qpos, the ref where the robot is drawn) where it is drawn.
+        const offset = parts.reduce((sum, { target, coef }) => sum + coef * target.joint.reference, 0);
+        const entry = {
+            id: take('t'), name: unique(tendon.name), parts: parts.map(({ target, coef }) => ({ joint: target.entry.id, coef: round(coef) })), offset: round(offset),
+            stiffness: round(tendon.stiffness), springLength: round(tendon.springLength ?? offset), damping: round(tendon.damping), friction: round(tendon.friction),
+            limits: tendon.range ? { lower: round(tendon.range[0]), upper: round(tendon.range[1]) } : null,
+            drive: defaultTendonDrive()
+        };
+        const softness = Object.fromEntries([
+            ...['limit', 'friction'].filter((which) => tendon.soft[which].solref || tendon.soft[which].solimp)
+                .map((which) => [which, Object.fromEntries(['solref', 'solimp'].filter((key) => tendon.soft[which][key]).map((key) => [key, tendon.soft[which][key].map(round)]))]),
+            ...(tendon.soft.margin ? [['margin', round(tendon.soft.margin)]] : [])
+        ]);
+        if (Object.keys(softness).length) entry.softness = softness;
+        (drawing.tendons ??= []).push(entry);
+        tendonOf.set(tendon.name, { entry, parts });
+    }
+
+    // Actuators: each joint's or tendon's first that the drawing can take, as its drive.
     let drives = 0;
     const driven = new Set();
     let matrix = null;
     for (const actuator of model.actuators) {
         const label = actuator.name || `a ${actuator.element} actuator`;
-        if (actuator.transmission !== 'joint') { leftOut.push(`${label}, which acts through a ${actuator.transmission} rather than a joint`); continue; }
-        const target = jointOf.get(actuator.joint);
-        if (!target || target.entry.kind === 'ball') { leftOut.push(`${label}, on joint ${actuator.joint}, which ${target ? 'is a ball' : 'did not come in'}`); continue; }
-        if (driven.has(actuator.joint)) { leftOut.push(`${label}: joint ${actuator.joint} has a drive already`); continue; }
-        const { entry, joint } = target;
+        if (actuator.transmission !== 'joint' && actuator.transmission !== 'tendon') { leftOut.push(`${label}, which acts through a ${actuator.transmission} rather than a joint or a tendon`); continue; }
+        const onTendon = actuator.transmission === 'tendon';
+        const target = onTendon ? tendonOf.get(actuator.tendon) : jointOf.get(actuator.joint);
+        const what = onTendon ? `tendon ${actuator.tendon}` : `joint ${actuator.joint}`;
+        if (!target || (!onTendon && target.entry.kind === 'ball')) { leftOut.push(`${label}, on ${what}, which ${target ? 'is a ball' : 'did not come in'}`); continue; }
+        if (driven.has(what)) { leftOut.push(`${label}: ${what} has a drive already`); continue; }
+        const { entry } = target;
+        const reference = onTendon ? 0 : target.joint.reference;
         const gear = actuator.gear || 1;
+        const base = onTendon ? defaultTendonDrive() : defaultDrive(entry.kind);
         if (actuator.kind === 'position') {
             const force = actuator.forceRange ? Math.max(Math.abs(actuator.forceRange[0]), Math.abs(actuator.forceRange[1])) : null;
-            // Its control of 0, held to its control range as MuJoCo holds it, is its target, over its gear.
+            // Its control of 0, held to its control range as MuJoCo holds it, gives its target (the control itself for a
+            // position actuator; for a general one, its gain times it plus its first bias, over its stiffness), over
+            // its gear, counted from the ref.
             const control = actuator.controlRange ? Math.min(Math.max(0, actuator.controlRange[0]), actuator.controlRange[1]) : 0;
+            const aim = (actuator.controlScale ?? 1) * control + (actuator.controlOffset ?? 0);
             entry.drive = {
-                ...defaultDrive(entry.kind), mode: 'servo', gain: round(actuator.gain * gear * gear),
-                setpoint: round(control / gear - joint.reference),
+                ...base, mode: 'servo', gain: round(actuator.gain * gear * gear),
+                setpoint: round(aim / gear - reference),
                 torqueLimit: round(force === null ? 1e6 : force * Math.abs(gear))
             };
             if (actuator.forceRange && Math.abs(actuator.forceRange[0] + actuator.forceRange[1]) > 1e-12) leftOut.push(`${label}'s force range is not even about zero: the servo gives up to ${round(force)} either way`);
@@ -317,18 +370,20 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
             if (actuator.damping) entry.drive.damping = round(actuator.damping * gear * gear);
             if (actuator.dampratio) {
                 // As MuJoCo works it out: dampratio times twice the root of kp times the inertia the actuator moves at
-                // the model's reference pose (massMatrix), over gear²; times gear² at the joint.
+                // the model's reference pose (massMatrix), over gear²; times gear² at the joint or tendon.
                 matrix ??= massMatrix(model);
-                const inertia = matrix.inertia(matrix.dofOf(joint.name));
+                const inertia = onTendon
+                    ? matrix.inertiaAlong(target.parts.map(({ target: part, coef }) => [matrix.dofOf(part.joint.name), coef]))
+                    : matrix.inertia(matrix.dofOf(target.joint.name));
                 entry.drive.damping = round(actuator.dampratio * 2 * Math.sqrt(actuator.gain * gear * gear * inertia));
             }
         } else if (actuator.kind === 'motor') {
-            entry.drive = { ...defaultDrive(entry.kind), mode: 'torque', torque: 0 };
+            entry.drive = { ...base, mode: 'torque', torque: 0 };
         } else {
             leftOut.push(`${label}, a ${actuator.element} actuator the drawing cannot take yet`);
             continue;
         }
-        driven.add(actuator.joint);
+        driven.add(what);
         drives += 1;
     }
     return { drawing, looks: solidLooks, report: { solids: drawing.solids.length, joints, drives, leftOut } };
