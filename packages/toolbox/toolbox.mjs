@@ -651,6 +651,8 @@ function jointInspector(joint) {
         ${field('Damping', numberInput('damping', joint.damping, { min: 0 }), linear ? 'N·s/m' : 'N·m·s/rad')}
         ${field('Friction', numberInput('friction', joint.friction, { min: 0 }), linear ? 'N' : 'N·m')}
         ${field('Armature', numberInput('armature', joint.armature, { min: 0, title: 'The inertia of what turns with the joint inside it, such as a motor\'s rotor through its gearbox' }), linear ? 'kg' : 'kg·m²')}
+        ${field('Spring', numberInput('stiffness', joint.stiffness ?? 0, { min: 0, title: 'A spring\'s stiffness, pulling the joint to its rest; 0 for none' }), linear ? 'N/m' : 'N·m/rad')}
+        ${joint.stiffness > 0 ? field('Spring rest', numberInput('springRest', show(joint.springRest ?? 0), { title: 'Where the spring pulls it to, from where it is drawn' }), unit) : ''}
         ${joint.limits || joint.friction > 0 ? `<p class="note">Its ${joint.limits && joint.friction > 0 ? 'limits and dry friction are' : joint.limits ? 'limits are' : 'dry friction is'} held as MuJoCo holds them, softly${joint.softness ? ', as the model it came from sets them' : ''}.</p>` : ''}
         ${driveFields.join('')}
         <div class="buttons"><button type="button" class="tool" data-action="tendon" title="A tendon over this joint (T); select more joints to run it over them too">Tendon</button></div>` : ''}
@@ -686,6 +688,7 @@ function tendonInspector(tendon) {
         <h2>Spring, damping and friction</h2>
         ${field('Stiffness', numberInput('stiffness', tendon.stiffness, { min: 0 }), 'per unit of length')}
         ${field('Spring length', numberInput('springLength', tendon.springLength))}
+        ${field('Dead band to', numberInput('springLengthUpper', tendon.springLengthUpper ?? tendon.springLength, { title: 'The spring does not pull between its length and this' }))}
         ${field('Damping', numberInput('damping', tendon.damping, { min: 0 }))}
         ${field('Friction', numberInput('friction', tendon.friction, { min: 0 }))}
         <label class="field"><span>Limited</span><span><input type="checkbox" name="limited"${tendon.limits ? ' checked' : ''}></span></label>
@@ -722,6 +725,7 @@ function partChanged(name, value, number) {
         return;
     }
     if (['stiffness', 'damping', 'friction'].includes(name) && number < 0) { toast('This must be zero or more.'); render(); return; }
+    if (name === 'springLengthUpper') { apply({ springLengthUpper: number === tendon.springLength ? null : number }, 'Dead band'); return; }
     if (['offset', 'stiffness', 'springLength', 'damping', 'friction'].includes(name)) { apply({ [name]: number }, name[0].toUpperCase() + name.slice(1).replace(/([A-Z])/g, ' $1').toLowerCase()); return; }
     if (name === 'limited') { apply({ limits: value ? { lower: tendon.offset - 0.5, upper: tendon.offset + 0.5 } : null }, 'Limits'); return; }
     if (name === 'limits.lower' || name === 'limits.upper') { apply({ limits: { ...tendon.limits, [name.slice(7)]: number } }, 'Limits'); return; }
@@ -834,6 +838,12 @@ function inspectorChanged(input) {
             apply({ [name]: number }, name[0].toUpperCase() + name.slice(1));
             return;
         }
+        if (name === 'stiffness') {
+            if (number < 0) { toast('A spring\'s stiffness is zero or more.'); render(); return; }
+            apply({ stiffness: number }, 'Spring');
+            return;
+        }
+        if (name === 'springRest') { apply({ springRest: fromShown(number) }, 'Spring rest'); return; }
         if (name === 'drive.mode') { apply({ drive: { mode: value } }, 'Drive'); return; }
         if (name === 'drive.proportional' || name === 'drive.derivative') {
             if (number < 0) { toast('A gain must be zero or more.'); render(); return; }
@@ -1536,7 +1546,7 @@ const helpRows = () => [
     ['Fit the robot in the view', 'Fit; F'],
     ['Move or turn a solid', 'Move (G) or Turn (R), then drag the handles; or type its place and turn'],
     ['Join two solids', 'Join (J), then click a point on each; start on the floor to fix one to the Ground. Shift-click the second to leave it where it is'],
-    ['Change a joint', 'Select it: its kind, point and axis, limits, damping and drive (free, a torque, a servo or a motor)'],
+    ['Change a joint', 'Select it: its kind, point and axis, limits, damping, spring and drive (free, a torque, a servo or a motor)'],
     ['Couple one joint to another', 'Select two hinges or sliders (the first follows the second), then Couple; U'],
     ['Run a tendon over joints', 'Select the hinges or sliders, then Tendon; T. Select a coupling or a tendon in Parts to change it'],
     ['Pose the robot', 'The jog sliders under Pose; Escape or As drawn goes back to the robot as drawn'],

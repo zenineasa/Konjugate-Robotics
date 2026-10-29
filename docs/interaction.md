@@ -36,7 +36,7 @@ The command key is Ctrl on Windows and Linux and ⌘ on a Mac.
 | Move or turn a solid (and the solids it carries) | Its card: position and turn; Move, Turn | Drag the handles | `G`, `R` |
 | Join two solids | Join (with the kind beside it), then click a point on each | Click a point on each | `J` |
 | Join without moving | | Shift-click the second point | |
-| Change a joint: kind, point, axis, limits, damping, drive (free, torque, servo or motor) | Its card | Click its mark to select it | |
+| Change a joint: kind, point, axis, limits, damping, spring, drive (free, torque, servo or motor) | Its card | Click its mark to select it | |
 | Couple one hinge or slider to another (the first follows the second, by a polynomial) | Select both, then Couple on the card | Click the two joints' marks | `U` |
 | Run a tendon over hinges and sliders (its spring, damping, friction, limits and drive on its card) | Select them, then Tendon on the card | Click the joints' marks | `T` |
 | Change a coupling or a tendon | Its row under Parts, then its card | Its joints show selected in the view | |

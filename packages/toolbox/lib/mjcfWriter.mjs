@@ -74,6 +74,8 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
         // A ball's range is its most turn, from 0.
         if (joint.limits) attributes.push('limited="true"', `range="${formatNumber(joint.kind === 'ball' ? 0 : joint.limits.lower)} ${formatNumber(joint.limits.upper)}"`);
         attributes.push(`damping="${formatNumber(joint.damping ?? 0)}"`, `frictionloss="${formatNumber(joint.friction ?? 0)}"`, `armature="${formatNumber(joint.armature ?? 0)}"`);
+        // Its spring, pulling it to its rest from where it is drawn (MuJoCo's qpos0 here).
+        if (joint.stiffness > 0 && (joint.kind === 'hinge' || joint.kind === 'slider')) attributes.push(`stiffness="${formatNumber(joint.stiffness)}"`, `springref="${formatNumber(joint.springRest ?? 0)}"`);
         // How softly its limit and dry friction are held, where the drawing says other than MuJoCo's defaults.
         for (const which of ['limit', 'friction']) {
             if (joint.softness?.[which]?.solref) attributes.push(`solref${which}="${formatVector(joint.softness[which].solref)}"`);
@@ -133,7 +135,7 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
     if (tendons.length) {
         write(1, '<tendon>');
         for (const tendon of tendons) {
-            const attributes = [`name="${tendon.id}"`, `stiffness="${formatNumber(tendon.stiffness)}"`, `springlength="${formatNumber(tendon.springLength - tendon.offset)}"`,
+            const attributes = [`name="${tendon.id}"`, `stiffness="${formatNumber(tendon.stiffness)}"`, `springlength="${formatNumber(tendon.springLength - tendon.offset)} ${formatNumber((tendon.springLengthUpper ?? tendon.springLength) - tendon.offset)}"`,
                 `damping="${formatNumber(tendon.damping)}"`, `frictionloss="${formatNumber(tendon.friction)}"`];
             if (tendon.limits) attributes.push('limited="true"', `range="${formatNumber(tendon.limits.lower - tendon.offset)} ${formatNumber(tendon.limits.upper - tendon.offset)}"`);
             for (const which of ['limit', 'friction']) attributes.push(...softAttributes(tendon.softness?.[which], which));

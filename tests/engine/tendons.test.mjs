@@ -90,6 +90,13 @@ test('without a tendon\'s damping the second sweep takes the joints\' damping, a
     if (!withoutMujoco) await matchesWrittenBack('undamped', drawing, run);
 });
 
+test('a tendon\'s spring with a dead band pulls only outside it, as the reference and MuJoCo have it', async () => {
+    const strap = imported.tendons.find(({ name }) => name === 'Strap');
+    const drawing = updateTendon(imported, strap.id, { stiffness: 4, springLength: -0.2, springLengthUpper: 0.4 });
+    const run = await matchesReference('deadBand', drawing, 2);
+    if (!withoutMujoco) await matchesWrittenBack('deadBand', drawing, run);
+});
+
 test('a tendon over the elbow and both fingers, its damping kept only where the mass matrix has entries, and a coupling of a polynomial', async () => {
     const [elbow, left, right] = ['Elbow', 'Left', 'Right'].map((name) => jointNamed(imported, name).id);
     const strung = addTendon(imported, [{ joint: elbow, coef: 0.2 }, { joint: left, coef: 1 }, { joint: right, coef: -0.5 }], { name: 'Mixed' });

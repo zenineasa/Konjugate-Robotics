@@ -296,7 +296,7 @@ export function readModel(files, main) {
                     range: isLimited && range ? (kind === 'slide' ? range : range.map(angle)) : null,
                     damping: Number(get('damping') ?? 0), friction: Number(get('frictionloss') ?? 0), armature: Number(get('armature') ?? 0),
                     reference: kind === 'hinge' ? angle(reference) : reference,
-                    stiffness: Number(get('stiffness') ?? 0), springref: Number(get('springref') ?? 0),
+                    stiffness: Number(get('stiffness') ?? 0), springref: kind === 'hinge' ? angle(Number(get('springref') ?? 0)) : Number(get('springref') ?? 0),
                     // How softly MuJoCo holds its limit and its dry friction (its solref and solimp for each, the
                     // solimp's missing numbers MuJoCo's defaults), and its limit's margin; undefined where not given.
                     soft: {
@@ -364,7 +364,7 @@ export function readModel(files, main) {
         else if (body.explicit) { body.inertia = body.explicit; body.inertiaFrom = 'inertial'; }
         delete body.explicit;
         delete body.inertialGeoms;
-        for (const joint of body.joints) if (joint.stiffness) counts.springs.push(joint.name);
+        for (const joint of body.joints) if (joint.stiffness && (joint.kind === 'ball' || joint.kind === 'free')) counts.springs.push(joint.name);
     }
 
     const actuators = [];
@@ -444,13 +444,15 @@ export function readModel(files, main) {
         const rangeText = get('range');
         const limited = get('limited') ?? 'auto';
         const range = rangeText === undefined ? null : numbers(rangeText);
-        const springLength = get('springlength') === undefined ? null : numbers(get('springlength'));
-        if (springLength && springLength.length > 1 && springLength[0] !== springLength[1]) leftOut.push(`${label}'s spring's dead band: its spring pulls to ${springLength[0]}`);
+        // Its spring's length, or the two ends of a dead band; -1 -1 (MuJoCo's default): its length at the joints'
+        // springref, which the importer works out.
+        const given = get('springlength') === undefined ? null : numbers(get('springlength'));
+        const springLength = given && !(given[0] === -1 && (given[1] ?? -1) === -1) ? [given[0], given[1] ?? given[0]] : null;
         tendons.push({
             name: element.attributes.name ?? `Tendon ${tendons.length + 1}`,
             parts: element.children.filter((child) => child.name === 'joint').map((child) => ({ joint: child.attributes.joint, coef: Number(child.attributes.coef ?? 1) })),
             range: limited === 'true' || (limited === 'auto' && autolimits && range !== null && !(range[0] === 0 && range[1] === 0)) ? range : null,
-            stiffness: Number(get('stiffness') ?? 0), springLength: springLength ? springLength[0] : null, damping: Number(get('damping') ?? 0),
+            stiffness: Number(get('stiffness') ?? 0), springLength, damping: Number(get('damping') ?? 0),
             friction: Number(get('frictionloss') ?? 0),
             soft: {
                 limit: { solref: optionalNumbers(get('solreflimit')), solimp: solimpOf(get('solimplimit')) },
@@ -478,7 +480,7 @@ export function readModel(files, main) {
         leftOut.push(`${name ? `the ${equality.name} constraint ${name}` : `the ${equality.name} constraint on ${between.join(' and ') || 'the model'}`}${inactive ? ', which starts inactive' : ''}`);
     }
     if (children('contact').length) leftOut.push('the contact pairs and exclusions: nothing touches anything yet');
-    for (const name of counts.springs) leftOut.push(`joint ${name}'s spring (its stiffness): the drawing's joints have none yet`);
+    for (const name of counts.springs) leftOut.push(`joint ${name}'s spring (its stiffness): a ball's or a free joint's spring is not taken yet`);
     for (const name of counts.gravcomp) leftOut.push(`${name}'s gravity compensation`);
     if (gravity.some((value, axis) => Math.abs(value - [0, 0, -9.81][axis]) > 1e-9)) leftOut.push(`the model's gravity (${gravity.join(' ')}): a drawing has 9.81 m/s² downward`);
     return { name: root.attributes.model ?? null, bodies, actuators, tendons, couplings, gravity, timestep, leftOut, meshTriangles };

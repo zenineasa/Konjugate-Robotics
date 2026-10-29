@@ -55,6 +55,21 @@ test('a coupling and a tendon are drawn over a robot\'s joints, changed, checked
     assert.deepEqual(removeTendons(removeCouplings(next, [coupled.id]), [strung.id]).tendons, []);
 });
 
+test('a tendon\'s spring length comes in as MuJoCo has it: by default its length at the joints\' springref, or a dead band', () => {
+    const xml = (attributes) => `<mujoco><compiler angle="radian"/><worldbody><body name="A" pos="0 0 1"><joint name="P" axis="0 1 0" ref="0.2" springref="0.5"/>
+        <inertial pos="0.1 0 0" mass="1" diaginertia="0.01 0.01 0.01"/></body></worldbody><tendon><fixed name="T" stiffness="1" ${attributes}><joint joint="P" coef="2"/></fixed></tendon></mujoco>`;
+    const read = (attributes) => {
+        const model = readModel({ 'm.xml': xml(attributes) }, 'm.xml');
+        return importModel(model, model.bodies.map((body) => bodyLook(model, body)), { name: 'M' }).drawing.tendons[0];
+    };
+    // Its length where drawn is at the ref (0.4), its spring's at the springref (1).
+    assert.deepEqual([read('').offset, read('').springLength, read('').springLengthUpper], [0.4, 1, undefined]);
+    assert.deepEqual([read('springlength="0.3"').springLength, read('springlength="0.3"').springLengthUpper], [0.3, undefined]);
+    assert.deepEqual([read('springlength="0.3 0.6"').springLength, read('springlength="0.3 0.6"').springLengthUpper], [0.3, 0.6]);
+    const banded = { ...structuredClone(drawing), tendons: [{ ...drawing.tendons[0], springLength: 0.5, springLengthUpper: 0.2 }] };
+    assert.match(errors(banded), /dead band ends above where it starts/);
+});
+
 test('a tendon\'s inverse inertia where drawn is MuJoCo\'s tendon_invweight0, cᵀ M⁻¹ c', () => {
     const weights = inverseWeights(drawing);
     for (const [name, value] of Object.entries({ Shoulder: 25.817314438052431, Elbow: 226.93045227070715, Left: 20, Right: 20 })) close(weights.get(jointNamed(drawing, name).id), value);
@@ -105,7 +120,7 @@ test('couplings and tendons are written back as MJCF: a joint equality, fixed te
     shifted = updateTendon(shifted, drawing.tendons[1].id, { offset: 0.01, drive: { setpoint: 0.04 } });
     const mjcf = writeMjcf(shifted);
     const [strap, grip] = shifted.tendons;
-    assert.match(mjcf, new RegExp(`<fixed name="${strap.id}" stiffness="2" springlength="0.1" damping="0.3" frictionloss="0.05" limited="true" range="-0.6 0.6">`));
+    assert.match(mjcf, new RegExp(`<fixed name="${strap.id}" stiffness="2" springlength="0.1 0.1" damping="0.3" frictionloss="0.05" limited="true" range="-0.6 0.6">`));
     assert.match(mjcf, new RegExp(`<joint joint="${jointNamed(shifted, 'Elbow').id}" coef="0.5"/>`));
     const [mirror] = shifted.couplings;
     assert.match(mjcf, new RegExp(`<joint name="${mirror.id}" joint1="${mirror.first}" joint2="${mirror.second}" polycoef="0 1 0 0 0" solref="0.005 1" solimp="0.95 0.99 0.001 0.5 2"/>`));

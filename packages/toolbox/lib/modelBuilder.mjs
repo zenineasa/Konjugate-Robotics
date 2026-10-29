@@ -887,6 +887,11 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         // A motor's rotor turns with the joint, through its gearbox: its inertia times the ratio squared adds to the armature.
         const rotor = drive.mode === 'motor' ? (drive.motor?.rotorInertia ?? 0) * (drive.motor?.gearRatio ?? 0) ** 2 : 0;
         parameter('armature', rotor ? 'Armature (with the motor\'s rotor)' : 'Armature', (joint.armature ?? 0) + rotor, units.armature);
+        // A hinge's or a slider's spring, pulling it to its rest (taken at the step's start, as MuJoCo takes it).
+        if ((hinge || slider) && joint.stiffness > 0) {
+            parameter('springStiffness', 'Spring stiffness', joint.stiffness, units.stiffness, range(joint.stiffness, slider ? 100 : 1, 0));
+            parameter('springRest', 'Spring rest', joint.springRest ?? 0, units.position);
+        }
         parameter('step', 'Time step', roles.timeStep, 's');
         if (joint.limits && !ball) {
             parameter('lower', 'Lower limit', joint.limits.lower, units.position);
@@ -1263,7 +1268,8 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         }
         // The tendons' pull on it, as their relationships set it on the child.
         const pulled = roles.tendonForce ? bind(childNode, 'target', 'tendonForce', 'c') : 0;
-        forces = [define('tau', E.add(driveTorque, E.negate(E.multiply('damping', qd)), pulled))];
+        const spring = (hinge || slider) && joint.stiffness > 0 ? E.negate(E.multiply('springStiffness', E.subtract(q, 'springRest'))) : 0;
+        forces = [define('tau', E.add(driveTorque, E.negate(E.multiply('damping', qd)), pulled, spring))];
         toChild('jointTorque', driveTorque);
     } else if (ball) {
         const [w, x, y, z] = turnSymbols.ball.map((symbol) => bind(childNode, 'target', symbol, 'c'));
@@ -1680,6 +1686,8 @@ function tendonRelationships(tendon, parts, tendonNode, rows, w, R, id, timeStep
         const Ld = bind(tendonNode, 'target', 'speed', 't');
         parameter('stiffness', 'Stiffness', tendon.stiffness);
         parameter('springLength', 'Spring length', tendon.springLength);
+        // A dead band: no pull between its two ends (the same length without one).
+        parameter('springLengthUpper', 'Spring length, dead band\'s upper end', tendon.springLengthUpper ?? tendon.springLength);
         parameter('damping', 'Damping', tendon.damping);
         parameter('step', 'Time step', timeStep, 's');
         let pull = 0;
@@ -1702,7 +1710,8 @@ function tendonRelationships(tendon, parts, tendonNode, rows, w, R, id, timeStep
             pull = define('servo', E.max(E.negate('torqueLimit'), E.min('torqueLimit', raw)));
             servoStep = E.cases([[E.greater(raw, 'torqueLimit'), 0], [E.less(raw, E.negate('torqueLimit')), 0]], E.multiply('servoDamping', 'step'));
         }
-        const force = define('tf', E.add(E.multiply(-1, 'stiffness', E.subtract(L, 'springLength')), E.multiply(-1, 'damping', Ld), pull));
+        const stretch = E.subtract(L, E.max('springLength', E.min('springLengthUpper', L)));
+        const force = define('tf', E.add(E.multiply(-1, 'stiffness', stretch), E.multiply(-1, 'damping', Ld), pull));
         toTendon('force', force);
         toSolid('tendonForce', E.multiply('coef', force));
         if (rows.friction !== undefined || rows.limit !== undefined) parameter('inverseWeight', 'Inverse inertia where drawn', w);

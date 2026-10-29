@@ -15,7 +15,7 @@
 // accelerations, then the coordinates from the new speeds, each coordinate from the ones updated before it.
 //
 // A joint's torque follows the drawing: a constant torque, or a servo stiffness times (setpoint minus position)
-// clamped to its limit; minus damping times speed; a ball's friction times tanh(100 speed) on each axis. A ball's limit
+// clamped to its limit; minus damping times speed; a hinge's or a slider's spring, -stiffness (q - rest); a ball's friction times tanh(100 speed) on each axis. A ball's limit
 // is not modelled here, so drawings checked with it keep inside theirs.
 //
 // A joint that closes a loop holds what its kind holds, row by row along the first solid's frame axes (a ball its
@@ -248,7 +248,9 @@ export function jointTorque(joint, position, speed, setpoint = joint.drive?.setp
     if (drive.mode === 'torque') torque = drive.torque ?? 0;
     if (drive.mode === 'servo') torque = Math.max(-drive.torqueLimit, Math.min(drive.torqueLimit, servoRaw(drive, position, speed, setpoint)));
     if (drive.mode === 'motor') torque = motorTorque;
-    return torque - (joint.damping ?? 0) * speed;
+    // A spring, pulling it to its rest.
+    const spring = joint.stiffness > 0 ? -joint.stiffness * (position - (joint.springRest ?? 0)) : 0;
+    return torque - (joint.damping ?? 0) * speed + spring;
 }
 
 // A servo's torque before its limit: its stiffness times the setpoint left to reach, less its own damping times the
@@ -517,7 +519,8 @@ function tendonNow(tendon, q, qd) {
     const L = tendon.offset + dot3(tendon.c, tendon.positions(q));
     const speed = dot3(tendon.c, qd);
     const drive = tendon.drive ?? { mode: 'free' };
-    let force = -tendon.stiffness * (L - tendon.springLength) - tendon.damping * speed;
+    const rest = Math.max(tendon.springLength, Math.min(tendon.springLengthUpper ?? tendon.springLength, L));
+    let force = -tendon.stiffness * (L - rest) - tendon.damping * speed;
     let implicit = tendon.damping;
     if (drive.mode === 'torque') force += drive.torque ?? 0;
     if (drive.mode === 'servo') {

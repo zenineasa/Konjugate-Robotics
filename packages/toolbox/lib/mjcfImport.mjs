@@ -275,6 +275,8 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
                 limits: null, damping: round(joint?.damping ?? 0), friction: round(joint?.friction ?? 0), armature: round(joint?.armature ?? 0),
                 drive: defaultDrive(kind)
             };
+            // Its spring: MuJoCo's stiffness pulls it to its springref, counted here from its ref, where it is drawn.
+            if (joint?.stiffness && (kind === 'hinge' || kind === 'slider')) Object.assign(entry, { stiffness: round(joint.stiffness), springRest: round(joint.springref - joint.reference) });
             // How softly the model holds its limit and dry friction, where it says other than MuJoCo's defaults.
             const softness = joint?.soft ? Object.fromEntries([
                 ...['limit', 'friction'].filter((which) => joint.soft[which].solref || joint.soft[which].solimp)
@@ -322,7 +324,10 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
         const offset = parts.reduce((sum, { target, coef }) => sum + coef * target.joint.reference, 0);
         const entry = {
             id: take('t'), name: unique(tendon.name), parts: parts.map(({ target, coef }) => ({ joint: target.entry.id, coef: round(coef) })), offset: round(offset),
-            stiffness: round(tendon.stiffness), springLength: round(tendon.springLength ?? offset), damping: round(tendon.damping), friction: round(tendon.friction),
+            // Its spring's length (or a dead band's two ends), by default its length at the joints' springref.
+            stiffness: round(tendon.stiffness), damping: round(tendon.damping), friction: round(tendon.friction),
+            springLength: round(tendon.springLength?.[0] ?? parts.reduce((sum, { target, coef }) => sum + coef * (target.joint.springref ?? 0), 0)),
+            ...(tendon.springLength && tendon.springLength[1] !== tendon.springLength[0] ? { springLengthUpper: round(tendon.springLength[1]) } : {}),
             limits: tendon.range ? { lower: round(tendon.range[0]), upper: round(tendon.range[1]) } : null,
             drive: defaultTendonDrive()
         };

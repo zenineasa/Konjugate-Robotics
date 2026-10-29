@@ -7,7 +7,9 @@
 //   format: 'konjugate.robotics.drawing', version: 1, name, nextId,
 //   solids: [{ id, name, shape, size, position, rotation, color, mass: { by: 'density', density } | { by: 'mass', value } }],
 //   frames: [{ id, solid (a solid's id, or 'ground'), point, axis }],
-//   joints: [{ id, name, kind, parent, child, limits, damping, friction, armature, drive }]
+//   joints: [{ id, name, kind, parent, child, limits, damping, friction, armature, stiffness, springRest, drive }]
+//   (a hinge's or a slider's spring: stiffness, pulling it to springRest, counted from where it is drawn; none when
+//   stiffness is 0 or missing)
 // }
 //
 // Positions and frame points are metres, z up; a solid's `rotation` is a unit quaternion [w, x, y, z]. A frame's point
@@ -319,7 +321,7 @@ export function updateJoint(drawing, id, changes) {
         delete joint.softness;
     }
     if (changes.name !== undefined) joint.name = String(changes.name);
-    for (const field of ['damping', 'friction', 'armature']) if (changes[field] !== undefined) joint[field] = Number(changes[field]);
+    for (const field of ['damping', 'friction', 'armature', 'stiffness', 'springRest']) if (changes[field] !== undefined) joint[field] = Number(changes[field]);
     if (changes.limits !== undefined) joint.limits = changes.limits ? { lower: Number(changes.limits.lower), upper: Number(changes.limits.upper) } : null;
     // A ball's drive carries its vectors whichever mode it is in, so switching modes keeps them.
     if (changes.drive) {
@@ -463,6 +465,11 @@ export function updateTendon(drawing, id, changes) {
     if (!tendon) throw new Error(`There is no tendon ${id}.`);
     if (changes.name !== undefined) tendon.name = String(changes.name);
     for (const field of ['stiffness', 'springLength', 'damping', 'friction', 'offset']) if (changes[field] !== undefined) tendon[field] = Number(changes[field]);
+    // A dead band's upper end; null for none.
+    if (changes.springLengthUpper !== undefined) {
+        if (changes.springLengthUpper === null) delete tendon.springLengthUpper;
+        else tendon.springLengthUpper = Number(changes.springLengthUpper);
+    }
     if (changes.limits !== undefined) tendon.limits = changes.limits ? { lower: Number(changes.limits.lower), upper: Number(changes.limits.upper) } : null;
     if (changes.parts !== undefined) tendon.parts = changes.parts.map(({ joint, coef }) => ({ joint, coef: Number(coef) }));
     if (changes.drive) tendon.drive = { ...defaultTendonDrive(), ...tendon.drive, ...changes.drive };
@@ -582,6 +589,9 @@ export function checkDrawing(drawing) {
         for (const field of ['damping', 'friction', 'armature']) {
             if (!(Number.isFinite(joint[field]) && joint[field] >= 0)) errors.push({ id: joint.id, message: `${joint.name}: its ${field} must be zero or more.` });
         }
+        if (joint.stiffness !== undefined && !(Number.isFinite(joint.stiffness) && joint.stiffness >= 0)) errors.push({ id: joint.id, message: `${joint.name}: its spring's stiffness must be zero or more.` });
+        if (joint.springRest !== undefined && !Number.isFinite(joint.springRest)) errors.push({ id: joint.id, message: `${joint.name}: its spring's rest is a number.` });
+        if (joint.stiffness > 0 && joint.kind !== 'hinge' && joint.kind !== 'slider') warnings.push({ id: joint.id, message: `${joint.name}: only a hinge's or a slider's spring is built; a ${joint.kind} joint's is left out.` });
         for (const which of ['limit', 'friction']) {
             const soft = joint.softness?.[which];
             if (soft?.solref && !(soft.solref.length === 2 && soft.solref.every(Number.isFinite))) errors.push({ id: joint.id, message: `${joint.name}: its ${which}'s solref is two numbers.` });
@@ -647,6 +657,7 @@ export function checkDrawing(drawing) {
         }
         if (new Set((tendon.parts ?? []).map(({ joint }) => joint)).size !== (tendon.parts ?? []).length) errors.push({ id: tendon.id, message: `${tendon.name}: it runs over a joint twice.` });
         for (const field of ['stiffness', 'damping', 'friction']) if (!(Number.isFinite(tendon[field]) && tendon[field] >= 0)) errors.push({ id: tendon.id, message: `${tendon.name}: its ${field} must be zero or more.` });
+        if (tendon.springLengthUpper !== undefined && !(tendon.springLengthUpper >= tendon.springLength)) errors.push({ id: tendon.id, message: `${tendon.name}: its spring's dead band ends above where it starts.` });
         if (tendon.limits && !(tendon.limits.lower < tendon.limits.upper)) errors.push({ id: tendon.id, message: `${tendon.name}: its shortest length must be below its longest.` });
         const drive = tendon.drive ?? { mode: 'free' };
         if (drive.mode === 'servo' && !(drive.gain > 0 && drive.torqueLimit > 0 && drive.damping >= 0)) errors.push({ id: tendon.id, message: `${tendon.name}: its servo's stiffness and most force must be more than zero, its damping zero or more.` });

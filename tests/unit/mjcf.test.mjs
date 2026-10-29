@@ -9,7 +9,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import test from 'node:test';
 import importDrawing from '../../packages/toolbox/importers/drawing.mjs';
-import { checkDrawing, massOf, poseOf } from '../../packages/toolbox/lib/drawing.mjs';
+import { checkDrawing, massOf, poseOf, updateJoint } from '../../packages/toolbox/lib/drawing.mjs';
 import { compose, rotate } from '../../packages/toolbox/lib/frames.mjs';
 import { combine, meshInertia, placed, primitiveInertia, principal } from '../../packages/toolbox/lib/inertia.mjs';
 import { bodyLook, modelPaths, parseXml, readModel } from '../../packages/toolbox/lib/mjcf.mjs';
@@ -225,6 +225,14 @@ test('a body with several joints is a chain of links with no mass, built and wri
     for (const link of links.filter(({ source }) => source.body === 'Head')) assert.deepEqual(poseOf(drawing, link.id).position, headBody.world.position.map((value) => Math.round(value * 1e12) / 1e12 + 0));
     assert.equal(massOf(head), 0.1);
     assert.deepEqual(checkDrawing(drawing).errors, []);
+    // Springs: MuJoCo's stiffness and springref (in degrees here), the rest counted from the joint's ref.
+    const jointNamed = (name) => drawing.joints.find((joint) => joint.name === name);
+    assert.deepEqual([jointNamed('Pitch').stiffness, jointNamed('Pitch').springRest], [0.2, Math.round((25 * Math.PI / 180) * 1e12) / 1e12]);
+    assert.deepEqual([jointNamed('Reach').stiffness, jointNamed('Reach').springRest], [30, 0.02]);
+    assert.equal(jointNamed('Yaw').stiffness, undefined);
+    assert.ok(!report.leftOut.some((line) => /spring/.test(line)), 'a hinge\'s and a slider\'s springs come in');
+    assert.match(checkDrawing(updateJoint(drawing, jointNamed('Pitch').id, { stiffness: -1 })).errors.map(({ message }) => message).join(' '), /Pitch: its spring's stiffness must be zero or more/);
+    assert.match(writeMjcf(drawing), new RegExp(`<joint name="${jointNamed('Reach').id}" [^>]*stiffness="30" springref="0.02"`));
     assert.ok(buildModel(drawing, { timeStep: 0.001, runTime: 1 }).document.nodes.some(({ name }) => name === 'Nod link'));
     // Written back, Head's body holds its three joints in the model's order, and no link is a body.
     const mjcf = writeMjcf(drawing);
