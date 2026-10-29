@@ -1,15 +1,21 @@
 /* Copyright © 2026 Zenin Easa Panthakkalakath */
 
 // Contact in the drawing (lib/contact.mjs): which pairs touch, as MuJoCo would pick them and as the user says; the
-// checks; what goes with a solid; and the pairs written back as MJCF with MuJoCo's mixed parameters.
+// checks; what goes with a solid; and the pairs written back as MJCF with MuJoCo's mixed parameters. Then what Build
+// writes for it: equations that stay small, and a solve whose rows with no room are not worked out.
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import test from 'node:test';
 import { addSolid, checkDrawing, createDrawing, removeSolids, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
 import { collidersOf, contactPairs, setTouching, updateContact } from '../../packages/toolbox/lib/contact.mjs';
 import { exampleDrawing } from '../../packages/toolbox/lib/examples.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
-import { buildModel } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { bodyLook, readModel } from '../../packages/toolbox/lib/mjcf.mjs';
+import { importModel } from '../../packages/toolbox/lib/mjcfImport.mjs';
+import { buildModel, symmetricSolver } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { roboticsRoot } from '../../scripts/konjugatePaths.mjs';
 
 const named = (drawing, name) => drawing.solids.find((solid) => solid.name === name).id;
 const names = (drawing) => contactPairs(drawing).pairs.map(({ name }) => name);
@@ -63,4 +69,90 @@ test('the pairs are written back as MJCF <pair>s, with the friction, softness an
     const mjcf = writeMjcf(drawing);
     assert.match(mjcf, new RegExp(`<pair geom1="floor" geom2="${first.id}" condim="3" friction="0.6 0.6 0.005 0.0001 0.0001" solref="0.03 1" solimp="0.9 0.95 0.001 0.5 2" margin="0.001"/>`));
     assert.match(mjcf, /<geom name="floor" type="plane"[^>]*contype="0" conaffinity="0"/);
+});
+
+// Works out MathJSON as Konjugate's engine does: a definition when first read, and only a choice's branch taken.
+// Returns { value(expression), operations() }, operations() the terms worked out so far.
+function evaluator(definitions, values) {
+    const byName = new Map(definitions.map(({ symbol, mathJson }) => [symbol, mathJson]));
+    const known = new Map(Object.entries(values));
+    let operations = 0;
+    const read = (name) => {
+        if (name === 'True') return 1;
+        if (!known.has(name)) {
+            if (!byName.has(name)) throw new Error(`Nothing is ${name}.`);
+            known.set(name, value(byName.get(name)));
+        }
+        return known.get(name);
+    };
+    const value = (expression) => {
+        operations += 1;
+        if (typeof expression === 'number') return expression;
+        if (typeof expression === 'string') return read(expression);
+        const [operator, ...items] = expression;
+        if (operator === 'Which') {
+            for (let index = 0; index < items.length; index += 2) if (value(items[index]) !== 0) return value(items[index + 1]);
+            throw new Error('No branch matched.');
+        }
+        const all = items.map(value);
+        switch (operator) {
+            case 'Add': return all.reduce((sum, item) => sum + item, 0);
+            case 'Multiply': return all.reduce((product, item) => product * item, 1);
+            case 'Negate': return -all[0];
+            case 'Divide': return all[0] / all[1];
+            case 'Greater': return Number(all[0] > all[1]);
+            case 'Less': return Number(all[0] < all[1]);
+            default: throw new Error(`No ${operator} here.`);
+        }
+    };
+    return { value, operations: () => operations };
+}
+
+test('a solve given which rows are active works out only theirs, and finds what the whole solve finds', () => {
+    // Ten rows, three active (as a few contact points of many touch): the others are the identity's rows, holding their
+    // right-hand sides.
+    const active = [1, 0, 0, 1, 0, 0, 0, 1, 0, 0];
+    const n = active.length;
+    const block = [[4, 1, 0.5], [1, 3, 0.2], [0.5, 0.2, 2]];
+    const values = {};
+    const on = active.flatMap((flag, index) => (flag ? [index] : []));
+    for (let i = 0; i < n; i += 1) {
+        values[`a${i + 1}`] = active[i];
+        values[`b${i + 1}`] = (i + 1) * (i % 2 ? -0.7 : 0.3);
+        for (let j = 0; j <= i; j += 1) values[`d${i + 1}x${j + 1}`] = active[i] && active[j] ? block[on.indexOf(i)][on.indexOf(j)] : Number(i === j);
+    }
+    const D = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => `d${Math.max(i, j) + 1}x${Math.min(i, j) + 1}`));
+    const b = Array.from({ length: n }, (_, i) => `b${i + 1}`);
+    const solve = (flags) => {
+        const definitions = [];
+        const define = (symbol, mathJson) => {
+            if (typeof mathJson === 'number' || typeof mathJson === 'string') return mathJson;
+            definitions.push({ symbol, mathJson });
+            return symbol;
+        };
+        const x = symmetricSolver(define, 's', D, flags)(b, 'x');
+        const { value, operations } = evaluator(definitions, values);
+        return { x: x.map(value), operations: operations() };
+    };
+    const whole = solve(null);
+    const some = solve(active.map((_, i) => `a${i + 1}`));
+    assert.deepEqual(some.x, whole.x);
+    active.forEach((flag, i) => { if (!flag) assert.equal(some.x[i], values[`b${i + 1}`]); });
+    on.forEach((i) => assert.ok(Math.abs(block[on.indexOf(i)].reduce((sum, entry, k) => sum + entry * some.x[on[k]], 0) - values[`b${i + 1}`]) < 1e-14));
+    assert.ok(some.operations < 0.5 * whole.operations, `${some.operations} terms worked out, against ${whole.operations}.`);
+});
+
+test('a box on the floor and spheres against it are equations of a size that does not grow with the corners and faces counted', async () => {
+    const xml = await readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', 'gripper.xml'), 'utf8');
+    const model = readModel({ 'gripper.xml': xml }, 'gripper.xml');
+    let drawing = importModel(model, model.bodies.map((body) => bodyLook(model, body)), { name: 'Gripper' }).drawing;
+    for (const name of ['Left finger', 'Right finger']) drawing = updateSolid(drawing, named(drawing, name), { colliders: [{ shape: 'sphere', size: { radius: 0.012 } }] });
+    drawing = updateContact(updateSolid(drawing, named(drawing, 'Part'), { colliders: [{ shape: 'box', size: { x: 0.06, y: 0.06, z: 0.06 } }] }), {});
+    const size = (expression) => (Array.isArray(expression) ? 1 + expression.slice(1).reduce((sum, item) => sum + size(item), 0) : 1);
+    const contacts = buildModel(drawing, { runTime: 1 }).document.edges.filter(({ name }) => / and /.test(name));
+    assert.ok(contacts.some(({ name }) => name === 'Floor and Part') && contacts.some(({ name }) => name === 'Left finger and Part'));
+    // Each corner's count and each face's nearest so far is named once: no definition repeats those before it.
+    for (const { name, equationModel } of contacts) {
+        for (const { symbol, mathJson } of equationModel.definitions) assert.ok(size(mathJson) < 150, `${name}: ${symbol} is ${size(mathJson)} terms.`);
+    }
 });

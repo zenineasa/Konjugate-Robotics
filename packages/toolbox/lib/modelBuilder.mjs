@@ -417,23 +417,34 @@ export function symmetricEigen(matrix) {
 
 // Solving D x = b for a joint's symmetric, positive definite D (1, 3 or 6 square): by division for one axis, otherwise
 // by D's L D Lᵀ factors, defined once, and each solve's own forward and back substitution. Returns solve(b, name).
-function symmetricSolver(define, prefix, D) {
+// Solves D x = b, D symmetric, by its L D Lᵀ factors. With `active` (each row's 0 or 1): a row not active is one of the
+// identity's (its D row nothing but its own diagonal), so its entries of L are nothing and its pivot is its diagonal,
+// and none of them is worked out; the engine works out a choice's branch only when it is taken.
+export function symmetricSolver(define, prefix, D, active = null) {
     const n = D.length;
     if (n === 1) return (b) => [E.divide(b[0], D[0][0])];
     const L = Array.from({ length: n }, () => Array(n).fill(0));
     const pivots = [];
+    const on = (i) => E.greater(active[i], 0.5);
+    const both = (i, j) => E.greater(E.multiply(active[i], active[j]), 0.5);
     for (let j = 0; j < n; j += 1) {
-        pivots[j] = define(`${prefix}d${j + 1}`, E.subtract(D[j][j], E.add(Array.from({ length: j }, (_, k) => E.multiply(L[j][k], L[j][k], pivots[k])))));
+        const pivot = E.subtract(D[j][j], E.add(Array.from({ length: j }, (_, k) => E.multiply(L[j][k], L[j][k], pivots[k]))));
+        pivots[j] = define(`${prefix}d${j + 1}`, active ? E.cases([[on(j), pivot]], D[j][j]) : pivot);
         for (let i = j + 1; i < n; i += 1) {
-            L[i][j] = define(`${prefix}l${i + 1}${j + 1}`, E.divide(E.subtract(D[i][j], E.add(Array.from({ length: j }, (_, k) => E.multiply(L[i][k], L[j][k], pivots[k])))), pivots[j]));
+            const entry = E.divide(E.subtract(D[i][j], E.add(Array.from({ length: j }, (_, k) => E.multiply(L[i][k], L[j][k], pivots[k])))), pivots[j]);
+            L[i][j] = define(`${prefix}l${i + 1}${j + 1}`, active ? E.cases([[both(i, j), entry]], 0) : entry);
         }
     }
     return (b, name) => {
         const forward = [];
-        for (let i = 0; i < n; i += 1) forward[i] = define(`${name}f${i + 1}`, E.subtract(b[i], E.add(Array.from({ length: i }, (_, k) => E.multiply(L[i][k], forward[k])))));
+        for (let i = 0; i < n; i += 1) {
+            const value = E.subtract(b[i], E.add(Array.from({ length: i }, (_, k) => E.multiply(L[i][k], forward[k]))));
+            forward[i] = define(`${name}f${i + 1}`, active && i > 0 ? E.cases([[on(i), value]], b[i]) : value);
+        }
         const x = [];
         for (let i = n - 1; i >= 0; i -= 1) {
-            x[i] = define(`${name}x${i + 1}`, E.subtract(E.divide(forward[i], pivots[i]), E.add(Array.from({ length: n - 1 - i }, (_, offset) => E.multiply(L[i + 1 + offset][i], x[i + 1 + offset])))));
+            const value = E.subtract(E.divide(forward[i], pivots[i]), E.add(Array.from({ length: n - 1 - i }, (_, offset) => E.multiply(L[i + 1 + offset][i], x[i + 1 + offset]))));
+            x[i] = define(`${name}x${i + 1}`, active && i < n - 1 ? E.cases([[on(i), value]], E.divide(forward[i], pivots[i])) : value);
         }
         return x;
     };
@@ -1202,6 +1213,7 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
             b = (r) => define(`kbr${r + 1}`, E.subtract(wanted[r], E.add(held.map((e, k) => E.multiply(K(r, e), held0[k])))));
         }
         // Projected Gauss-Seidel, from the step before's forces.
+        const room = (r) => E.greater(setting('kx', r), setting('kn', r));
         let f = new Map(rows.map((r) => [r, bind(childNode, 'target', `warm${r + 1}`, 'c')]));
         const fixedB = new Map(rows.map((r) => [r, b(r)]));
         for (let sweep = 0; sweep < constraintSweeps; sweep += 1) {
@@ -1209,7 +1221,8 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
                 const compliance = setting('kc', r);
                 const residual = E.subtract(fixedB.get(r), E.add(...rows.map((c) => E.multiply(A(r, c), f.get(c))), E.multiply(compliance, f.get(r))));
                 const next = E.add(f.get(r), E.divide(residual, E.add(A(r, r), compliance)));
-                f.set(r, define(`pg${sweep + 1}x${r + 1}`, E.max(setting('kn', r), E.min(setting('kx', r), next))));
+                // A row with no room (a contact apart, a limit not reached) is at its bound, worked out no further.
+                f.set(r, define(`pg${sweep + 1}x${r + 1}`, E.cases([[room(r), E.max(setting('kn', r), E.min(setting('kx', r), next))]], setting('kn', r))));
                 f = new Map(f);
             }
         }
@@ -1223,14 +1236,15 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         const residualOf = (r, values) => E.subtract(fixedB.get(r), E.add(...rows.map((c) => E.multiply(A(r, c), values.get(c))), E.multiply(setting('kc', r), values.get(r))));
         const polish = (start, tag) => {
             const next = new Map(rows.map((r) => [r, define(`${tag}nx${r + 1}`, E.add(start.get(r), E.divide(residualOf(r, start), E.add(A(r, r), setting('kc', r)))))]));
-            const inside = new Map(rows.map((r) => [r, define(`${tag}in${r + 1}`, E.cases([[E.greater(next.get(r), low(r)), E.cases([[E.less(next.get(r), high(r)), 1]], 0)]], 0))]));
-            const held = new Map(rows.map((r) => [r, define(`${tag}h${r + 1}`, E.max(low(r), E.min(high(r), next.get(r))))]));
+            // A row with no room is held at its bound, its next value not worked out.
+            const inside = new Map(rows.map((r) => [r, define(`${tag}in${r + 1}`, E.cases([[room(r), E.cases([[E.greater(next.get(r), low(r)), E.cases([[E.less(next.get(r), high(r)), 1]], 0)]], 0)]], 0))]));
+            const held = new Map(rows.map((r) => [r, define(`${tag}h${r + 1}`, E.cases([[room(r), E.max(low(r), E.min(high(r), next.get(r)))]], low(r)))]));
             const out = (r) => E.subtract(1, inside.get(r));
+            // The rows inside solved; the others are the identity's rows, with their held values.
             const values = symmetricSolver(define, `${tag}o`, rows.map((i) => rows.map((j) => (i === j
                 ? E.add(E.multiply(inside.get(i), E.add(A(i, i), setting('kc', i))), out(i))
-                : E.multiply(inside.get(i), inside.get(j), A(Math.max(i, j), Math.min(i, j)))))))(rows.map((i) => E.add(
-                E.multiply(inside.get(i), E.subtract(fixedB.get(i), E.add(...rows.filter((j) => j !== i).map((j) => E.multiply(out(j), A(i, j), held.get(j)))))),
-                E.multiply(out(i), held.get(i)))), `${tag}g`);
+                : E.multiply(inside.get(i), inside.get(j), A(Math.max(i, j), Math.min(i, j)))))), rows.map((r) => inside.get(r)))(rows.map((i) => E.cases([[E.greater(inside.get(i), 0.5),
+                E.subtract(fixedB.get(i), E.add(...rows.filter((j) => j !== i).map((j) => E.multiply(out(j), A(i, j), held.get(j)))))]], held.get(i))), `${tag}g`);
             const solved = new Map(rows.map((r, k) => [r, values[k]]));
             const fits = rows.map((r, k) => {
                 const value = values[k];

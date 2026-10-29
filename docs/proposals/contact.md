@@ -48,7 +48,7 @@ With these, a robot that touches things should still agree with MuJoCo to roundi
 
 ## Cost
 
-Each contact point is four rows. Every solid keeps 12 states per row (its sensitivities), and the Ground gathers K's lower triangle, R (R + 1) / 2 sums. A gripper and a part on the floor (two fingers against a box, the box on the floor: about 10 points, 40 rows) would roughly double or triple a run's time against the same robot without contact; a robot with many possible contacts grows as the square of their rows. Later: gathering K per tree, so rows that cannot touch a tree are not carried through it.
+Each contact point is four rows. Every solid keeps 12 states per row (its sensitivities), and the Ground gathers K's lower triangle, R (R + 1) / 2 sums. A gripper and a part on the floor (two fingers against a box, the box on the floor: about 10 points, 40 rows) would roughly double or triple a run's time against the same robot without contact; a robot with many possible contacts grows as the square of their rows. Built so far against that: the Ground's sweeps and exact solve work only on rows with room and inside their bounds, each other row behind a choice the engine does not take (a gripper and a box, 24 rows: about 0.9 ms a step here). Later: gathering K per tree, so rows that cannot touch a tree are not carried through it.
 
 ## Slices
 

@@ -77,8 +77,28 @@ async function openWindow() {
     return opened;
 }
 
-// The model open in Konjugate's canvas, as the project would save it.
-const inCanvas = () => canvas.evaluate(() => window.__debugProject.serialize());
+// The model open in Konjugate's canvas, as the project would save it: what the steps check (each relationship's
+// equations left out but for which states they set) and, as `projectText`, the whole project as JSON for the engine.
+// A robot with contact carries a hundred megabytes of equations: handed over whole, as objects or as one string, they
+// overflow this process's memory or the debugging connection to the page, so the text comes over in pieces.
+async function inCanvas() {
+    const { model, length } = await canvas.evaluate(() => {
+        const project = window.__debugProject.serialize();
+        window.__roboticsProjectText = JSON.stringify(project);
+        const outputsOnly = ({ equationModel, ...edge }) => (equationModel
+            ? { ...edge, equationModel: { outputs: (equationModel.outputs ?? []).map(({ role, stateId }) => ({ role, stateId })) } }
+            : edge);
+        return { model: { ...project, edges: project.edges.map(outputsOnly) }, length: window.__roboticsProjectText.length };
+    });
+    const pieces = [];
+    const size = 4_000_000;
+    for (let start = 0; start < length; start += size) {
+        pieces.push(await canvas.evaluate(([from, to]) => window.__roboticsProjectText.slice(from, to), [start, start + size]));
+    }
+    await canvas.evaluate(() => { delete window.__roboticsProjectText; });
+    return { ...model, projectText: pieces.join('') };
+}
+
 // Waits until the canvas holds a model that `test` (a function's source, run in the canvas) accepts, and returns it.
 async function builtInCanvas(test) {
     await canvas.waitForFunction(`(${test})(window.__debugProject.serialize())`, null, { timeout: 30000 });
@@ -312,62 +332,6 @@ try {
     assert.equal(pickAndPlace.sharedParameters.find(({ name }) => name === 'Waist setpoint').schedule.samples.length, 8);
     await shot('08-pick-and-place');
 
-    // 12b. Couplings and tendons: the gripper's fingers coupled one to the other by the Couple button, a tendon over them
-    // by its key (T), each changed on its card, deleted by its key and brought back by undo; built, a tendon is a node.
-    await page.selectOption('#exampleSelect', 'gripperArm');
-    await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Arm with gripper');
-    const fingerIds = (await drawing()).joints.filter(({ name }) => /finger slide/.test(name)).map(({ id }) => id);
-    await page.click('#partsTree li:has-text("Left finger slide")');
-    await page.click('#partsTree li:has-text("Right finger slide")', { modifiers: ['Shift'] });
-    await page.click('#inspector button[data-action="couple"]');
-    let coupling = (await drawing()).couplings[0];
-    assert.deepEqual([coupling.first, coupling.second, coupling.polycoef], [...fingerIds, [0, 1, 0, 0, 0]]);
-    assert.match(await page.textContent('#inspector'), /Holds Left finger slide to a polynomial of Right finger slide/);
-    await page.fill('#inspector input[name="polycoef.1"]', '-1');
-    await page.press('#inspector input[name="polycoef.1"]', 'Enter');
-    assert.deepEqual((await drawing()).couplings[0].polycoef, [0, -1, 0, 0, 0]);
-    await page.click('#partsTree li:has-text("Left finger slide")');
-    await page.click('#partsTree li:has-text("Right finger slide")', { modifiers: ['Shift'] });
-    await page.keyboard.press('t');
-    let tendon = (await drawing()).tendons[0];
-    assert.deepEqual(tendon.parts.map(({ joint }) => joint), fingerIds);
-    await page.selectOption('#inspector select[name="drive.mode"]', 'servo');
-    await page.fill('#inspector input[name="drive.setpoint"]', '0.01');
-    await page.press('#inspector input[name="drive.setpoint"]', 'Enter');
-    tendon = (await drawing()).tendons[0];
-    assert.deepEqual([tendon.drive.mode, tendon.drive.setpoint], ['servo', 0.01]);
-    await page.click('#partsTree li:has-text("Tendon")');
-    await page.keyboard.press('Delete');
-    assert.equal((await drawing()).tendons.length, 0);
-    await page.keyboard.press(`${command}+z`);
-    assert.equal((await drawing()).tendons.length, 1);
-    assert.match(await page.textContent('#checksList'), /Ready to build/);
-    await page.click('#buildButton');
-    const gripper = await builtInCanvas((model) => model.nodes.some(({ type }) => type === 'robotTendon'));
-    assert.ok(gripper.edges.some(({ name }) => name === coupling.name), 'the coupling is a relationship');
-    await shot('08b-tendon');
-
-    // 12c. Contact: turned on from the robot's card, two solids made never to touch by their key (X), undone; built,
-    // each pair that may touch is a relationship.
-    await page.click('#viewport', { position: { x: 10, y: 10 } });
-    await page.keyboard.press('Escape');
-    await page.check('#inspector input[name="contact.on"]');
-    assert.deepEqual((await drawing()).contact, { floor: true, automatic: true, pairs: [], exclude: [], floorSurface: {} });
-    assert.match(await page.textContent('#inspector'), /pairs? may touch/);
-    const fingerSolids = ['Left finger', 'Right finger'].map(async (name) => (await drawing()).solids.find((solid) => solid.name === name).id);
-    const [leftFinger, rightFinger] = await Promise.all(fingerSolids);
-    await page.click(`#partsTree li[data-id="${leftFinger}"]`);
-    await page.click(`#partsTree li[data-id="${rightFinger}"]`, { modifiers: ['Shift'] });
-    await page.keyboard.press('x');
-    assert.equal((await drawing()).contact.exclude.length, 1);
-    assert.match(await page.textContent('#inspector'), /They never touch/);
-    await page.keyboard.press(`${command}+z`);
-    assert.equal((await drawing()).contact.exclude.length, 0);
-    await page.click('#buildButton');
-    const touching = await builtInCanvas((model) => model.edges.some(({ name }) => /^Floor and /.test(name)));
-    assert.ok(touching.edges.some(({ name }) => name === 'Floor and Left finger'));
-    await shot('08c-contact');
-
     // 14. Will these motors do it? M opens the sizing panel and, as nothing has been run as drawn, Konjugate runs the
     // pick-and-place arm (runBaseline): a card per motor, its run inside its band. A heavier part from 2 s is a what-if
     // forked from that run in Konjugate, shown beside it; Show in canvas opens both, a branch each; M closes the panel.
@@ -416,6 +380,62 @@ try {
     assert.equal(await page.isVisible('#sizingPanel'), true);
     await page.click('#sizingPanel button[data-sizing="close"]');
     assert.equal(await page.isHidden('#sizingPanel'), true);
+
+    // 14b. Couplings and tendons: the gripper's fingers coupled one to the other by the Couple button, a tendon over them
+    // by its key (T), each changed on its card, deleted by its key and brought back by undo; built, a tendon is a node.
+    await page.selectOption('#exampleSelect', 'gripperArm');
+    await page.waitForFunction(() => window.roboticsWindow.drawing().name === 'Arm with gripper');
+    const fingerIds = (await drawing()).joints.filter(({ name }) => /finger slide/.test(name)).map(({ id }) => id);
+    await page.click('#partsTree li:has-text("Left finger slide")');
+    await page.click('#partsTree li:has-text("Right finger slide")', { modifiers: ['Shift'] });
+    await page.click('#inspector button[data-action="couple"]');
+    let coupling = (await drawing()).couplings[0];
+    assert.deepEqual([coupling.first, coupling.second, coupling.polycoef], [...fingerIds, [0, 1, 0, 0, 0]]);
+    assert.match(await page.textContent('#inspector'), /Holds Left finger slide to a polynomial of Right finger slide/);
+    await page.fill('#inspector input[name="polycoef.1"]', '-1');
+    await page.press('#inspector input[name="polycoef.1"]', 'Enter');
+    assert.deepEqual((await drawing()).couplings[0].polycoef, [0, -1, 0, 0, 0]);
+    await page.click('#partsTree li:has-text("Left finger slide")');
+    await page.click('#partsTree li:has-text("Right finger slide")', { modifiers: ['Shift'] });
+    await page.keyboard.press('t');
+    let tendon = (await drawing()).tendons[0];
+    assert.deepEqual(tendon.parts.map(({ joint }) => joint), fingerIds);
+    await page.selectOption('#inspector select[name="drive.mode"]', 'servo');
+    await page.fill('#inspector input[name="drive.setpoint"]', '0.01');
+    await page.press('#inspector input[name="drive.setpoint"]', 'Enter');
+    tendon = (await drawing()).tendons[0];
+    assert.deepEqual([tendon.drive.mode, tendon.drive.setpoint], ['servo', 0.01]);
+    await page.click('#partsTree li:has-text("Tendon")');
+    await page.keyboard.press('Delete');
+    assert.equal((await drawing()).tendons.length, 0);
+    await page.keyboard.press(`${command}+z`);
+    assert.equal((await drawing()).tendons.length, 1);
+    assert.match(await page.textContent('#checksList'), /Ready to build/);
+    await page.click('#buildButton');
+    const gripper = await builtInCanvas((model) => model.nodes.some(({ type }) => type === 'robotTendon'));
+    assert.ok(gripper.edges.some(({ name }) => name === coupling.name), 'the coupling is a relationship');
+    await shot('08b-tendon');
+
+    // 14c. Contact: turned on from the robot's card, two solids made never to touch by their key (X), undone; built,
+    // each pair that may touch is a relationship.
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press('Escape');
+    await page.check('#inspector input[name="contact.on"]');
+    assert.deepEqual((await drawing()).contact, { floor: true, automatic: true, pairs: [], exclude: [], floorSurface: {} });
+    assert.match(await page.textContent('#inspector'), /pairs? may touch/);
+    const fingerSolids = ['Left finger', 'Right finger'].map(async (name) => (await drawing()).solids.find((solid) => solid.name === name).id);
+    const [leftFinger, rightFinger] = await Promise.all(fingerSolids);
+    await page.click(`#partsTree li[data-id="${leftFinger}"]`);
+    await page.click(`#partsTree li[data-id="${rightFinger}"]`, { modifiers: ['Shift'] });
+    await page.keyboard.press('x');
+    assert.equal((await drawing()).contact.exclude.length, 1);
+    assert.match(await page.textContent('#inspector'), /They never touch/);
+    await page.keyboard.press(`${command}+z`);
+    assert.equal((await drawing()).contact.exclude.length, 0);
+    await page.click('#buildButton');
+    const touching = await builtInCanvas((model) => model.edges.some(({ name }) => /^Floor and /.test(name)));
+    assert.ok(touching.edges.some(({ name }) => name === 'Floor and Left finger'));
+    await shot('08c-contact');
 
     // 15. Import a robot from a MuJoCo model. From Menagerie (answered here, as Konjugate's main process asks for it,
     // with tests/fixtures/arm in the SO-ARM100's folder): its licence shown first, its files downloaded at that commit
@@ -587,7 +607,7 @@ try {
         const { decodeValidationReport } = await import(pathToFileURL(konjugateModule('src/reportProtocol.mjs')));
         const directory = scratch;
         for (const [name, built] of [['robot', document], ['linkage', linkage], ['pickAndPlace', pickAndPlace], ['gripper', gripper], ['touching', touching], ['imported', importedModel]]) {
-            await writeFile(join(directory, `${name}.kjt`), await encodeProjectFile(JSON.stringify(built)));
+            await writeFile(join(directory, `${name}.kjt`), await encodeProjectFile(built.projectText));
             spawnSync(engine, ['validate', join(directory, `${name}.kjt`), '--report', join(directory, `${name}.report`)]);
             const report = decodeValidationReport(await readFile(join(directory, `${name}.report`)));
             assert.equal(report.valid, true, `${name}: ${JSON.stringify(report.issues)}`);

@@ -101,7 +101,7 @@ function makeFrame(A, frame, tag) {
     const given = frame.slice(3, 6);
     const unset = A.lt(v3.dot(A, given, given), 0.25);
     const fallback = [A.num(0), A.pick(A.and(A.lt(normal[1], 0.5), A.gt(normal[1], -0.5)), A.num(1), A.num(0)), A.pick(A.and(A.lt(normal[1], 0.5), A.gt(normal[1], -0.5)), A.num(0), A.num(1))];
-    const start = v3.pick(A, unset, fallback, given);
+    const start = v3.name(A, `${tag}s`, v3.pick(A, unset, fallback, given));
     const along = v3.dot(A, normal, start);
     const tangent = normalize(A, `${tag}t`, v3.sub(A, start, v3.scale(A, normal, along))).unit;
     return [...normal, ...tangent, ...v3.cross(A, normal, tangent)];
@@ -181,18 +181,16 @@ function planeBox(A, plane, box, margin) {
         const corner = v3.mat(A, box.mat, local);
         const depth = A.name(`pbl${i + 1}`, v3.dot(A, normal, corner));
         const cornerDist = A.name(`pbd${i + 1}`, A.add(dist, depth));
-        const touches = A.and(A.le(cornerDist, margin), A.le(depth, 0));
+        const touches = A.name(`pbo${i + 1}`, A.and(A.le(cornerDist, margin), A.le(depth, 0)));
         const pos = v3.name(A, `pbp${i + 1}`, v3.add(A, v3.add(A, corner, box.pos), v3.scale(A, normal, A.mul(-0.5, cornerDist))));
         return { touches, dist: cornerDist, pos };
     });
+    // How many corners before each touch, named once, so no slot's choice repeats the count before it.
+    const before = [A.num(0)];
+    corners.forEach(({ touches }, i) => before.push(A.name(`pbn${i + 1}`, A.add(before[i], A.pick(touches, 1, 0)))));
     // Slot k holds the (k+1)th touching corner: corner i is it when exactly k corners before it touch.
     return [0, 1, 2, 3].map((k) => {
-        let count = [A.always, A.never, A.never, A.never, A.never]; // count[j]: exactly j corners so far touch
-        const takers = [];
-        for (const corner of corners) {
-            takers.push(A.and(corner.touches, count[k]));
-            count = count.map((exactly, j) => A.or(A.and(exactly, A.not(corner.touches)), j > 0 ? A.and(count[j - 1], corner.touches) : A.never));
-        }
+        const takers = corners.map(({ touches }, i) => A.name(`pbt${k + 1}x${i + 1}`, A.and(touches, A.gt(before[i], k - 0.5), A.lt(before[i], k + 0.5))));
         const pickAll = (values) => values.reduceRight((rest, value, i) => A.pick(takers[i], value, rest), values[values.length - 1]);
         return {
             active: A.or(...takers),
@@ -300,18 +298,18 @@ function sphereBox(A, sphere, box, margin, tag = 'sb') {
     const centre = v3.name(A, `${tag}c`, v3.matT(A, box.mat, v3.sub(A, sphere.pos, box.pos)));
     const clamped = v3.name(A, `${tag}k`, centre.map((value, i) => clip(A, value, A.neg(box.size[i]), box.size[i])));
     const toward = normalize(A, `${tag}t`, v3.sub(A, clamped, centre));
-    const inside = A.le(toward.length, minimumValue);
-    // Inside: the nearest of the six faces (the first of equals, in MuJoCo's order).
+    const inside = A.name(`${tag}i`, A.le(toward.length, minimumValue));
+    // Inside: the nearest of the six faces (the first of equals, in MuJoCo's order). Each step's nearest so far, and
+    // whether a face is nearer than those before it, named once, so no later step repeats an earlier one.
     const faces = Array.from({ length: 6 }, (_, i) => A.name(`${tag}f${i + 1}`, A.abs(A.sub(A.mul(i % 2 ? 1 : -1, box.size[Math.floor(i / 2)]), centre[Math.floor(i / 2)]))));
     let closest = A.mul(2, A.add(box.size[0], box.size[1], box.size[2]));
     let chosen = [A.never, A.never, A.never, A.never, A.never, A.never];
     faces.forEach((value, i) => {
-        const nearer = A.gt(closest, value);
+        const nearer = A.name(`${tag}g${i + 1}`, A.gt(closest, value));
         chosen = chosen.map((was, j) => (j === i ? nearer : A.and(was, A.not(nearer))));
-        closest = A.pick(nearer, value, closest);
+        closest = A.name(i === faces.length - 1 ? `${tag}m` : `${tag}m${i + 1}`, A.pick(nearer, value, closest));
     });
-    closest = A.name(`${tag}m`, closest);
-    const nearest = [0, 1, 2].map((axis) => A.add(A.pick(chosen[2 * axis], A.num(1), A.num(0)), A.pick(chosen[2 * axis + 1], A.num(-1), A.num(0))));
+    const nearest = v3.name(A, `${tag}e`, [0, 1, 2].map((axis) => A.add(A.pick(chosen[2 * axis], A.num(1), A.num(0)), A.pick(chosen[2 * axis + 1], A.num(-1), A.num(0)))));
     const insidePos = v3.add(A, centre, v3.scale(A, nearest, A.mul(0.5, A.sub(r, closest))));
     const deepest = v3.add(A, centre, v3.scale(A, toward.unit, r));
     const outsidePos = v3.scale(A, v3.add(A, clamped, deepest), 0.5);
