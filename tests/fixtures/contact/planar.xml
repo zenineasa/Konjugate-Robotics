@@ -1,0 +1,18 @@
+<!-- Copyright © 2026 Zenin Easa Panthakkalakath -->
+<!-- A body free to move in a vertical plane only (two slides and a hinge, so it turns as MuJoCo's hinge turns, not as its
+     free joint does), dropped tilted onto the floor; the contact tests give it a box, a capsule, a cylinder or a sphere
+     to touch with, and a step fixed beside it, a box, to fall onto (tests/engine/contact.test.mjs). -->
+<mujoco model="Planar drop">
+  <compiler angle="degree"/>
+  <worldbody>
+    <body name="Body" pos="0 0 0.25" euler="0 25 0">
+      <joint name="Across" type="slide" axis="1 0 0"/>
+      <joint name="Up" type="slide" axis="0 0 1"/>
+      <joint name="Turn" axis="0 1 0"/>
+      <inertial pos="0 0 0" mass="1" diaginertia="0.004 0.005 0.006"/>
+    </body>
+    <body name="Step" pos="0.15 0 0.04">
+      <inertial pos="0 0 0" mass="1" diaginertia="0.001 0.001 0.001"/>
+    </body>
+  </worldbody>
+</mujoco>

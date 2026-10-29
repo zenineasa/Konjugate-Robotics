@@ -347,6 +347,27 @@ try {
     assert.ok(gripper.edges.some(({ name }) => name === coupling.name), 'the coupling is a relationship');
     await shot('08b-tendon');
 
+    // 12c. Contact: turned on from the robot's card, two solids made never to touch by their key (X), undone; built,
+    // each pair that may touch is a relationship.
+    await page.click('#viewport', { position: { x: 10, y: 10 } });
+    await page.keyboard.press('Escape');
+    await page.check('#inspector input[name="contact.on"]');
+    assert.deepEqual((await drawing()).contact, { floor: true, automatic: true, pairs: [], exclude: [], floorSurface: {} });
+    assert.match(await page.textContent('#inspector'), /pairs? may touch/);
+    const fingerSolids = ['Left finger', 'Right finger'].map(async (name) => (await drawing()).solids.find((solid) => solid.name === name).id);
+    const [leftFinger, rightFinger] = await Promise.all(fingerSolids);
+    await page.click(`#partsTree li[data-id="${leftFinger}"]`);
+    await page.click(`#partsTree li[data-id="${rightFinger}"]`, { modifiers: ['Shift'] });
+    await page.keyboard.press('x');
+    assert.equal((await drawing()).contact.exclude.length, 1);
+    assert.match(await page.textContent('#inspector'), /They never touch/);
+    await page.keyboard.press(`${command}+z`);
+    assert.equal((await drawing()).contact.exclude.length, 0);
+    await page.click('#buildButton');
+    const touching = await builtInCanvas((model) => model.edges.some(({ name }) => /^Floor and /.test(name)));
+    assert.ok(touching.edges.some(({ name }) => name === 'Floor and Left finger'));
+    await shot('08c-contact');
+
     // 14. Will these motors do it? M opens the sizing panel and, as nothing has been run as drawn, Konjugate runs the
     // pick-and-place arm (runBaseline): a card per motor, its run inside its band. A heavier part from 2 s is a what-if
     // forked from that run in Konjugate, shown beside it; Show in canvas opens both, a branch each; M closes the panel.
@@ -565,7 +586,7 @@ try {
     if (existsSync(engine)) {
         const { decodeValidationReport } = await import(pathToFileURL(konjugateModule('src/reportProtocol.mjs')));
         const directory = scratch;
-        for (const [name, built] of [['robot', document], ['linkage', linkage], ['pickAndPlace', pickAndPlace], ['gripper', gripper], ['imported', importedModel]]) {
+        for (const [name, built] of [['robot', document], ['linkage', linkage], ['pickAndPlace', pickAndPlace], ['gripper', gripper], ['touching', touching], ['imported', importedModel]]) {
             await writeFile(join(directory, `${name}.kjt`), await encodeProjectFile(JSON.stringify(built)));
             spawnSync(engine, ['validate', join(directory, `${name}.kjt`), '--report', join(directory, `${name}.report`)]);
             const report = decodeValidationReport(await readFile(join(directory, `${name}.report`)));

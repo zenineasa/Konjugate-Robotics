@@ -7,7 +7,9 @@
 //   format: 'konjugate.robotics.drawing', version: 1, name, nextId,
 //   solids: [{ id, name, shape, size, position, rotation, color, mass: { by: 'density', density } | { by: 'mass', value } }],
 //   frames: [{ id, solid (a solid's id, or 'ground'), point, axis }],
-//   joints: [{ id, name, kind, parent, child, limits, damping, friction, armature, stiffness, springRest, drive }]
+//   joints: [{ id, name, kind, parent, child, limits, damping, friction, armature, stiffness, springRest, drive }],
+//   couplings, tendons, keyframes, battery, contact (each optional; lib/contact.mjs for contact, with a solid's touches,
+//   colliders and surface)
 //   (a hinge's or a slider's spring: stiffness, pulling it to springRest, counted from where it is drawn; none when
 //   stiffness is 0 or missing)
 // }
@@ -24,6 +26,7 @@
 //
 // Every operation returns a new drawing and leaves the one given alone, so the window's undo keeps each as it was.
 
+import { contactChecks, withoutGoneSolids } from './contact.mjs';
 import { defaultSize, shapeKinds, sizeProblems, volume } from './shapes.mjs';
 import {
     add, between, conjugate, directionToWorld, identity, length, multiply, normalize, normalizeQuaternion, rotate, scale, subtract, toWorld
@@ -169,6 +172,12 @@ export function updateSolid(drawing, id, changes) {
         solid.size = defaultSize(changes.shape);
     }
     if (changes.mass) solid.mass = { ...changes.mass };
+    // Contact (lib/contact.mjs): whether it touches, and its surface's settings merged in.
+    if (changes.touches !== undefined) { if (changes.touches) delete solid.touches; else solid.touches = false; }
+    if (changes.surface) solid.surface = { ...(solid.surface ?? {}), ...changes.surface };
+    // Its colliders in place of its own shape ([{ shape, size, position, rotation }] in its own frame), or null for its
+    // shape again.
+    if (changes.colliders !== undefined) { if (changes.colliders === null) delete solid.colliders; else solid.colliders = structuredClone(changes.colliders); }
     if (changes.position) solid.position = [...changes.position];
     if (changes.rotation) solid.rotation = normalizeQuaternion(changes.rotation);
     return next;
@@ -199,7 +208,7 @@ export function removeSolids(drawing, ids) {
     next.solids = next.solids.filter((solid) => !ids.includes(solid.id));
     next.frames = next.frames.filter((frame) => !removedFrames.has(frame.id));
     next.joints = next.joints.filter((joint) => !removedFrames.has(joint.parent) && !removedFrames.has(joint.child));
-    return withoutGoneJoints(next);
+    return withoutGoneSolids(withoutGoneJoints(next));
 }
 
 // Copies of solids, a little to the side, with their frames (not their joints). Returns { drawing, ids }.
@@ -697,5 +706,8 @@ export function checkDrawing(drawing) {
         const solid = solidById(drawing, root);
         warnings.push({ id: root, message: `${solid.name} is not joined to the Ground, so it falls freely${connectedSolids(drawing, root).length > 1 ? ' with the solids joined to it' : ''}.` });
     }
+    const contact = contactChecks(drawing);
+    errors.push(...contact.errors);
+    warnings.push(...contact.warnings);
     return { errors, warnings, notes };
 }

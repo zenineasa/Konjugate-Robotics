@@ -44,8 +44,10 @@
 
 import { frameById, frameInWorld, groundId, massOf, poseOf, structure, treeOrder } from '../../packages/toolbox/lib/drawing.mjs';
 import { add, cross, dot, fromAxisAngle, multiply, normalize, rotate, scale, subtract } from '../../packages/toolbox/lib/math.mjs';
-import { closure, closureFrame, closureRate, constraintSweeps, impedanceAt, rowReference, softnessOf } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { closure, closureFrame, closureRate, constraintPolishes, constraintSweeps, impedanceAt, rowReference, softnessOf } from '../../packages/toolbox/lib/modelBuilder.mjs';
 import { couplingsOf, tendonsOf } from '../../packages/toolbox/lib/drawing.mjs';
+import { collide, numbers } from '../../packages/toolbox/lib/collision.mjs';
+import { contactPairs, floorSurfaceOf, leastFriction, surfaceOf } from '../../packages/toolbox/lib/contact.mjs';
 
 export const gravity = 9.81;
 
@@ -411,7 +413,8 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
         ...loop.J.map((J, k) => ({ type: 'loop', J, wanted: null, index: k })),
         ...jointRows(bodies, q, qd, inputs.invweight, timeStep, n),
         ...couplingRows(inputs.couplings ?? [], q, qd, timeStep, n),
-        ...tendonRows(inputs.tendons ?? [], q, qd, timeStep)
+        ...tendonRows(inputs.tendons ?? [], q, qd, timeStep),
+        ...contactRows(inputs.contacts ?? [], bodies, poses, qd, timeStep)
     ];
     const loopWanted = loop.wanted(a0);
     rows.forEach((row, index) => {
@@ -422,7 +425,7 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
     const response = rows.map((row) => solve(M0, row.J));
     const K = rows.map((row) => response.map((column) => dot3(row.J, column)));
     const held = rows.filter(({ type }) => type === 'loop').map(({ index }) => index);
-    const bounded = rows.filter(({ type }) => type === 'friction' || type === 'limit' || type === 'equality').map(({ index }) => index);
+    const bounded = rows.filter(({ type }) => type === 'friction' || type === 'limit' || type === 'equality' || type === 'contact').map(({ index }) => index);
     const forces = rows.map(() => 0);
     let A = (r, c) => K[r][c];
     let b = (r) => rows[r].wanted;
@@ -443,25 +446,34 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
             f.set(r, Math.max(low, Math.min(high, f.get(r) + residual / (A(r, r) + compliance))));
         }
     }
-    // The rows inside their bounds solved exactly, the others held at theirs; taken where consistent. Where not, once
-    // more from that solution held to the bounds; and the sweeps' forces where neither is.
+    // Polishing, as an active set: each row's next value were it alone (its force plus its residual over its own
+    // coupling and compliance) says whether it is inside its bounds; the rows inside are solved exactly, the others held
+    // at the bound that value reaches. Taken where consistent (each solved force inside its bounds, each held one
+    // pushing against its bound); tried again from that solution, and the sweeps' forces where no try is.
     const polish = (start) => {
-        const inside = new Map(bounded.map((r) => [r, start.get(r) > rows[r].low && start.get(r) < rows[r].high]));
+        const residualOf = (r, values) => b(r) - bounded.reduce((sum, c) => sum + A(r, c) * values.get(c), 0) - rows[r].compliance * values.get(r);
+        const next = new Map(bounded.map((r) => [r, start.get(r) + residualOf(r, start) / (A(r, r) + rows[r].compliance)]));
+        const inside = new Map(bounded.map((r) => [r, next.get(r) > rows[r].low && next.get(r) < rows[r].high]));
+        const held = new Map(bounded.map((r) => [r, Math.max(rows[r].low, Math.min(rows[r].high, next.get(r)))]));
         const values = bounded.length ? solve(
             bounded.map((i) => bounded.map((j) => (i === j ? (inside.get(i) ? A(i, i) + rows[i].compliance : 1) : inside.get(i) && inside.get(j) ? A(i, j) : 0))),
-            bounded.map((i) => (inside.get(i) ? b(i) - bounded.reduce((sum, j) => sum + (j !== i && !inside.get(j) ? A(i, j) * start.get(j) : 0), 0) : start.get(i)))
+            bounded.map((i) => (inside.get(i) ? b(i) - bounded.reduce((sum, j) => sum + (j !== i && !inside.get(j) ? A(i, j) * held.get(j) : 0), 0) : held.get(i)))
         ) : [];
+        const solved = new Map(bounded.map((r, k) => [r, values[k]]));
         const fits = bounded.every((r, k) => {
             if (!(rows[r].high - rows[r].low > 1e-300)) return true;
-            const residual = b(r) - bounded.reduce((sum, c, m) => sum + A(r, c) * values[m], 0) - rows[r].compliance * values[k];
             if (inside.get(r)) return values[k] >= rows[r].low && values[k] <= rows[r].high;
-            return start.get(r) > rows[r].low ? residual >= 0 : residual <= 0;
+            const residual = residualOf(r, solved);
+            return held.get(r) > rows[r].low ? residual >= 0 : residual <= 0;
         });
-        return { values, fits };
+        return { values, fits, solved };
     };
-    const first = polish(f);
-    const second = polish(new Map(bounded.map((r, k) => [r, Math.max(rows[r].low, Math.min(rows[r].high, first.values[k]))])));
-    bounded.forEach((r, k) => { forces[r] = first.fits ? first.values[k] : second.fits ? second.values[k] : f.get(r); });
+    const tries = [polish(f)];
+    while (tries.length < (inputs.polishes ?? constraintPolishes)) tries.push(polish(tries.at(-1).solved));
+    const taken = tries.find(({ fits }) => fits);
+    bounded.forEach((r, k) => { forces[r] = taken ? taken.values[k] : f.get(r); });
+    if (process.env.DUMPALL) console.log('QDD', inputs.time.toFixed(4), solve(zero.map((__, row) => zero.map((___, column) => M0[row][column] + dampingMatrix(row, column) * timeStep)), net.map((value, k) => value + rows.reduce((sum, row, r) => sum + row.J[k] * forces[r], 0))).join(' '), 'taken', tries.indexOf(taken));
+    if (process.env.DUMP && Math.abs(inputs.time - Number(process.env.DUMP)) < 0.0015) console.log('REF t', inputs.time.toFixed(4), 'taken', tries.indexOf(taken), 'q', q.map((v) => v.join(',')).join(' '), 'qd', qd.join(' '), '\n', rows.map((row, r) => `  row ${r} J ${row.J.map((v) => v.toFixed(6)).join(',')} R ${row.compliance} high ${row.high} ref ${row.reference} f ${forces[r]}`).join('\n'));
     held.forEach((e, k) => { forces[e] = held0[k] - bounded.reduce((sum, c) => sum + heldPer.get(c)[k] * forces[c], 0); });
     const matrix = zero.map((__, row) => zero.map((___, column) => M0[row][column] + dampingMatrix(row, column) * timeStep));
     const qdd = solve(matrix, net.map((value, k) => value + rows.reduce((sum, row, r) => sum + row.J[k] * forces[r], 0)));
@@ -558,6 +570,50 @@ function tendonRows(tendons, q, qd, timeStep) {
     return rows;
 }
 
+// The contacts' rows, after the tendons': each pair's contact points as MuJoCo's collision functions find them
+// (lib/collision.mjs, shared with the model builder and checked against MuJoCo's own contacts), each point four rows
+// along its friction pyramid's edges n ± μ tᵢ, pushing only while it touches. J from each solid's motion per unit of
+// each speed at the point; R = 2 μ² (1 - imp) w (1 + μ²) / imp, w the two solids' translational body_invweight0 (from
+// this file's mass matrix); aref = -B J q̇ - K imp (dist - margin).
+function contactRows(contacts, bodies, poses, qd, timeStep) {
+    if (!contacts.length) return [];
+    const n = qd.length;
+    const unit = Array.from({ length: n }, (_, k) => motionOf(bodies, poses, qd.map((__, j) => (j === k ? 1 : 0)), qd.map(() => 0), 0));
+    const pointVelocity = (body, k, point) => {
+        if (body === -1) return [0, 0, 0];
+        const { omega, velocity, centre } = unit[k][body];
+        return add(velocity, cross(omega, subtract(point, centre)));
+    };
+    const rows = [];
+    for (const contact of contacts) {
+        const shape = ({ body, collider, ground }) => {
+            const pose = body === -1 ? ground : poses[body];
+            const rotation = multiply(pose.rotation, collider.rotation);
+            const matrix = [0, 1, 2].map((row) => [0, 1, 2].map((column) => rotate(rotation, [0, 1, 2].map((axis) => (axis === column ? 1 : 0)))[row]));
+            return { kind: collider.kind, size: collider.size, pos: add(pose.position, rotate(pose.rotation, collider.position)), mat: matrix.flat() };
+        };
+        const [a, b] = [contact.first, contact.second];
+        const slots = collide(numbers, shape(a), shape(b), 0);
+        const { B, K } = rowReference({ solref: contact.solref, solimp: contact.solimp }, timeStep);
+        for (const slot of slots) {
+            const touching = slot.active && slot.dist < contact.margin;
+            const normal = slot.frame.slice(0, 3);
+            const tangents = [slot.frame.slice(3, 6), slot.frame.slice(6, 9)];
+            const past = slot.dist - contact.margin;
+            const imp = impedanceAt(contact.solimp, past);
+            const compliance = 2 * contact.mu * contact.mu * Math.max(1e-15, ((1 - imp) * contact.w * (1 + contact.mu * contact.mu)) / imp);
+            for (const tangent of tangents) {
+                for (const side of [1, -1]) {
+                    const direction = add(normal, scale(tangent, side * contact.mu));
+                    const J = Array.from({ length: n }, (_, k) => dot(direction, subtract(pointVelocity(b.body, k, slot.pos), pointVelocity(a.body, k, slot.pos))));
+                    rows.push({ type: 'contact', J, compliance, low: 0, high: touching ? 1e30 : 0, reference: -B * dot3(J, qd) - K * imp * past });
+                }
+            }
+        }
+    }
+    return rows;
+}
+
 const dot3 = (a, b) => a.reduce((sum, value, index) => sum + value * b[index], 0);
 
 // q̇ = ½ [0, ω] ⊗ q, one component at a time from the ones updated before it, as the engine updates a node's states.
@@ -596,7 +652,7 @@ function step(bodies, q, qd, qdd, timeStep) {
 // a hinge or a slider, the quaternion for a ball), { [solidId]: centre }, and `rotations: { [solidId]: quaternion }`;
 // a solid joined to nothing has its joint as `free:<solid id>`. `sweeps`: the constraint rows' sweeps of projected
 // Gauss-Seidel, the model builder's constraintSweeps unless given.
-export function simulate(drawing, times, timeStep = 0.001, { sweeps } = {}) {
+export function simulate(drawing, times, timeStep = 0.001, { sweeps, polishes } = {}) {
     const bodies = treeOf(drawing);
     const loops = loopsOf(drawing, bodies);
     let q = restCoordinates(bodies);
@@ -605,8 +661,9 @@ export function simulate(drawing, times, timeStep = 0.001, { sweeps } = {}) {
     // step before, and each joint's inverse inertia where drawn.
     const couplingList = couplingsOf(drawing);
     const tendonList = tendonsOf(drawing);
+    const contactList = contactPairs(drawing).pairs;
     const soft = bodies.some((body) => (body.kind === 'hinge' || body.kind === 'slider') && (body.joint.friction > 0 || body.joint.limits))
-        || couplingList.length > 0 || tendonList.some((tendon) => tendon.friction > 0 || tendon.limits);
+        || couplingList.length > 0 || tendonList.some((tendon) => tendon.friction > 0 || tendon.limits) || contactList.length > 0;
     let warm = new Map();
     const inverseMass = (() => {
         const zero = Array(qd.length).fill(0);
@@ -638,6 +695,30 @@ export function simulate(drawing, times, timeStep = 0.001, { sweeps } = {}) {
             return values;
         };
         return { ...tendon, c, positions, w: dot3(c, c.map((_, i) => dot3(inverseMass[i], c))) };
+    });
+    // Each body's translational inverse inertia where drawn (MuJoCo's body_invweight0): its centre's velocity per unit
+    // of each speed, through M⁻¹, the mean of the diagonal.
+    const restPoses = place(bodies, q);
+    const restUnit = Array.from({ length: qd.length }, (_, k) => motionOf(bodies, restPoses, qd.map((__, j) => (j === k ? 1 : 0)), qd.map(() => 0), 0));
+    const translationWeight = (body) => {
+        if (body === -1) return 0;
+        let sum = 0;
+        for (let axis = 0; axis < 3; axis += 1) for (let i = 0; i < qd.length; i += 1) for (let j = 0; j < qd.length; j += 1) sum += restUnit[i][body].velocity[axis] * inverseMass[i][j] * restUnit[j][body].velocity[axis];
+        return sum / 3;
+    };
+    const groundPose = poseOf(drawing, 'ground');
+    const indexOf = new Map(bodies.map(({ id }, index) => [id, index]));
+    const contacts = contactList.map(({ first, second }) => {
+        const [a, b] = [first, second].map((entry) => (entry.solid === 'ground' ? floorSurfaceOf(drawing) : surfaceOf(drawing.solids.find(({ id }) => id === entry.solid))));
+        const standard = a.solref[0] > 0 && b.solref[0] > 0;
+        const end = (entry) => ({ body: entry.solid === 'ground' ? -1 : indexOf.get(entry.solid), collider: entry.collider, ground: groundPose });
+        return {
+            first: end(first), second: end(second),
+            mu: Math.max(leastFriction, a.friction, b.friction), margin: a.margin + b.margin,
+            solref: [0, 1].map((k) => (standard ? 0.5 * a.solref[k] + 0.5 * b.solref[k] : Math.min(a.solref[k], b.solref[k]))),
+            solimp: a.solimp.map((value, k) => 0.5 * value + 0.5 * b.solimp[k]),
+            w: translationWeight(end(first).body) + translationWeight(end(second).body)
+        };
     });
     const out = Object.fromEntries([...bodies.filter(({ kind }) => kind !== 'fixed').map(({ joint }) => [joint.id, []]), ...bodies.map(({ id }) => [id, []])]);
     out.rotations = Object.fromEntries(bodies.map(({ id }) => [id, []]));
@@ -695,7 +776,7 @@ export function simulate(drawing, times, timeStep = 0.001, { sweeps } = {}) {
             const setpoints = Object.fromEntries(Object.entries(schedules).map(([jointId, samples]) => [jointId, lookup(samples, time)]));
             const now = motorsNow(time);
             const motorTorques = Object.fromEntries(Object.entries(now).map(([jointId, { torque }]) => [jointId, torque]));
-            const found = forwardDynamics(bodies, q, qd, loops, timeStep, { setpoints, motorTorques, soft, warm, invweight, couplings, tendons, related, sweeps });
+            const found = forwardDynamics(bodies, q, qd, loops, timeStep, { setpoints, motorTorques, soft, warm, invweight, couplings, tendons, related, sweeps, polishes, contacts, time });
             const { qdd } = found;
             warm = found.warm;
             ({ q, qd } = step(bodies, q, qd, qdd, timeStep));

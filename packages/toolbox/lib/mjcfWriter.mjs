@@ -21,12 +21,14 @@
 //   counts them from qpos0). A tendon is a fixed tendon; MuJoCo counts its length from nothing where the robot is
 //   drawn, so its spring length and range are written less its offset. Its drive is a general actuator on it: a force,
 //   or a servo kp (setpoint - L) - kv L̇ as gain 0 and an affine bias, its force limited.
-// - Contact is off: every geom has contype and conaffinity 0. Solids drawn touching at a joint would otherwise push each
-//   other apart. Contact comes with its own milestone (docs/direction.md).
+// - Contact: every geom has contype and conaffinity 0, so nothing touches but the pairs the drawing's contact makes
+//   (lib/contact.mjs), each written as a <pair> with the parameters MuJoCo would mix from the two geoms; a solid's
+//   colliders other than its own shape are geoms of their own, with no mass.
 //
 // Names: each body is named by its solid's id and each joint by its joint's id (`s3`, `j2`), so names in the drawing
 // can be anything; the model builder knows them by the same ids.
 
+import { collidersOf, contactPairs, floorSurfaceOf, leastFriction, surfaceOf } from './contact.mjs';
 import { couplingsOf, structure, solidById, frameById, frameInWorld, groundId, massOf, poseOf, tendonsOf } from './drawing.mjs';
 import { directionToLocal, formatNumber, formatVector, normalize, relativePose, scale, toLocal } from './math.mjs';
 import { mjcfGeometry } from './shapes.mjs';
@@ -104,6 +106,10 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
         for (const step of before) writeJoint(step.joint, step.carried, id, depth + 1);
         if (link && !floating) writeJoint(link.joint, id, id, depth + 1);
         const geometry = mjcfGeometry(solid.shape, solid.size);
+        // Colliders other than its own shape, each a geom of its own (its own shape's geom is its first collider).
+        if (solid.colliders && solid.touches !== false) {
+            collidersOf(solid).forEach((collider, index) => write(depth + 1, `<geom name="${id}c${index + 1}" type="${collider.kind}" size="${formatVector(collider.size)}" pos="${formatVector(collider.position)}" quat="${formatVector(collider.rotation)}" mass="0" contype="0" conaffinity="0"/>`));
+        }
         if (solid.shape === 'mesh') {
             // An imported solid: its inertia as it is, along its own (principal) axes, and the box about it to show.
             write(depth + 1, `<inertial pos="0 0 0" mass="${formatNumber(massOf(solid))}" diaginertia="${formatVector(solid.unitInertia.map((value) => value * massOf(solid)))}"/>`);
@@ -128,6 +134,22 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
         body(root, groundId, 2, true);
     }
     write(1, '</worldbody>');
+
+    // The pairs that touch, each with the friction, softness and margin MuJoCo would mix from its two geoms.
+    const touching = contactPairs(drawing, built).pairs;
+    if (touching.length) {
+        write(1, '<contact>');
+        const geomName = (entry) => (entry.solid === groundId ? 'floor' : solidById(drawing, entry.solid).colliders && solidById(drawing, entry.solid).touches !== false ? `${entry.solid}c${entry.index + 1}` : entry.solid);
+        for (const { first, second } of touching) {
+            const [a, b] = [first, second].map((entry) => (entry.solid === groundId ? floorSurfaceOf(drawing) : surfaceOf(solidById(drawing, entry.solid))));
+            const mu = Math.max(leastFriction, a.friction, b.friction);
+            const standard = a.solref[0] > 0 && b.solref[0] > 0;
+            const solref = [0, 1].map((k) => (standard ? 0.5 * a.solref[k] + 0.5 * b.solref[k] : Math.min(a.solref[k], b.solref[k])));
+            const solimp = a.solimp.map((value, k) => 0.5 * value + 0.5 * b.solimp[k]);
+            write(2, `<pair geom1="${geomName(first)}" geom2="${geomName(second)}" condim="3" friction="${formatVector([mu, mu, 0.005, 0.0001, 0.0001])}" solref="${formatVector(solref)}" solimp="${formatVector(solimp)}" margin="${formatNumber(a.margin + b.margin)}"/>`);
+        }
+        write(1, '</contact>');
+    }
 
     const loops = built.loops.filter((joint) => joint.kind !== 'slider');
     const softAttributes = (softness, suffix = '') => ['solref', 'solimp'].filter((key) => softness?.[key]).map((key) => `${key}${suffix}="${formatVector(softness[key])}"`);

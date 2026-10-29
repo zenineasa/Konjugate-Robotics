@@ -12,6 +12,7 @@ import {
     frameById, groundId, jointById, jointKinds, jointLabels, keyframesOf, massOf, materials, moveSolids, nextKeyframeTime, poseOf, readDrawing, removeJoints,
     removeKeyframe, removeSolids, reverseJoint, solidById, structure, treeOrder, turnSolids, updateBattery, updateFrame, updateJoint, updateKeyframe, updateSolid
 } from './lib/drawing.mjs';
+import { collidersOf, contactOf, contactPairs, floorSurfaceOf, setTouching, surfaceOf, updateContact } from './lib/contact.mjs';
 import { jogRange, posedDrawing } from './lib/pose.mjs';
 import { envelope, motorsOf, sizingSignals, summarize, whatIf } from './lib/sizing.mjs';
 import { robotByFolder, robots, storedName } from './lib/catalog.mjs';
@@ -458,8 +459,14 @@ function renderInspector() {
             ? `<p class="note">Couple the first to the second, so it follows it, or run a tendon over them all.</p>
             <div class="buttons">${movers.length === 2 ? `<button type="button" class="tool" data-action="couple" title="The first follows the second (U)">Couple</button>` : ''}<button type="button" class="tool" data-action="tendon" title="A tendon over these joints (T)">Tendon</button></div>`
             : '';
+        const pair = solids.length === 2 && state.selection.length === 2 && contactOf(current) ? (() => {
+            const contact = contactOf(current);
+            const same = (entry) => entry.includes(solids[0]) && entry.includes(solids[1]);
+            const now = contact.pairs?.some(same) ? 'They always touch.' : contact.exclude?.some(same) ? 'They never touch.' : `They touch as the rule has it: ${contactPairs(current).pairs.some(({ first, second }) => [first.solid, second.solid].includes(solids[0]) && [first.solid, second.solid].includes(solids[1])) ? 'they do' : 'they do not'}.`;
+            return `<p class="note">${now}</p><div class="buttons"><button type="button" class="tool" data-action="touching" title="As the rule has it, never, always (X)">Change touching</button></div>`;
+        })() : '';
         panel.innerHTML = `<h3>${state.selection.length} selected</h3><p class="note">Delete or duplicate them together, or select one to change it.</p>
-            <div class="buttons"><button type="button" class="tool" data-action="duplicate">Duplicate</button><button type="button" class="tool" data-action="delete">Delete</button></div>${together}`;
+            <div class="buttons"><button type="button" class="tool" data-action="duplicate">Duplicate</button><button type="button" class="tool" data-action="delete">Delete</button></div>${together}${pair}`;
         return;
     }
     const built = structure(current);
@@ -470,7 +477,34 @@ function renderInspector() {
         ${field('Run time', numberInput('runTime', state.settings.runTime, { min: 0.01 }), 's')}
         ${field('Step', numberInput('timeStep', state.settings.timeStep * 1000, { min: 0.1, step: 0.1, title: 'The engine\'s step. Stiff servos and light solids need a short one; a millisecond suits most drawings.' }), 'ms')}
         ${current.joints.some((joint) => joint.drive?.mode === 'motor') ? batteryFields(current) : ''}
+        ${contactFields(current)}
         ${servoFields(current)}`;
+}
+
+// Contact (lib/contact.mjs): on or off, the floor, whether every pair of solids touches, and the floor's friction.
+function contactFields(current) {
+    const contact = contactOf(current);
+    const pairs = contact ? contactPairs(current) : null;
+    return `<h2>Contact</h2>
+        <label class="field"><span>Solids touch</span><span><input type="checkbox" name="contact.on"${contact ? ' checked' : ''}></span></label>
+        ${contact ? `<label class="field"><span>The floor</span><span><input type="checkbox" name="contact.floor"${contact.floor ? ' checked' : ''}></span></label>
+        <label class="field"><span>Every pair</span><span><input type="checkbox" name="contact.automatic"${contact.automatic ? ' checked' : ''} title="Every pair of solids touches, but those a joint joins, those welded together and a weld and its parent, as MuJoCo has it"></span></label>
+        ${field('Floor friction', numberInput('contact.floorFriction', floorSurfaceOf(current).friction, { min: 0 }))}
+        <p class="note">${pairs.pairs.length} pair${pairs.pairs.length === 1 ? '' : 's'} may touch, each a relationship in the canvas finding where they touch as MuJoCo does, every instant: its points' rows found at the Ground with the joints'. Select two solids to say whether they touch (X).${pairs.unsupported.length ? ` ${pairs.unsupported.length} pair${pairs.unsupported.length === 1 ? '' : 's'} cannot touch yet (box against box, and a cylinder against anything but the floor).` : ''}</p>` : '<p class="note">Off: solids pass through each other and the floor.</p>'}`;
+}
+
+// The touching of two selected solids (or a solid and the floor), cycled: as the rule has it, never, always.
+function cycleTouching() {
+    const solids = selectedSolids();
+    if (solids.length !== 2 && solids.length !== 1) { toast('Select two solids, or one to say whether it touches the floor.'); return; }
+    const [a, b] = solids.length === 2 ? solids : ['ground', solids[0]];
+    const contact = contactOf(drawing());
+    const same = (pair) => (pair[0] === a && pair[1] === b) || (pair[0] === b && pair[1] === a);
+    const now = contact?.pairs?.some(same) ? true : contact?.exclude?.some(same) ? false : null;
+    const next = now === null ? false : now === false ? true : null;
+    const name = (id) => (id === 'ground' ? 'the floor' : solidById(drawing(), id).name);
+    change(setTouching(drawing(), a, b, next), `${name(a)} and ${name(b)} ${next === null ? 'touch as the rule has it' : next ? 'always touch' : 'never touch'}`);
+    toast(`${name(a)} and ${name(b)}: ${next === null ? 'as the rule has it' : next ? 'they always touch' : 'they never touch'}.`);
 }
 
 // Turning the robot's servos into catalog motors, to size them: shown while a hinge has a servo.
@@ -533,6 +567,11 @@ function solidInspector(solid) {
         <h2>Mass</h2>
         ${massFields}
         ${field('Colour', `<input type="color" name="color" value="${escapeHtml(solid.color)}">`)}
+        ${contactOf(drawing()) ? `<h2>Contact</h2>
+        <label class="field"><span>Touches</span><span><input type="checkbox" name="touches"${solid.touches === false ? '' : ' checked'}></span></label>
+        ${field('Friction', numberInput('surface.friction', surfaceOf(solid).friction, { min: 0 }))}
+        <p class="note">${collidersOf(solid).length ? `It touches with ${solid.colliders ? `${collidersOf(solid).length} shape${collidersOf(solid).length === 1 ? '' : 's'} of its own` : 'its shape'}; a pair's friction is the larger of the two, as in MuJoCo.` : solid.shape === 'mesh' ? 'An imported shape touches only through the shapes its model gives it to collide with.' : 'It does not touch anything.'}</p>
+        <div class="buttons"><button type="button" class="tool" data-action="touchFloor" title="Whether it touches the floor: as the rule has it, never, always (X)">Floor touching…</button></div>` : ''}
         ${frames.length ? `<p class="note">${frames.length} joint point${frames.length === 1 ? '' : 's'} on it, which move with it.</p>` : ''}
         <div class="buttons">
             <button type="button" class="tool" data-action="move">Move</button>
@@ -764,6 +803,13 @@ function inspectorChanged(input) {
             change(updateBattery(current, { [field]: field === 'capacity' ? number * 3600 : number }), 'Battery', `battery:${field}`);
             return;
         }
+        if (name === 'contact.on') { change(updateContact(current, value ? {} : null), value ? 'Turn contact on' : 'Turn contact off'); return; }
+        if (name === 'contact.floor' || name === 'contact.automatic') { change(updateContact(current, { [name.slice(8)]: value }), name === 'contact.floor' ? 'Floor' : 'Every pair touching'); return; }
+        if (name === 'contact.floorFriction') {
+            if (!(number >= 0)) { toast('A friction is zero or more.'); render(); return; }
+            change(updateContact(current, { floorSurface: { friction: number } }), 'Floor friction', 'contact:floorFriction');
+            return;
+        }
         if (name === 'runTime' && number > 0) state.settings.runTime = number;
         if (name === 'timeStep' && number >= 0.1) state.settings.timeStep = number / 1000;
         keepSessionSoon();
@@ -777,6 +823,8 @@ function inspectorChanged(input) {
         if (name === 'name') { if (value.trim()) apply({ name: value.trim() }, 'Name'); else render(); return; }
         if (name === 'shape') { apply({ shape: value }, 'Shape'); return; }
         if (name === 'color') { apply({ color: value }, 'Colour'); return; }
+        if (name === 'touches') { apply({ touches: value }, value ? 'Touching' : 'Not touching'); return; }
+        if (name === 'surface.friction') { if (number >= 0) apply({ surface: { friction: number } }, 'Friction'); else { toast('A friction is zero or more.'); render(); } return; }
         if (name.startsWith('size.')) {
             if (!(number > 0)) { toast('A size must be more than zero.'); render(); return; }
             apply({ size: { [name.slice(5)]: fromMillimetres(number) } }, 'Size');
@@ -902,6 +950,7 @@ function inspectorAction(action) {
     if (action === 'join') { setTool('join'); return; }
     if (action === 'servosToMotors') { makeServosMotors(); return; }
     if (action === 'couple') { coupleSelection(); return; }
+    if (action === 'touching' || action === 'touchFloor') { cycleTouching(); return; }
     if (action === 'tendon') { tendonOverSelection(); return; }
     if (action === 'swapCoupling') {
         const coupling = couplingById(current, state.selection[0]);
@@ -1549,6 +1598,8 @@ const helpRows = () => [
     ['Change a joint', 'Select it: its kind, point and axis, limits, damping, spring and drive (free, a torque, a servo or a motor)'],
     ['Couple one joint to another', 'Select two hinges or sliders (the first follows the second), then Couple; U'],
     ['Run a tendon over joints', 'Select the hinges or sliders, then Tendon; T. Select a coupling or a tendon in Parts to change it'],
+    ['Contact', 'Solids touch, on the robot\'s card (nothing selected): the floor, every pair, the floor\'s friction; a solid\'s card: whether it touches, its friction'],
+    ['Whether two solids touch', 'Select both (or one, for the floor), then Change touching; X cycles as the rule has it, never, always'],
     ['Pose the robot', 'The jog sliders under Pose; Escape or As drawn goes back to the robot as drawn'],
     ['Keyframe a pose', 'Add keyframe; K. Show, Replace or remove one in Keyframes, or click it; [ and ] show the one before and after'],
     ['Duplicate', `Duplicate; ${keys.duplicate}`],
@@ -1676,7 +1727,7 @@ document.addEventListener('keydown', (event) => {
     if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); deleteSelection(); return; }
     const shortcuts = { b: () => addShape('box'), c: () => addShape('cylinder'), s: () => addShape('sphere'), p: () => addShape('capsule'),
         j: () => setTool('join'), g: () => setTool('move'), r: () => setTool('turn'), f: () => view.fit(), '?': showHelp,
-        k: addPoseKeyframe, '[': () => stepKeyframe(-1), ']': () => stepKeyframe(1), m: toggleSizing, i: openImport, u: coupleSelection, t: tendonOverSelection };
+        k: addPoseKeyframe, '[': () => stepKeyframe(-1), ']': () => stepKeyframe(1), m: toggleSizing, i: openImport, u: coupleSelection, t: tendonOverSelection, x: cycleTouching };
     if (shortcuts[event.key]) { event.preventDefault(); shortcuts[event.key](); }
 });
 
