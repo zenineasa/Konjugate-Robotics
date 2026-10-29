@@ -50,6 +50,35 @@ With these, a robot that touches things should still agree with MuJoCo to roundi
 
 Each contact point is four rows. Every solid keeps 12 states per row (its sensitivities), and the Ground gathers K's lower triangle, R (R + 1) / 2 sums. A gripper and a part on the floor (two fingers against a box, the box on the floor: about 10 points, 40 rows) would roughly double or triple a run's time against the same robot without contact; a robot with many possible contacts grows as the square of their rows. Built so far against that: the Ground's sweeps and exact solve work only on rows with room and inside their bounds, each other row behind a choice the engine does not take (a gripper and a box, 24 rows: about 0.9 ms a step here). Later: gathering K per tree, so rows that cannot touch a tree are not carried through it.
 
+## The solve in the joints' coordinates
+
+Built October 2026, from the arm with a gripper with contact on (the floor against its six links: 24 points, about 110 rows, 6 joint coordinates), which built 75,000 equations of 3.7 million terms, 108 MB, and took the engine six minutes to check. Gathering K (R by R) and solving with it grows as R² and R³; but rows act on the robot only through its n joint coordinates, so K = J M⁻¹ Jᵀ has rank n at most, whatever R is. Finding the same forces from J (R by n) and the joints' mass matrix M (n by n), as MuJoCo does, grows as R n² instead. Nothing else changes: the rows, their references, compliances and bounds, the warm start, the sweeps and polishes, and the forces handed back are as now, so the runs agree with MuJoCo and the reference as before, to rounding. The loops without other rows (no limit, friction, coupling, tendon or contact anywhere) keep their own solve as now.
+
+### What passes inward, edge by edge
+
+In place of each solid's sensitivities (12 per row) and K's lower triangle (R (R + 1) / 2), with everything a spatial vector in the world frame about its origin, as now:
+
+- **Each row's push, summed over a subtree.** A loop's or a contact's row pushes its second solid by Gᵀ and its first by -Gᵀ per unit of its force. Its relationship hands each end its share; each joint adds its child's and passes the sum to its parent: 6 numbers per row acting in the subtree.
+- **Each row's J.** A joint's relationship works out each row's J on each of its axes: its axis Sᵀ times the row's push summed over its child's subtree; or, for a row of its own (a limit, a dry friction, its damping) or one a coupling or a tendon gives it, the row's own J as now. J's entries are passed inward to the Ground: per solid, the rows acting in its subtree times the axes in it.
+- **The mass matrix, as composite inertias.** Each joint passes its child's subtree's inertia (its own plus its children's, 21 numbers) to its parent; each axis's column of force, F = Ic S, passes inward to every joint carrying it, which works out M's entry Sᵀ F with its own axes; the entries are passed to the Ground. A joint's armature joins its diagonal, as MuJoCo's qM has it. Entries between two trees (a robot and a part joined to nothing) are nothing, and drop out of every sum as the equations are written.
+- **As now:** each row's wanted acceleration aref - J q̈₀, its compliance and bounds.
+
+### At the Ground
+
+On the solid hanging from the Ground that solves, with M = L Lᵀ (its Cholesky factors) and each row's ĵ = L⁻¹ Jᵀ (n numbers), so that K's entry between two rows is ĵ₁ · ĵ₂:
+
+1. **Loops, taken out exactly.** Their rows are held with a compliance of 10⁻⁹. A Householder reflection of their ĵ (as many as the loops' rows) splits the joints' coordinates into what the loops hold and what they leave free; the other rows' ĵ are rewritten in it, the part the loops hold scaled by ε (T Tᵀ + ε)⁻¹ (T the loops' ĵ in the reflection's coordinates), so K less what the loops take is again ĵ'₁ · ĵ'₂, to rounding (checked against the row-space elimination on random rows, to 10⁻¹⁶ relative; scaling the loops' rows by 1 / ε instead loses up to half the digits). The loops' forces come from their few rows at the end, as now.
+2. **Projected Gauss-Seidel, five sweeps, from the step before's forces.** Each row's residual is its wanted acceleration less ĵ' · u less its compliance times its force, u the sum of ĵ' times every row's force (n numbers), updated as each row's force changes: R n per sweep, not R².
+3. **Polishing, three tries as now.** Each row inside its bounds or held at one, as now; the rows inside solved exactly by Woodbury's identity: H = I + Σ ĵ' ĵ'ᵀ / c over the rows inside (c each one's compliance; n by n), its Cholesky factors, then each row's force from H's solution: R n² + n³, not R³. The fits are checked as now.
+4. **Damping rows** (with a tendon's damping): found after the others from them, as now, by L D Lᵀ over the damping rows alone, their K and their K with the others from ĵ.
+5. **The joints' accelerations, with damping rows:** q̈ = q̈₀ + L⁻ᵀ Σ ĵ times each row's force, handed out to each joint (n numbers), in place of each joint's acceleration moved by every row's force. With a second sweep, the forces are handed out as now.
+
+### What it costs
+
+As built, the arm with a gripper with contact on: 18,800 equations of 227,000 terms (from 75,000 of 3.7 million), 8,900 states (from 55,000) and 7.5 MB (from 108); built in 0.4 s (from 11), checked by the engine in 3.3 s (from six minutes), and run for 2 s in about 7.5 s. The gripper lifting a box: 0.6 ms a step (from 0.9) and half a second to start (from 1.1). Menagerie's Panda as imported: 1.6 MB (from 4.5), run in half the time. Every run agrees with MuJoCo and the reference as it did, to the digits the tests print; the Panda's run with the solve before, to 10⁻¹⁶. Twice the possible contacts make a model about twice as large, not eight times. Later, as before: each tree solved on its own.
+
+Checked: a unit test works out the forces the equations give for random rows of every kind (loops, contacts with and without room, dry frictions, a limit, a coupling, damping rows; more loop rows than coordinates; many more rows than coordinates) and holds them to what a solve over the rows has: each loop row's equation, each searched row inside its bounds with nothing left over or at a bound pushing against it, each damping row's equation, and the joints' accelerations M⁻¹ Jᵀ f. An engine test pins an arm at both ends with a dry friction on its pin, so the pivot's five rows hold more than its one coordinate can move.
+
 ## Slices
 
 1. **The floor:** every primitive (sphere, capsule, box, cylinder) on the Ground's plane, with friction. A ball, a box sliding, a robot's foot on the floor.

@@ -229,6 +229,22 @@ test('an arm pinned to the Ground at both ends, a loop through the Ground, holds
     assert.ok(Math.abs(Math.abs(holding) - massOf(solidNamed(drawing, 'Arm')) * 9.81 / 2) < 1e-3, `The pivot should hold half the arm's weight, not ${holding} N.`);
 });
 
+// The same, with a dry friction on the pin: its rows are found in the joints' coordinates, where the pivot's five rows
+// hold more than the arm's one coordinate can move, so taking them out leaves nothing free.
+test('an arm pinned at both ends with a dry friction on its pin, its loop holding more than it can move, holds still as the reference holds it', async () => {
+    let drawing = exampleDrawing('pendulum');
+    const arm = solidNamed(drawing, 'Arm').id;
+    drawing = updateJoint(drawing, jointNamed(drawing, 'Pivot').id, { damping: 0 });
+    let frame = addFrameAt(drawing, 'ground', [0.2, 0.035, 0.18], [0, 1, 0]);
+    const onGround = frame.id;
+    frame = addFrameAt(frame.drawing, arm, [0.2, 0.035, 0.18], [0, -1, 0]);
+    drawing = addJoint(frame.drawing, onGround, frame.id, { kind: 'hinge', mate: false, name: 'Pin' }).drawing;
+    drawing = updateJoint(drawing, jointNamed(drawing, 'Pin').id, { friction: 0.01 });
+    const { run } = await matchesReference('pinnedFriction', drawing, { Pin: 'Arm' }, 1);
+    const values = run.series('Arm.z');
+    assert.ok(Math.max(...values) - Math.min(...values) < 1e-6, 'Held at both ends, the arm should not move.');
+});
+
 // Drawing helpers for the loops below, as a user's clicks make them.
 function placed(drawing, shape, { name, size, position, rotation }) {
     const added = addSolid(drawing, shape, { name, size, position });

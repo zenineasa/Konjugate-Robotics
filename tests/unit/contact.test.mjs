@@ -2,7 +2,8 @@
 
 // Contact in the drawing (lib/contact.mjs): which pairs touch, as MuJoCo would pick them and as the user says; the
 // checks; what goes with a solid; and the pairs written back as MJCF with MuJoCo's mixed parameters. Then what Build
-// writes for it: equations that stay small, and a solve whose rows with no room are not worked out.
+// writes for it: equations that stay small, and the rows' forces found in the joints' coordinates as a solve over the
+// rows themselves would have them.
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -14,7 +15,7 @@ import { exampleDrawing } from '../../packages/toolbox/lib/examples.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
 import { bodyLook, readModel } from '../../packages/toolbox/lib/mjcf.mjs';
 import { importModel } from '../../packages/toolbox/lib/mjcfImport.mjs';
-import { buildModel, symmetricSolver } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { buildModel, constraintPolishes, jointSpaceForces } from '../../packages/toolbox/lib/modelBuilder.mjs';
 import { roboticsRoot } from '../../scripts/konjugatePaths.mjs';
 
 const named = (drawing, name) => drawing.solids.find((solid) => solid.name === name).id;
@@ -102,44 +103,105 @@ function evaluator(definitions, values) {
             case 'Divide': return all[0] / all[1];
             case 'Greater': return Number(all[0] > all[1]);
             case 'Less': return Number(all[0] < all[1]);
+            case 'Sqrt': return Math.sqrt(all[0]);
+            case 'Max': return Math.max(all[0], all[1]);
+            case 'Min': return Math.min(all[0], all[1]);
             default: throw new Error(`No ${operator} here.`);
         }
     };
     return { value, operations: () => operations };
 }
 
-test('a solve given which rows are active works out only theirs, and finds what the whole solve finds', () => {
-    // Ten rows, three active (as a few contact points of many touch): the others are the identity's rows, holding their
-    // right-hand sides.
-    const active = [1, 0, 0, 1, 0, 0, 0, 1, 0, 0];
-    const n = active.length;
-    const block = [[4, 1, 0.5], [1, 3, 0.2], [0.5, 0.2, 2]];
-    const values = {};
-    const on = active.flatMap((flag, index) => (flag ? [index] : []));
-    for (let i = 0; i < n; i += 1) {
-        values[`a${i + 1}`] = active[i];
-        values[`b${i + 1}`] = (i + 1) * (i % 2 ? -0.7 : 0.3);
-        for (let j = 0; j <= i; j += 1) values[`d${i + 1}x${j + 1}`] = active[i] && active[j] ? block[on.indexOf(i)][on.indexOf(j)] : Number(i === j);
+// Plain numbers: a seeded pseudo-random source, products, and a solve by Gaussian elimination.
+const seeded = (seed) => () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 - 0.5; };
+const times = (A, B) => A.map((row) => B[0].map((_, j) => row.reduce((sum, value, k) => sum + value * B[k][j], 0)));
+const transpose = (A) => A[0].map((_, j) => A.map((row) => row[j]));
+function solved(A, b) {
+    const n = A.length;
+    const M = A.map((row, i) => [...row, b[i]]);
+    for (let c = 0; c < n; c += 1) {
+        const pivot = M.slice(c).reduce((best, row, k) => (Math.abs(row[c]) > Math.abs(M[best][c]) ? c + k : best), c);
+        [M[c], M[pivot]] = [M[pivot], M[c]];
+        for (let r = c + 1; r < n; r += 1) { const factor = M[r][c] / M[c][c]; for (let k = c; k <= n; k += 1) M[r][k] -= factor * M[c][k]; }
     }
-    const D = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => `d${Math.max(i, j) + 1}x${Math.min(i, j) + 1}`));
-    const b = Array.from({ length: n }, (_, i) => `b${i + 1}`);
-    const solve = (flags) => {
-        const definitions = [];
-        const define = (symbol, mathJson) => {
-            if (typeof mathJson === 'number' || typeof mathJson === 'string') return mathJson;
-            definitions.push({ symbol, mathJson });
-            return symbol;
-        };
-        const x = symmetricSolver(define, 's', D, flags)(b, 'x');
-        const { value, operations } = evaluator(definitions, values);
-        return { x: x.map(value), operations: operations() };
+    const x = Array(n).fill(0);
+    for (let r = n - 1; r >= 0; r -= 1) x[r] = (M[r][n] - M[r].slice(r + 1, n).reduce((sum, value, k) => sum + value * x[r + 1 + k], 0)) / M[r][r];
+    return x;
+}
+
+// Works out the forces jointSpaceForces writes, for rows of each kind on joints of `n` coordinates, and checks them as a
+// solve over the rows would have them, K = J M⁻¹ Jᵀ: the loops' rows (K_EE + ε) f_E = w_E - K_EC f_C; each searched row
+// inside its bounds with nothing left over, or at a bound pushing against it; the damping rows (h b K + I) f_D =
+// h b (w_D - K_DO f_O); and the joints' accelerations M⁻¹ Jᵀ f.
+function checkJointSpaceForces(n, types, seed) {
+    const random = seeded(seed);
+    const R = types.length;
+    const B = Array.from({ length: n }, () => Array.from({ length: n }, () => random()));
+    const M = times(B, transpose(B)).map((row, i) => row.map((value, j) => value + (i === j ? 0.5 : 0)));
+    const J = Array.from({ length: R }, () => Array.from({ length: n }, () => random() * 2));
+    const values = { compliance: 1e-9 };
+    const settings = types.map((type, r) => {
+        const compliance = type === 'damping' ? 0.05 + Math.abs(random()) * 0.1 : 0.02 + Math.abs(random()) * 0.05;
+        const bounds = { friction: [-0.3, 0.3], limit: [0, 1e30], contact: r % 3 ? [0, 1e30] : [0, 0], equality: [-1e30, 1e30] }[type] ?? [0, 0];
+        return { compliance, low: bounds[0], high: bounds[1], wanted: random() * 4 };
+    });
+    types.forEach((type, r) => {
+        values[`b${r}`] = settings[r].wanted;
+        values[`warm${r}`] = 0;
+        Object.assign(values, { [`kc${r}`]: settings[r].compliance, [`kn${r}`]: settings[r].low, [`kx${r}`]: settings[r].high });
+        for (let d = 0; d < n; d += 1) values[`J${r}x${d}`] = J[r][d];
+    });
+    for (let a = 0; a < n; a += 1) for (let b = 0; b < n; b += 1) values[`M${a}x${b}`] = M[a][b];
+    const definitions = [];
+    const define = (symbol, mathJson) => {
+        if (typeof mathJson === 'number' || typeof mathJson === 'string') return mathJson;
+        definitions.push({ symbol, mathJson });
+        return symbol;
     };
-    const whole = solve(null);
-    const some = solve(active.map((_, i) => `a${i + 1}`));
-    assert.deepEqual(some.x, whole.x);
-    active.forEach((flag, i) => { if (!flag) assert.equal(some.x[i], values[`b${i + 1}`]); });
-    on.forEach((i) => assert.ok(Math.abs(block[on.indexOf(i)].reduce((sum, entry, k) => sum + entry * some.x[on[k]], 0) - values[`b${i + 1}`]) < 1e-14));
-    assert.ok(some.operations < 0.5 * whole.operations, `${some.operations} terms worked out, against ${whole.operations}.`);
+    const written = jointSpaceForces(define, n, {
+        types, J: (r, d) => `J${r}x${d}`, M: (a, b) => `M${a}x${b}`, wanted: (r) => `b${r}`, setting: (prefix, r) => `${prefix}${r}`, warm: (r) => `warm${r}`
+    }, true);
+    const { value } = evaluator(definitions, values);
+    const f = written.forces.map(value);
+    const accelerations = written.accelerations.map(value);
+    const Minv = transpose(Array.from({ length: n }, (_, k) => solved(M, Array.from({ length: n }, (__, i) => Number(i === k)))));
+    const K = times(times(J, Minv), transpose(J));
+    const Kf = (r, rows) => rows.reduce((sum, c) => sum + K[r][c] * f[c], 0);
+    const all = types.map((_, r) => r);
+    const held = all.filter((r) => types[r] === 'loop');
+    const damped = all.filter((r) => types[r] === 'damping');
+    const others = all.filter((r) => types[r] !== 'damping');
+    const scale = Math.max(1, ...f.map(Math.abs));
+    for (const r of held) {
+        const left = Kf(r, held) + 1e-9 * f[r];
+        assert.ok(Math.abs(left - (settings[r].wanted - Kf(r, all.filter((c) => !held.includes(c) && types[c] !== 'damping')))) < 1e-9 * scale, `loop row ${r}`);
+    }
+    for (const r of all.filter((c) => !held.includes(c) && types[c] !== 'damping')) {
+        const { compliance, low, high, wanted } = settings[r];
+        const residual = wanted - Kf(r, others) - compliance * f[r];
+        assert.ok(f[r] >= low - 1e-12 && f[r] <= high + 1e-12, `row ${r} is inside its bounds`);
+        if (f[r] > low + 1e-9 && f[r] < high - 1e-9) assert.ok(Math.abs(residual) < 1e-9 * scale, `row ${r}, inside its bounds, has ${residual} left`);
+        else if (high > low && f[r] <= low + 1e-9) assert.ok(residual < 1e-9 * scale, `row ${r}, at its lower bound, pushes against it`);
+        else if (high > low) assert.ok(residual > -1e-9 * scale, `row ${r}, at its upper bound, pushes against it`);
+    }
+    for (const r of damped) {
+        const left = settings[r].compliance * Kf(r, damped) + f[r];
+        assert.ok(Math.abs(left - settings[r].compliance * (settings[r].wanted - Kf(r, others))) < 1e-9 * scale, `damping row ${r}`);
+    }
+    const expected = times(Minv, transpose([times([f], J)[0]])).map(([entry]) => entry);
+    // (Where the loops hold more than the joints can move, their forces are large and cancel: as large as they are.)
+    expected.forEach((entry, d) => assert.ok(Math.abs(entry - accelerations[d]) < 1e-14 * scale * Math.max(1, Math.abs(entry)), `joint coordinate ${d}: ${entry} against ${accelerations[d]}`));
+    return f;
+}
+
+test('the rows\' forces found in the joints\' coordinates are those a solve over the rows finds, loops and damping rows among them', () => {
+    assert.equal(constraintPolishes, 3);
+    // Six coordinates: two loop rows, contacts (a third with no room), dry frictions, a limit, a coupling and damping.
+    checkJointSpaceForces(6, ['loop', 'contact', 'contact', 'contact', 'friction', 'loop', 'limit', 'equality', 'contact', 'friction', 'damping', 'damping'], 11);
+    // More loop rows than coordinates (a link pinned at both ends): nothing is left free.
+    checkJointSpaceForces(3, ['loop', 'loop', 'loop', 'loop', 'loop', 'friction', 'limit'], 5);
+    // No loops, many more rows than coordinates.
+    checkJointSpaceForces(4, Array.from({ length: 24 }, (_, r) => (r % 5 === 0 ? 'friction' : 'contact')), 3);
 });
 
 test('a box on the floor and spheres against it are equations of a size that does not grow with the corners and faces counted', async () => {

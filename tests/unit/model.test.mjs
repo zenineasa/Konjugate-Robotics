@@ -55,11 +55,11 @@ test('the model: the Ground and a node per solid, a relationship per joint betwe
     assert.ok(!base.states.some(({ symbol }) => symbol === 'jointAngle'), 'a solid carried by a fixed joint has no joint states');
     assert.equal(turret.appearance.parts[0].prefix, '');
     // Each relationship writes only onto the two solids it joins: the child, and the parent (its share of the
-    // articulated inertia and bias force), never the Ground but what it gathers there of the joints' rows and the
-    // rows' forces the solver hands the other solids hanging from it.
+    // articulated inertia and bias force), never the Ground but what it gathers there of the rows (their J on the joints'
+    // coordinates and the mass matrix, or K) and the rows' forces the solver hands the other solids hanging from it.
     const owner = new Map(document.nodes.flatMap((node) => node.states.map((state) => [state.id, node.id])));
     const symbolOf = new Map(document.nodes.flatMap((node) => node.states.map((state) => [state.id, state.symbol])));
-    const gathered = /^(kr\d+c\d+|kb\d+|kc\d+|kn\d+|kx\d+|ks\d+|lam\d+)$/;
+    const gathered = /^(kr\d+c\d+|jq\d+d\d+|mq\d+d\d+|qr\d+|kb\d+|kc\d+|kn\d+|kx\d+|ks\d+|lam\d+)$/;
     for (const edge of document.edges) {
         for (const output of edge.equationModel.outputs) {
             const expected = output.role === 'target' ? edge.target.nodeId : edge.source.nodeId;
