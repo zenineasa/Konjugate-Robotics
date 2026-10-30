@@ -16,8 +16,8 @@
 // as MuJoCo turns it.
 //
 // A joint's torque follows the drawing: a constant torque, or a servo stiffness times (setpoint minus position)
-// clamped to its limit; minus damping times speed; a hinge's or a slider's spring, -stiffness (q - rest); a ball's friction times tanh(100 speed) on each axis. A ball's limit
-// is not modelled here, so drawings checked with it keep inside theirs.
+// clamped to its limit; minus damping times speed; a hinge's or a slider's spring, -stiffness (q - rest). Dry frictions
+// and limits are rows, a ball's too (jointRows).
 //
 // A joint that closes a loop holds what its kind holds, row by row along the first solid's frame axes (a ball its
 // point, a hinge its point and axis, a slider its axis's line and its turn, a fixed joint everything): each row's rate
@@ -289,7 +289,7 @@ function appliedForces(bodies, q, qd, inputs) {
         }
         if (body.kind === 'ball') {
             const drive = ballDrive(body.joint, q[i]);
-            return speeds.map((speed, axis) => drive[axis] - (body.joint.damping ?? 0) * speed - (body.joint.friction ?? 0) * Math.tanh(100 * speed));
+            return speeds.map((speed, axis) => drive[axis] - (body.joint.damping ?? 0) * speed);
         }
         return speeds.map(() => 0);
     });
@@ -483,10 +483,45 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
 
 // The joints' rows, in the model builder's order: a hinge's or a slider's dry friction (held to ±its friction) and its
 // limit (pushing only, while past either end), each with its compliance R, its reference acceleration and its bounds.
+// A ball's as MuJoCo's: a dry friction along each of its child's axes (its inverse inertia the mean of its three), and its limit one
+// row on its turn's angle, along the turn's axis.
 function jointRows(bodies, q, qd, invweight, timeStep, n) {
     const rows = [];
     const unit = (k, sign = 1) => Array.from({ length: n }, (_, c) => (c === k ? sign : 0));
     bodies.forEach((body, i) => {
+        if (body.kind === 'ball') {
+            const { joint } = body;
+            const soft = softnessOf(joint);
+            const k = body.firstSpeed;
+            const w = (invweight[k] + invweight[k + 1] + invweight[k + 2]) / 3;
+            if (joint.friction > 0) {
+                const { B } = rowReference(soft.friction, timeStep);
+                const imp = impedanceAt(soft.friction.solimp, 0);
+                // Along the child's axes, in the parent's frame, as MuJoCo's ball speeds are the child's.
+                const relative = multiply(unitQuaternion(q[i]), body.restRotation);
+                for (let axis = 0; axis < 3; axis += 1) {
+                    const along = rotate(relative, [0, 1, 2].map((c) => Number(c === axis)));
+                    const J = Array.from({ length: n }, (_, c) => (c >= k && c < k + 3 ? along[c - k] : 0));
+                    rows.push({ type: 'friction', J, compliance: ((1 - imp) * w) / imp, low: -joint.friction, high: joint.friction, reference: -B * J.reduce((sum, value, c) => sum + value * qd[c], 0) });
+                }
+            }
+            if (joint.limits) {
+                const { B, K } = rowReference(soft.limit, timeStep);
+                const [qw, ...vector] = q[i];
+                const size = Math.hypot(...vector);
+                const sign = qw < 0 ? -1 : 1;
+                const angle = 2 * Math.atan2(size, sign * qw);
+                const axis = size > 1e-15 ? vector.map((value) => (sign * value) / size) : [1, 0, 0];
+                const past = joint.limits.upper - angle - soft.margin;
+                const imp = impedanceAt(soft.limit.solimp, past);
+                const J = Array.from({ length: n }, (_, c) => (c >= k && c < k + 3 ? -axis[c - k] : 0));
+                rows.push({
+                    type: 'limit', J, compliance: ((1 - imp) * w) / imp, low: 0, high: past < 0 ? 1e30 : 0,
+                    reference: -B * J.reduce((sum, value, c) => sum + value * qd[c], 0) - K * imp * past
+                });
+            }
+            return;
+        }
         if (!['hinge', 'slider'].includes(body.kind)) return;
         const { joint } = body;
         const k = body.firstSpeed;
@@ -664,7 +699,7 @@ export function simulate(drawing, times, timeStep = 0.001, { sweeps, polishes } 
     const couplingList = couplingsOf(drawing);
     const tendonList = tendonsOf(drawing);
     const contactList = contactPairs(drawing).pairs;
-    const soft = bodies.some((body) => (body.kind === 'hinge' || body.kind === 'slider') && (body.joint.friction > 0 || body.joint.limits))
+    const soft = bodies.some((body) => (body.kind === 'hinge' || body.kind === 'slider' || body.kind === 'ball') && (body.joint.friction > 0 || body.joint.limits))
         || couplingList.length > 0 || tendonList.some((tendon) => tendon.friction > 0 || tendon.limits) || contactList.length > 0;
     let warm = new Map();
     const inverseMass = (() => {

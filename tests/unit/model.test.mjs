@@ -6,7 +6,7 @@ import { addFrameAt, addJoint, checkDrawing, structure, updateJoint } from '../.
 import { exampleDrawing, examples } from '../../packages/toolbox/lib/examples.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
 import { add, evaluate, multiply } from '../../packages/toolbox/lib/expressions.mjs';
-import { buildModel, camelKey, simulationLimits } from '../../packages/toolbox/lib/modelBuilder.mjs';
+import { buildModel, camelKey, inverseWeights, simulationLimits } from '../../packages/toolbox/lib/modelBuilder.mjs';
 import { shapeMesh, snapPoints, surfaceNormal, volume } from '../../packages/toolbox/lib/shapes.mjs';
 import importDrawing from '../../packages/toolbox/importers/drawing.mjs';
 
@@ -208,4 +208,19 @@ test('shapes: volumes, outward normals, snap points on the surface, and closed m
 test('structure is the same however often it is asked', () => {
     const drawing = exampleDrawing('cartPendulums');
     assert.deepEqual([...structure(drawing).parentJoint.keys()], [...structure(drawing).parentJoint.keys()]);
+});
+
+test('a ball\'s inverse inertia where drawn is MuJoCo\'s dof_invweight0, the mean of its three, and its dry friction and limit are rows', () => {
+    // MuJoCo 3.16's, printed from the ball pendulum written back as MJCF.
+    let drawing = exampleDrawing('ballPendulum');
+    const weights = inverseWeights(drawing);
+    for (const [name, value] of [['Shoulder', 50143.316829880758], ['Elbow', 58491.677597346825]]) {
+        const actual = weights.get(drawing.joints.find((joint) => joint.name === name).id);
+        assert.ok(Math.abs(actual - value) < 1e-9 * value, `${name}: ${actual} is not ${value}.`);
+    }
+    // Three dry friction rows on the elbow, and a limit row on the shoulder once it has a most turn.
+    const shoulder = drawing.joints.find((joint) => joint.name === 'Shoulder');
+    drawing = updateJoint(drawing, shoulder.id, { limits: { lower: 0, upper: 0.3 } });
+    const ground = buildModel(drawing, { runTime: 1 }).document.nodes.find(({ name }) => name === 'Ground');
+    assert.deepEqual(ground.states.map(({ symbol }) => symbol).filter((symbol) => /^kx\d+$/.test(symbol)), ['kx1', 'kx2', 'kx3', 'kx4']);
 });

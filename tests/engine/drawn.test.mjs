@@ -362,11 +362,13 @@ test('a ball joint is driven: a torque turns it, a servo turns it to its setpoin
     // Driven hard, the two links whirl, and rounding grows fast (they are chaotic): to within 1e-8 over half a second.
     const torqued = updateJoint(base, shoulder, { drive: { mode: 'torque', torque: [0.01, -0.02, 0.015] } });
     await matchesReference('ballTorque', torqued, { Shoulder: 'Upper link', Elbow: 'Lower link' }, 0.5, build(torqued, 0.5), 1e-8);
-    // The reference has no limits; the limit is checked by what it does.
+    // Its limit is a row on its turn's angle, as MuJoCo's: soft, as MuJoCo's default softness holds a light link, so it
+    // stops the swing well short of where it would go, past its most turn by as much as MuJoCo lets it.
     const limited = updateJoint(base, shoulder, { limits: { lower: 0, upper: 0.3 } });
-    const stopped = await runDocument(directory, 'ballLimit', build(limited, 2));
-    const angles = turnOf(stopped).map((vector) => Math.hypot(...vector));
-    assert.ok(Math.max(...angles) > 0.28 && Math.max(...angles) < 0.34, `The limit should stop the turn at 0.3 rad, not ${Math.max(...angles)}.`);
+    const { run: stopped } = await matchesReference('ballLimit', limited, { Shoulder: 'Upper link', Elbow: 'Lower link' }, 2);
+    const free = await runDocument(directory, 'ballFree', build(base, 2));
+    const most = (run) => Math.max(...turnOf(run).map((vector) => Math.hypot(...vector)));
+    assert.ok(most(stopped) > 0.3 && most(stopped) < 0.5 * most(free), `The limit should hold the turn back, to ${most(stopped)} rad against ${most(free)} without it.`);
 });
 
 // The two-link arm with its shoulder and elbow on motors, keyframed with its waist servo from rest to a pose.
@@ -605,13 +607,12 @@ test('MuJoCo on its own swings the same pendulum, holds the same arm and carries
 
 // The same, for what MuJoCo can hold as Konjugate does: ball joints, a body joined to nothing (MuJoCo's free joint) and
 // loops closed by a pin or a weld (its connect and weld equalities). Both turn a ball or a free joint by the exact
-// rotation of its step, so those agree to rounding (each solid's centre, every 10 ms). Where they still step
-// differently, a bound is stated: a ball's dry friction, a tanh here and a row of MuJoCo's own there (measured within
-// 0.28 mm for the ball pendulum as drawn); and a loop, which MuJoCo holds softly where Konjugate holds it by
-// Baumgarte's terms (0.16 mm for the four-bar, 0.04 mm for the weld), each about as far as either is from a run at a
-// twentieth of the step.
+// rotation of its step and hold a ball's dry friction (along its child's axes) and its limit (on its turn's angle) as
+// rows, so those agree to rounding (each solid's centre, every 10 ms). A loop is held differently, so a bound is
+// stated: MuJoCo holds it softly, where Konjugate holds it by Baumgarte's terms (0.16 mm for the four-bar, 0.04 mm for
+// the weld), each about as far as either is from a run at a twentieth of the step.
 const mujocoLoopBound = 1e-3;
-test('MuJoCo on its own moves ball joints and a body joined to nothing as Konjugate does, to rounding, and a ball\'s friction and closed loops to within a stated bound', { skip: withoutMujoco ?? false }, async () => {
+test('MuJoCo on its own moves ball joints (their friction and limits too) and a body joined to nothing as Konjugate does, to rounding, and closed loops to within a stated bound', { skip: withoutMujoco ?? false }, async () => {
     const welded = (() => {
         let drawing = createDrawing('Welded arms');
         let result = placed(drawing, 'box', { name: 'Post', size: { x: 0.04, y: 0.1, z: 0.3 }, position: [0, 0, 0.15] });
@@ -627,10 +628,12 @@ test('MuJoCo on its own moves ball joints and a body joined to nothing as Konjug
         drawing = joined(result.drawing, arms[0], result.id, [0.2, 0.04, 0.2], [0, 1, 0], 'fixed', 'Front weld').drawing;
         return joined(drawing, result.id, arms[1], [0.2, -0.04, 0.2], [0, 1, 0], 'fixed', 'Back weld').drawing;
     })();
-    let frictionless = exampleDrawing('ballPendulum');
-    for (const joint of frictionless.joints) frictionless = updateJoint(frictionless, joint.id, { friction: 0 });
-    const cases = [['ballPendulumFrictionless', frictionless, 1, 1e-9], ['floating', floatingDrawing(), 1, 1e-9],
-        ['ballPendulum', exampleDrawing('ballPendulum'), 1, mujocoLoopBound], ['fourBar', exampleDrawing('fourBar'), 2, mujocoLoopBound], ['welded', welded, 1.5, mujocoLoopBound]];
+    // The ball pendulum with a most turn on its shoulder and a dry friction on it too, so its limit row holds it.
+    let limited = exampleDrawing('ballPendulum');
+    const shoulder = limited.joints.find(({ name }) => name === 'Shoulder');
+    limited = updateJoint(limited, shoulder.id, { friction: 0.0005, limits: { lower: 0, upper: 0.25 } });
+    const cases = [['ballPendulum', exampleDrawing('ballPendulum'), 1, 1e-9], ['ballLimited', limited, 1, 1e-9], ['floating', floatingDrawing(), 1, 1e-9],
+        ['fourBar', exampleDrawing('fourBar'), 2, mujocoLoopBound], ['welded', welded, 1.5, mujocoLoopBound]];
     for (const [id, drawing, runTime, bound] of cases) {
         const run = await runDocument(directory, `mujoco-${id}`, build(drawing, runTime));
         // A torque drive is a force applied along its joint, held throughout.
