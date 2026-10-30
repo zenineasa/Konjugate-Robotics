@@ -126,6 +126,8 @@ const stateNames = {
     vc1: 'Centre velocity x', vc2: 'Centre velocity y', vc3: 'Centre velocity z',
     jointSpeed1: 'Joint angular velocity x', jointSpeed2: 'Joint angular velocity y', jointSpeed3: 'Joint angular velocity z',
     jointTurnW: 'Joint turn w', jointTurnX: 'Joint turn x', jointTurnY: 'Joint turn y', jointTurnZ: 'Joint turn z',
+    jointTurnWasW: 'Joint turn before the step w', jointTurnWasX: 'Joint turn before the step x', jointTurnWasY: 'Joint turn before the step y', jointTurnWasZ: 'Joint turn before the step z',
+    turnWasW: 'Turn before the step w', turnWasX: 'Turn before the step x', turnWasY: 'Turn before the step y', turnWasZ: 'Turn before the step z',
     turnW: 'Turn w', turnX: 'Turn x', turnY: 'Turn y', turnZ: 'Turn z',
     kineticEnergy: 'Kinetic energy', potentialEnergy: 'Potential energy',
     tendonForce: 'Tendons\' force on the joint', length: 'Length', speed: 'Speed', force: 'Force', limitSide: 'Limit side'
@@ -205,6 +207,9 @@ const dampedAccelerationSymbols = ['aq1', 'aq2', 'aq3', 'aq4', 'aq5', 'aq6'];
 const externalSymbols = ['xf1', 'xf2', 'xf3', 'xf4', 'xf5', 'xf6'];
 const accelerationChangeSymbols = ['da1', 'da2', 'da3', 'da4', 'da5', 'da6'];
 const turnSymbols = { ball: ['jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ'], free: ['turnW', 'turnX', 'turnY', 'turnZ'] };
+// The turn as it was before the step: kept, ahead of the turn in the node's order, so each of the turn's four is worked
+// out from the four as they were.
+const turnBeforeSymbols = { ball: ['jointTurnWasW', 'jointTurnWasX', 'jointTurnWasY', 'jointTurnWasZ'], free: ['turnWasW', 'turnWasX', 'turnWasY', 'turnWasZ'] };
 const degreesOfFreedom = { hinge: 1, slider: 1, ball: 3, free: 6, fixed: 0 };
 const centreVelocitySymbols = ['vc1', 'vc2', 'vc3'];
 
@@ -384,12 +389,24 @@ function quaternionMatrix(define, prefix, [w, x, y, z]) {
 }
 
 // q̇ = ½ [0, ω] ⊗ q, for a quaternion's four components in turn.
-function quaternionRates([w, x, y, z], [w1, w2, w3]) {
+// A ball's or a free joint's turn over one step, as MuJoCo turns it (mju_quatIntegrate): the turn the step before,
+// made a unit quaternion, then turned by the step's exact rotation, |ω| h about ω (ω in the frame the turn is in, so
+// that rotation goes first): [cos(|ω| h / 2), sin(|ω| h / 2) ω / |ω|] ⊗ q. Each of the four from the turn as it was
+// (`before`), the speeds as they now are, and the step h.
+function turnedOneStep(before, [w1, w2, w3], h) {
+    const size = E.sqrt(E.add(E.multiply(w1, w1), E.multiply(w2, w2), E.multiply(w3, w3)));
+    const half = E.multiply(0.5 * h, size);
+    const c = E.cos(half);
+    // sin(|ω| h / 2) / |ω|, h / 2 where |ω| is nothing.
+    const s = E.cases([[E.greater(size, 1e-15), E.divide(E.sin(half), size)]], 0.5 * h);
+    const length = E.sqrt(E.add(before.map((value) => E.multiply(value, value))));
+    const [w, x, y, z] = before.map((value) => E.divide(value, length));
+    const [a, b, d] = [w1, w2, w3].map((value) => E.multiply(s, value));
     return [
-        E.multiply(-0.5, E.add(E.multiply(w1, x), E.multiply(w2, y), E.multiply(w3, z))),
-        E.multiply(0.5, E.add(E.multiply(w1, w), E.multiply(w2, z), E.negate(E.multiply(w3, y)))),
-        E.multiply(0.5, E.add(E.multiply(w2, w), E.multiply(w3, x), E.negate(E.multiply(w1, z)))),
-        E.multiply(0.5, E.add(E.multiply(w3, w), E.multiply(w1, y), E.negate(E.multiply(w2, x))))
+        E.subtract(E.multiply(c, w), E.add(E.multiply(a, x), E.multiply(b, y), E.multiply(d, z))),
+        E.add(E.multiply(c, x), E.multiply(a, w), E.multiply(b, z), E.negate(E.multiply(d, y))),
+        E.add(E.multiply(c, y), E.multiply(b, w), E.multiply(d, x), E.negate(E.multiply(a, z))),
+        E.add(E.multiply(c, z), E.multiply(d, w), E.multiply(a, y), E.negate(E.multiply(b, x)))
     ];
 }
 
@@ -841,6 +858,14 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
             }
         });
     };
+    // A ball's or a free joint's turn, stepped by its exact rotation (turnedOneStep): first the turn as it was is kept
+    // (its rate the turn less it, over the step), then each of the four is set to its turned value the same way.
+    const perStep = round(1 / timeStep);
+    const stepTurn = (node, before, turn, speeds) => {
+        before.forEach((kept, index) => integrate(node, kept, E.multiply(perStep, E.subtract(turn[index].symbol, kept.symbol))));
+        turnedOneStep(before.map(({ symbol }) => symbol), speeds, timeStep)
+            .forEach((value, index) => integrate(node, turn[index], E.multiply(perStep, E.subtract(value, turn[index].symbol))));
+    };
     const rotationStates = (node, pose, { position = true } = {}) => {
         const matrix = rotationMatrix(pose.rotation);
         const [roll, pitch, yaw] = toRollPitchYaw(pose.rotation);
@@ -900,10 +925,11 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
         } else if (joint.kind === 'ball') {
             // Its angular velocity in its parent's frame, and its turn from where it is drawn, in its parent's frame.
             const speeds = [1, 2, 3].map((axis) => addState(node, `jointSpeed${axis}`, 0, 'rad/s'));
+            const before = turnBeforeSymbols.ball.map((symbol, index) => addState(node, symbol, index === 0 ? 1 : 0));
             const turn = turnSymbols.ball.map((symbol, index) => addState(node, symbol, index === 0 ? 1 : 0));
             const accelerations = [1, 2, 3].map((axis) => addState(node, `jointAcceleration${axis}`, 0, 'rad/s²'));
             speeds.forEach((speed, axis) => integrate(node, speed, accelerations[axis].symbol));
-            quaternionRates(turnSymbols.ball, speeds.map(({ symbol }) => symbol)).forEach((rate, index) => integrate(node, turn[index], rate));
+            stepTurn(node, before, turn, speeds.map(({ symbol }) => symbol));
             rotationStates(node, pose);
             velocityStates(node);
         } else if (joint.kind === 'free') {
@@ -914,11 +940,12 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
             ['w1', 'w2', 'w3'].forEach((symbol) => addState(node, symbol, 0, 'rad/s'));
             const centreVelocity = centreVelocitySymbols.map((symbol) => addState(node, symbol, 0, 'm/s'));
             ['x', 'y', 'z'].forEach((symbol, axis) => addState(node, symbol, pose.position[axis], 'm'));
+            const before = turnBeforeSymbols.free.map((symbol, index) => addState(node, symbol, pose.rotation[index]));
             const turn = turnSymbols.free.map((symbol, index) => addState(node, symbol, pose.rotation[index]));
             const accelerations = [1, 2, 3, 4, 5, 6].map((axis) => addState(node, `jointAcceleration${axis}`, 0, axis <= 3 ? 'rad/s²' : 'm/s²'));
             ['w1', 'w2', 'w3', ...centreVelocitySymbols].forEach((symbol, index) => integrate(node, node.bySymbol.get(symbol), accelerations[index].symbol));
             ['x', 'y', 'z'].forEach((symbol, axis) => integrate(node, node.bySymbol.get(symbol), centreVelocity[axis].symbol));
-            quaternionRates(turnSymbols.free, ['w1', 'w2', 'w3']).forEach((rate, index) => integrate(node, turn[index], rate));
+            stepTurn(node, before, turn, ['w1', 'w2', 'w3']);
             ['v1', 'v2', 'v3'].forEach((symbol) => addState(node, symbol, 0, 'm/s'));
             rotationStates(node, pose, { position: false });
         } else {

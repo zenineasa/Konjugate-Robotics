@@ -12,7 +12,8 @@
 // - a solid joined to nothing (a free joint on the Ground): its centre and its rotation as a quaternion, in the world,
 //   and its angular velocity and its centre's velocity, as MuJoCo's free joint has them.
 // Stepped as the engine steps each node, one state after another in the node's order: the speeds from the
-// accelerations, then the coordinates from the new speeds, each coordinate from the ones updated before it.
+// accelerations, then the coordinates from the new speeds; a ball's or a free joint's turn by the step's exact rotation,
+// as MuJoCo turns it.
 //
 // A joint's torque follows the drawing: a constant torque, or a servo stiffness times (setpoint minus position)
 // clamped to its limit; minus damping times speed; a hinge's or a slider's spring, -stiffness (q - rest); a ball's friction times tanh(100 speed) on each axis. A ball's limit
@@ -616,13 +617,14 @@ function contactRows(contacts, bodies, poses, qd, timeStep) {
 
 const dot3 = (a, b) => a.reduce((sum, value, index) => sum + value * b[index], 0);
 
-// q̇ = ½ [0, ω] ⊗ q, one component at a time from the ones updated before it, as the engine updates a node's states.
+// A turn over one step, as MuJoCo turns it: made a unit quaternion, then turned by the step's exact rotation, |ω| h
+// about ω (ω in the turn's own frame, so that rotation first).
 function stepQuaternion(q, omega, timeStep) {
-    const [w1, w2, w3] = omega;
-    q[0] += timeStep * -0.5 * (w1 * q[1] + w2 * q[2] + w3 * q[3]);
-    q[1] += timeStep * 0.5 * (w1 * q[0] + w2 * q[3] - w3 * q[2]);
-    q[2] += timeStep * 0.5 * (w2 * q[0] + w3 * q[1] - w1 * q[3]);
-    q[3] += timeStep * 0.5 * (w3 * q[0] + w1 * q[2] - w2 * q[1]);
+    const size = Math.hypot(...omega);
+    const angle = size * timeStep;
+    const turn = size > 1e-15 ? [Math.cos(angle / 2), ...omega.map((value) => (Math.sin(angle / 2) * value) / size)] : [1, 0, 0, 0];
+    const turned = multiply(turn, unitQuaternion(q));
+    turned.forEach((value, index) => { q[index] = value; });
 }
 
 // One step: the speeds from the accelerations, then each joint's coordinates from its new speeds.

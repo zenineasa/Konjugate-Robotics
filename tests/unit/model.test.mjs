@@ -127,14 +127,16 @@ test('ball joints, solids joined to nothing and loops closed by any joint, sever
     const ball = updateJoint(pendulum, pendulum.joints.find(({ name }) => name === 'Pivot').id, { kind: 'ball' });
     const ballModel = buildModel(ball).document;
     const armNode = ballModel.nodes.find(({ name }) => name === 'Arm');
-    assert.deepEqual(armNode.states.slice(0, 7).map(({ symbol }) => symbol), ['jointSpeed1', 'jointSpeed2', 'jointSpeed3', 'jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ']);
-    assert.deepEqual(armNode.sourceTerms.map(({ state }) => state), ['jointSpeed1', 'jointSpeed2', 'jointSpeed3', 'jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ']);
+    // The turn as it was is kept ahead of the turn, so each of the turn's four is stepped from the four as they were.
+    const was = ['jointTurnWasW', 'jointTurnWasX', 'jointTurnWasY', 'jointTurnWasZ'];
+    assert.deepEqual(armNode.states.slice(0, 11).map(({ symbol }) => symbol), ['jointSpeed1', 'jointSpeed2', 'jointSpeed3', ...was, 'jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ']);
+    assert.deepEqual(armNode.sourceTerms.map(({ state }) => state), ['jointSpeed1', 'jointSpeed2', 'jointSpeed3', ...was, 'jointTurnW', 'jointTurnX', 'jointTurnY', 'jointTurnZ']);
     // Joined to nothing: a free joint from the Ground, a relationship like any other.
     const floating = { ...pendulum, joints: [], frames: [] };
     const floatingModel = buildModel(floating).document;
     assert.deepEqual(floatingModel.edges.map(({ name }) => name), ['Post floating', 'Arm floating']);
     assert.deepEqual(floatingModel.nodes.find(({ name }) => name === 'Post').sourceTerms.map(({ state }) => state),
-        ['w1', 'w2', 'w3', 'vc1', 'vc2', 'vc3', 'x', 'y', 'z', 'turnW', 'turnX', 'turnY', 'turnZ']);
+        ['w1', 'w2', 'w3', 'vc1', 'vc2', 'vc3', 'x', 'y', 'z', 'turnWasW', 'turnWasX', 'turnWasY', 'turnWasZ', 'turnW', 'turnX', 'turnY', 'turnZ']);
     // Its far end pinned to the Ground as well: a loop, closed by a relationship of its own.
     let frame = addFrameAt(pendulum, 'ground', [0.2, 0.035, 0.18], [0, 1, 0]);
     const groundFrame = frame.id;

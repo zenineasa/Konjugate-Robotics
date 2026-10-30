@@ -604,13 +604,14 @@ test('MuJoCo on its own swings the same pendulum, holds the same arm and carries
 });
 
 // The same, for what MuJoCo can hold as Konjugate does: ball joints, a body joined to nothing (MuJoCo's free joint) and
-// loops closed by a pin or a weld (its connect and weld equalities). Here the two step a little differently: MuJoCo
-// turns a ball or a free joint by the exact rotation of its step, where Konjugate steps its quaternion one component
-// after another, and MuJoCo holds an equality softly, where Konjugate holds a loop by Baumgarte's terms. Each solid's
-// centre is compared every 10 ms: measured within 0.62 mm (the ball pendulum), 0.16 mm (the four-bar), 0.04 mm (the
-// weld) and 0.013 mm (the falling body), each about as far as either is from a run at a twentieth of the step.
+// loops closed by a pin or a weld (its connect and weld equalities). Both turn a ball or a free joint by the exact
+// rotation of its step, so those agree to rounding (each solid's centre, every 10 ms). Where they still step
+// differently, a bound is stated: a ball's dry friction, a tanh here and a row of MuJoCo's own there (measured within
+// 0.28 mm for the ball pendulum as drawn); and a loop, which MuJoCo holds softly where Konjugate holds it by
+// Baumgarte's terms (0.16 mm for the four-bar, 0.04 mm for the weld), each about as far as either is from a run at a
+// twentieth of the step.
 const mujocoLoopBound = 1e-3;
-test('MuJoCo on its own moves ball joints, a body joined to nothing and closed loops as Konjugate does, to within a stated bound', { skip: withoutMujoco ?? false }, async () => {
+test('MuJoCo on its own moves ball joints and a body joined to nothing as Konjugate does, to rounding, and a ball\'s friction and closed loops to within a stated bound', { skip: withoutMujoco ?? false }, async () => {
     const welded = (() => {
         let drawing = createDrawing('Welded arms');
         let result = placed(drawing, 'box', { name: 'Post', size: { x: 0.04, y: 0.1, z: 0.3 }, position: [0, 0, 0.15] });
@@ -626,8 +627,11 @@ test('MuJoCo on its own moves ball joints, a body joined to nothing and closed l
         drawing = joined(result.drawing, arms[0], result.id, [0.2, 0.04, 0.2], [0, 1, 0], 'fixed', 'Front weld').drawing;
         return joined(drawing, result.id, arms[1], [0.2, -0.04, 0.2], [0, 1, 0], 'fixed', 'Back weld').drawing;
     })();
-    const cases = [['ballPendulum', exampleDrawing('ballPendulum'), 1], ['floating', floatingDrawing(), 1], ['fourBar', exampleDrawing('fourBar'), 2], ['welded', welded, 1.5]];
-    for (const [id, drawing, runTime] of cases) {
+    let frictionless = exampleDrawing('ballPendulum');
+    for (const joint of frictionless.joints) frictionless = updateJoint(frictionless, joint.id, { friction: 0 });
+    const cases = [['ballPendulumFrictionless', frictionless, 1, 1e-9], ['floating', floatingDrawing(), 1, 1e-9],
+        ['ballPendulum', exampleDrawing('ballPendulum'), 1, mujocoLoopBound], ['fourBar', exampleDrawing('fourBar'), 2, mujocoLoopBound], ['welded', welded, 1.5, mujocoLoopBound]];
+    for (const [id, drawing, runTime, bound] of cases) {
         const run = await runDocument(directory, `mujoco-${id}`, build(drawing, runTime));
         // A torque drive is a force applied along its joint, held throughout.
         const loopIds = new Set(structure(drawing).loops.map(({ id: jointId }) => jointId));
@@ -641,8 +645,8 @@ test('MuJoCo on its own moves ball joints, a body joined to nothing and closed l
         for (const solid of drawing.solids) {
             for (const [axis, symbol] of ['x', 'y', 'z'].entries()) worst = Math.max(worst, largestDifference(run.series(`${solid.name}.${symbol}`), reference[solid.id].map((place) => place[axis])));
         }
-        console.log(`${id}: Konjugate's and MuJoCo's solids are within ${(worst * 1000).toFixed(3)} mm of each other.`);
-        assert.ok(worst < mujocoLoopBound, `${id}: a solid is ${worst} m from where MuJoCo alone has it.`);
+        console.log(`${id}: Konjugate's and MuJoCo's solids are within ${(worst * 1000).toFixed(3)} mm of each other (${worst.toExponential(2)} m).`);
+        assert.ok(worst < bound, `${id}: a solid is ${worst} m from where MuJoCo alone has it.`);
     }
 });
 

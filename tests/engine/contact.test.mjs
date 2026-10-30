@@ -90,7 +90,7 @@ for (const shape of ['capsule', 'sphere']) {
     });
 }
 
-test('a solid joined to nothing tumbles onto the floor as the reference has it', async () => {
+test('a solid joined to nothing tumbles onto the floor as the reference and MuJoCo have it, its turn stepped by its exact rotation', async () => {
     for (const shape of ['box', 'capsule']) {
         let drawing = createDrawing('Tumble');
         const added = addSolid(drawing, shape);
@@ -103,6 +103,11 @@ test('a solid joined to nothing tumbles onto the floor as the reference has it',
             assert.ok(difference < 1e-9, `${shape}'s ${symbol} differs from the reference by ${difference}.`);
         }
         assert.ok(run.series(`${solid.name}.z`).at(-1) < 0.1, 'It should come to rest on the floor.');
+        if (withoutMujoco) continue;
+        const mujoco = await runReference(directory, { mjcf: writeMjcf(drawing), joints: [], controls: {}, bodies: [solid.id], times: run.times });
+        const place = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${solid.name}.${symbol}`), mujoco[solid.id].map((at) => at[axis]))));
+        console.log(`tumble-${shape}: Konjugate and MuJoCo place it within ${place.toExponential(2)} m.`);
+        assert.ok(place < 1e-9, `${shape}: ${place} m from where MuJoCo has it.`);
     }
 });
 
