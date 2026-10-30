@@ -421,7 +421,7 @@ try {
     await page.click('#viewport', { position: { x: 10, y: 10 } });
     await page.keyboard.press('Escape');
     await page.check('#inspector input[name="contact.on"]');
-    assert.deepEqual((await drawing()).contact, { floor: true, automatic: true, pairs: [], exclude: [], floorSurface: {} });
+    assert.deepEqual((await drawing()).contact, { floor: true, automatic: true, pairs: [], exclude: [], floorSurface: {}, geomPairs: [] });
     assert.match(await page.textContent('#inspector'), /pairs? may touch/);
     const fingerSolids = ['Left finger', 'Right finger'].map(async (name) => (await drawing()).solids.find((solid) => solid.name === name).id);
     const [leftFinger, rightFinger] = await Promise.all(fingerSolids);

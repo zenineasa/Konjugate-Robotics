@@ -71,9 +71,7 @@ test('a model is read as MuJoCo reads it: included files, default classes, a fra
     assert.deepEqual(model.actuators.find(({ name }) => name === 'Extend servo').forceRange, [-20, 20], 'its own force range over the default class\'s');
     assert.equal(model.actuators.find(({ name }) => name === 'Waist servo').dampratio, 1);
     assert.deepEqual(model.actuators.map(({ kind }) => kind), ['position', 'position', 'motor', 'other', 'position']);
-    assert.deepEqual(model.leftOut, [
-        'a geom of the world (a floor, say): nothing touches anything yet', 'the joint constraint Lock, which starts inactive'
-    ]);
+    assert.deepEqual(model.leftOut, ['the joint constraint Lock, which starts inactive']);
 });
 
 test('the files a model reads are found from its MJCF: what it includes and the meshes they name, in its meshdir', async () => {
@@ -148,7 +146,7 @@ test('an import makes a drawing of the model: its solids at their centres of mas
     assert.deepEqual(report, {
         solids: 7, joints: 7, drives: 4,
         leftOut: [
-            'a geom of the world (a floor, say): nothing touches anything yet', 'the joint constraint Lock, which starts inactive',
+            'the joint constraint Lock, which starts inactive',
             'joint Shoulder\'s ref: its position here is counted from 0.174532925199 rad, where the model puts its body',
             'Extend brake, a damper actuator the drawing cannot take yet'
         ]

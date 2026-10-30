@@ -171,7 +171,12 @@ export async function modelPaths(fetchText, main) {
 //   its limit and dry friction) };
 // - inertia: { mass, centre, tensor } in the body's frame, from its <inertial> or (with none, or inertiafromgeom true)
 //   its geoms; `inertiaFrom` says which ('inertial', 'geoms', 'meshes' when a mesh is among them, or 'none');
-// - geoms: the visible ones (groups 0 to 2, not fully transparent), { type, size, frame, mesh, color }, for its look.
+// - geoms: the visible ones (groups 0 to 2, not fully transparent), { type, size, frame, mesh, color }, for its look;
+// - colliders: every geom as MuJoCo would collide it, { name, type, size (MuJoCo's), frame, contype, conaffinity,
+//   condim, priority, solmix, friction, solref, solimp, margin }, whether or not it can touch anything.
+// `collision`: the world's geoms (the floor, say) as colliders, the <contact> section's pairs ({ name, geom1, geom2,
+// condim, friction, solref, solimp, margin }) and exclusions ({ body1, body2 }), and whether MuJoCo's contact and its
+// filter of a body and its parent are on.
 // `leftOut` lists, in words, what the model has that an import leaves out or takes approximately.
 const optionalNumbers = (text) => (text === undefined ? undefined : numbers(text));
 const solimpOf = (text) => (text === undefined ? undefined : [0.9, 0.95, 0.001, 0.5, 2].map((value, index) => numbers(text)[index] ?? value));
@@ -240,7 +245,17 @@ export function readModel(files, main) {
     };
 
     const bodies = [];
-    const counts = { worldGeoms: 0, springs: [], gravcomp: [] };
+    const counts = { springs: [], gravcomp: [] };
+    const worldColliders = [];
+    // A geom as MuJoCo would collide it, with MuJoCo's defaults where neither it nor its class says.
+    const colliderOf = (child, get, type, size, frame) => ({
+        name: child.attributes.name ?? null, type, size, frame,
+        contype: Number(get('contype') ?? 1), conaffinity: Number(get('conaffinity') ?? 1), condim: Number(get('condim') ?? 3),
+        priority: Number(get('priority') ?? 0), solmix: Number(get('solmix') ?? 1),
+        friction: [1, 0.005, 0.0001].map((value, index) => numbers(get('friction') ?? '1 0.005 0.0001')[index] ?? value),
+        solref: [0.02, 1].map((value, index) => numbers(get('solref') ?? '0.02 1')[index] ?? value),
+        solimp: solimpOf(get('solimp')) ?? [0.9, 0.95, 0.001, 0.5, 2], margin: Number(get('margin') ?? 0)
+    });
     // A geom's frame and sizes, fromto read as MuJoCo reads it.
     const geomFrame = (type, get, outer) => {
         let size = numbers(get('size') ?? '0 0 0');
@@ -271,7 +286,7 @@ export function readModel(files, main) {
                 const local = compose(outer, frameOf(child.attributes, placement));
                 const body = {
                     name: child.attributes.name ?? `body ${bodies.length + 1}`, parent: bodyIndex, local, world: compose(world, local),
-                    joints: [], inertia: null, inertiaFrom: 'none', geoms: [], inertialGeoms: [], explicit: null,
+                    joints: [], inertia: null, inertiaFrom: 'none', geoms: [], inertialGeoms: [], colliders: [], explicit: null,
                     mocap: child.attributes.mocap === 'true'
                 };
                 if (child.attributes.gravcomp !== undefined && Number(child.attributes.gravcomp) !== 0) counts.gravcomp.push(body.name);
@@ -312,13 +327,14 @@ export function readModel(files, main) {
                 // The tensor is about the centre, along the inertial's own axes: turned into the body's frame.
                 entry.explicit = mass > 0 ? placed(mass, tensor.map((value) => value / mass), frame) : { mass: 0, centre: frame.position, tensor: [0, 0, 0, 0, 0, 0, 0, 0, 0] };
             } else if (child.name === 'geom') {
-                if (!entry) { counts.worldGeoms += 1; continue; }
                 const className = child.attributes.class ?? inside ?? 'main';
                 const get = (attribute) => resolve(child, 'geom', className, attribute);
                 const type = get('type') ?? (get('mesh') ? 'mesh' : 'sphere');
                 const group = Number(get('group') ?? 0);
-                if (type === 'plane' || type === 'hfield' || type === 'sdf') continue;
                 const { size, frame } = geomFrame(type, get, outer);
+                if (!entry) { worldColliders.push(colliderOf(child, get, type, size, frame)); continue; }
+                entry.colliders.push(colliderOf(child, get, type, size, frame));
+                if (type === 'plane' || type === 'hfield' || type === 'sdf') continue;
                 const rgba = get('rgba') !== undefined ? numbers(get('rgba')) : (materials.get(get('material')) ?? [0.5, 0.5, 0.5, 1]);
                 const geom = { type, size, frame, mesh: type === 'mesh' ? get('mesh') : null, color: hex(rgba) };
                 if (group <= 2 && rgba[3] !== 0) entry.geoms.push(geom);
@@ -432,7 +448,6 @@ export function readModel(files, main) {
     const children = (name) => root.children.filter((child) => child.name === name).flatMap((child) => child.children);
     const tendonElements = children('tendon');
     const equalities = children('equality');
-    if (counts.worldGeoms) leftOut.push(`${counts.worldGeoms === 1 ? 'a geom' : `${counts.worldGeoms} geoms`} of the world (a floor, say): nothing touches anything yet`);
     // Fixed tendons: a weighted sum of joints' positions (MuJoCo's qpos, not counted from the ref), with a spring, a
     // damping, a dry friction and a range, softened as a joint's are.
     const tendons = [];
@@ -479,11 +494,28 @@ export function readModel(files, main) {
         const inactive = (get('active') ?? 'true') !== 'true';
         leftOut.push(`${name ? `the ${equality.name} constraint ${name}` : `the ${equality.name} constraint on ${between.join(' and ') || 'the model'}`}${inactive ? ', which starts inactive' : ''}`);
     }
-    if (children('contact').length) leftOut.push('the contact pairs and exclusions: nothing touches anything yet');
+    // The <contact> section: pairs (with their own settings, MuJoCo's defaults or their class's where not given) and
+    // exclusions; and the option's flags.
+    const pairs = [];
+    const excludes = [];
+    for (const element of children('contact')) {
+        if (element.name === 'exclude') { excludes.push({ body1: element.attributes.body1, body2: element.attributes.body2 }); continue; }
+        if (element.name !== 'pair') continue;
+        const className = element.attributes.class ?? 'main';
+        const get = (attribute) => resolve(element, 'pair', className, attribute);
+        pairs.push({
+            name: element.attributes.name ?? null, geom1: element.attributes.geom1, geom2: element.attributes.geom2, condim: Number(get('condim') ?? 3),
+            friction: [1, 1, 0.005, 0.0001, 0.0001].map((value, index) => numbers(get('friction') ?? '1 1 0.005 0.0001 0.0001')[index] ?? value),
+            solref: [0.02, 1].map((value, index) => numbers(get('solref') ?? '0.02 1')[index] ?? value),
+            solimp: solimpOf(get('solimp')) ?? [0.9, 0.95, 0.001, 0.5, 2], margin: Number(get('margin') ?? 0)
+        });
+    }
+    const flags = root.children.filter((child) => child.name === 'option').flatMap((child) => child.children).filter((child) => child.name === 'flag').reduce((all, child) => ({ ...all, ...child.attributes }), {});
+    const collision = { world: worldColliders, pairs, excludes, contact: flags.contact !== 'disable', filterParent: flags.filterparent !== 'disable' };
     for (const name of counts.springs) leftOut.push(`joint ${name}'s spring (its stiffness): a ball's or a free joint's spring is not taken yet`);
     for (const name of counts.gravcomp) leftOut.push(`${name}'s gravity compensation`);
     if (gravity.some((value, axis) => Math.abs(value - [0, 0, -9.81][axis]) > 1e-9)) leftOut.push(`the model's gravity (${gravity.join(' ')}): a drawing has 9.81 m/s² downward`);
-    return { name: root.attributes.model ?? null, bodies, actuators, tendons, couplings, gravity, timestep, leftOut, meshTriangles };
+    return { name: root.attributes.model ?? null, bodies, actuators, tendons, couplings, collision, gravity, timestep, leftOut, meshTriangles };
 }
 
 // Each body's look: a mesh of its visible geoms in its own frame, merged, and the colour of the largest; null for a

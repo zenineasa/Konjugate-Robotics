@@ -195,7 +195,7 @@ function checkJointSpaceForces(n, types, seed) {
 }
 
 test('the rows\' forces found in the joints\' coordinates are those a solve over the rows finds, loops and damping rows among them', () => {
-    assert.equal(constraintPolishes, 3);
+    assert.equal(constraintPolishes, 6);
     // Six coordinates: two loop rows, contacts (a third with no room), dry frictions, a limit, a coupling and damping.
     checkJointSpaceForces(6, ['loop', 'contact', 'contact', 'contact', 'friction', 'loop', 'limit', 'equality', 'contact', 'friction', 'damping', 'damping'], 11);
     // More loop rows than coordinates (a link pinned at both ends): nothing is left free.
@@ -217,4 +217,32 @@ test('a box on the floor and spheres against it are equations of a size that doe
     for (const { name, equationModel } of contacts) {
         for (const { symbol, mathJson } of equationModel.definitions) assert.ok(size(mathJson) < 150, `${name}: ${symbol} is ${size(mathJson)} terms.`);
     }
+});
+
+test('an imported model touches as MuJoCo has it: its collision geoms, contype and conaffinity, priority, condim, a pair and an exclusion', async () => {
+    const xml = await readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', 'collision.xml'), 'utf8');
+    const model = readModel({ 'collision.xml': xml }, 'collision.xml');
+    const { drawing, report } = importModel(model, model.bodies.map((body) => bodyLook(model, body)), { name: 'Collision' });
+    assert.deepEqual(report.leftOut, []);
+    assert.equal(drawing.contact.parentRule, 'mujoco');
+    // Every pair of geoms that may touch, as MuJoCo 3.16 lists them with every geom's margin made 10 m, so that each
+    // pair it does not leave out is in contact (one name pair per line of its contacts, the floor's 4 and 2 as one).
+    const mujoco = ['ball base', 'ball brick', 'ball link1', 'ball link2', 'ball puck', 'ball tip', 'base brick', 'base link2', 'base tip', 'floor ball',
+        'floor brick', 'floor drum', 'floor ghost', 'floor link1', 'floor link2', 'floor pill', 'floor puck', 'floor tip', 'link1 brick', 'link2 brick',
+        'puck base', 'puck brick', 'puck link1', 'puck link2', 'puck tip', 'tip brick'];
+    const nameOf = (entry) => entry.collider.name;
+    const { pairs, unsupported } = contactPairs(drawing);
+    assert.deepEqual(unsupported, []);
+    const found = pairs.map(({ first, second }) => [nameOf(first), nameOf(second)].sort().join(' '));
+    assert.deepEqual([...found].sort(), mujoco.map((pair) => pair.split(' ').sort().join(' ')).sort());
+    // The settings as MuJoCo mixes them: the larger friction (the ball's 1 over the floor's 0.8); the brick's own, of its higher
+    // priority, against the floor; the puck's condim 1 over all; the ghost's pair's own.
+    const pairNamed = (a, b) => pairs.find(({ first, second }) => [nameOf(first), nameOf(second)].sort().join(' ') === [a, b].sort().join(' '));
+    assert.deepEqual(pairNamed('floor', 'ball').surface, { friction: 1, solref: [0.02, 1], solimp: [0.9, 0.95, 0.001, 0.5, 2], margin: 0, condim: 3 });
+    assert.deepEqual(pairNamed('floor', 'brick').surface, { friction: 0.4, solref: [0.03, 1], solimp: [0.9, 0.95, 0.001, 0.5, 2], margin: 0, condim: 3 });
+    assert.equal(pairNamed('puck', 'brick').surface.condim, 1);
+    assert.equal(pairNamed('puck', 'brick').rowsPerSlot, 1);
+    assert.deepEqual(pairNamed('floor', 'ghost').surface, { friction: 0.5, solref: [0.01, 1], solimp: [0.9, 0.95, 0.001, 0.5, 2], margin: 0, condim: 3 });
+    // Written back: every pair a <pair> of its own settings.
+    assert.match(writeMjcf(drawing), /<pair geom1="floor" geom2="[^"]+" condim="1"/);
 });

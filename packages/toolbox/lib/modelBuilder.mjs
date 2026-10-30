@@ -39,7 +39,7 @@
 import { batteryOf, checkDrawing, couplingsOf, defaultDrive, drivenJoints, frameById, frameInWorld, groundId, keyframesOf, massOf, poseOf, structure, tendonsOf, treeOrder } from './drawing.mjs';
 import * as E from './expressions.mjs';
 import { collide } from './collision.mjs';
-import { contactPairs, floorSurfaceOf, leastFriction, surfaceOf } from './contact.mjs';
+import { contactPairs } from './contact.mjs';
 import { conjugate, directionToLocal, multiply as multiplyQuaternions, normalize, rotate, scale, toLocal, toRollPitchYaw } from './math.mjs';
 import { shapeMesh } from './shapes.mjs';
 
@@ -178,9 +178,11 @@ const velocityProductSymbols = ['vp1', 'vp2', 'vp3', 'vp4', 'vp5', 'vp6'];
 // sweeps' forces where not. Measured on the robots of the tests, two sweeps already find the rows MuJoCo's own solve
 // holds, every step.
 export const constraintSweeps = 5;
-// How many times polishing is tried, each from the try before (three are enough for every step of the tests'
-// contacts, where two were not).
-export const constraintPolishes = 3;
+// How many times polishing is tried, each from the try before; a try after one that fits is not worked out (core
+// works out only the branch a choice takes), so a try more costs only the model's size. Three were enough for the
+// tests' contacts until an imported model's five solids dropped onto the floor and onto each other, where some steps
+// took four; six leave room.
+export const constraintPolishes = 6;
 // What a joint closing a loop holds, by kind: its point (three linear rows) or the turn about its axes (angular rows),
 // along the first solid's frame axes t1, t2 and n (n the joint's axis). A ball holds its point; a hinge its point and its
 // axis; a slider its axis's line and the turn; a fixed joint everything.
@@ -795,7 +797,7 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
         tendonRowsOf.set(tendon.id, own);
     }
     // Each contact point four rows, its pyramid's edges (MuJoCo's default cone, condim 3), each pushing only.
-    for (const pair of contactList) pair.rows = Array.from({ length: pair.slots }, () => [0, 1, 2, 3].map(() => newRow('contact')));
+    for (const pair of contactList) pair.rows = Array.from({ length: pair.slots }, () => Array.from({ length: pair.rowsPerSlot }, () => newRow('contact')));
     if (dampingRows) {
         for (const { id: solidId } of order) {
             const { joint } = parentOf.get(solidId);
@@ -1092,6 +1094,8 @@ export function buildModel(drawing, { timeStep = 0.001, runTime = 10, outputInte
         const { joint, parent: parentId } = parentOf.get(childId);
         const roles = {
             onPath: path.has(childId), affected: affected.has(childId), parentAffected: affected.has(parentId), gathers: gather.has(childId), R, timeStep,
+            // A solid joined to nothing that carries nothing: its gyroscopic torque taken at the step's end speed.
+            lone: joint.kind === 'free' && !order.some(({ id: other }) => parentOf.get(other).parent === childId),
             setpoint: setpoints.get(joint.id) ?? null, inverseWeight: weights.get(joint.id) ?? null,
             soft, secondSweep, dampingRows, rows: jointRows.get(childId) ?? [], rowTypes, solver: childId === solverRoot, tendonForce: tendonsOn.has(childId), contact: contactList.length > 0,
             space
@@ -1822,6 +1826,28 @@ function jointRelationship(drawing, joint, parentNode, childNode, parentId, chil
         total = solve2(remaining2.map((value, k) => E.subtract(value, E.dot(projected2[k], carried2))), 'qz');
         dampedAccelerationSymbols.forEach((symbol, index) => toChild(symbol, E.add(carried2[index], along(total)[index])));
     }
+    if (roles.lone) {
+        // A lone solid joined to nothing turns as MuJoCo's implicitfast steps it: its gyroscopic torque -ω × I ω taken at
+        // the step's end speed, so its angular acceleration is (I - h D)⁻¹ I α, D = -([ω]× I - [I ω]×) its derivative
+        // (I its inertia about its centre in the world, α the angular acceleration found at the step's start speed).
+        const w = speeds.slice(0, 3);
+        const Iw = rotational.map((row) => E.dot(row, w));
+        const skew = ([x, y, z]) => [[0, E.negate(z), y], [z, 0, E.negate(x)], [E.negate(y), x, 0]];
+        const product = (a, b) => [0, 1, 2].map((i) => [0, 1, 2].map((j) => E.add([0, 1, 2].map((k) => E.multiply(a[i][k], b[k][j])))));
+        const D = product(skew(w), rotational).map((row, i) => row.map((value, j) => E.subtract(skew(Iw)[i][j], value)));
+        const A = defineMatrix('gy', rotational.map((row, i) => row.map((value, j) => E.subtract(value, E.multiply(roles.timeStep, D[i][j])))));
+        const right = defineAll('gb', rotational.map((row) => E.dot(row, total.slice(0, 3))));
+        // A⁻¹ right, by its cofactors.
+        const cofactor = (i, j) => {
+            const rows = [0, 1, 2].filter((r) => r !== i);
+            const columns = [0, 1, 2].filter((c) => c !== j);
+            const minor = E.subtract(E.multiply(A[rows[0]][columns[0]], A[rows[1]][columns[1]]), E.multiply(A[rows[0]][columns[1]], A[rows[1]][columns[0]]));
+            return (i + j) % 2 ? E.negate(minor) : minor;
+        };
+        const determinant = define('gyd', E.add([0, 1, 2].map((j) => E.multiply(A[0][j], cofactor(0, j)))));
+        const turned = [0, 1, 2].map((i) => define(`gyx${i + 1}`, E.divide(E.add([0, 1, 2].map((k) => E.multiply(cofactor(k, i), right[k]))), determinant)));
+        total = [...turned, ...total.slice(3)];
+    }
     if (dof === 1) toChild('jointAcceleration', total[0]);
     else total.forEach((value, k) => toChild(`jointAcceleration${k + 1}`, value));
     passGathered();
@@ -1980,15 +2006,10 @@ function closingRelationship(drawing, loop, nodes, path, R, id, timeStep, mode =
 // it, onto both; and it sets on that solid each point's distance and the force pressing it.
 function contactRelationship(drawing, pair, nodes, bodies, R, id, timeStep, mode) {
     const { bindings, outputs, bind, define, defineAll, output, pruned } = equations();
-    const firstSurface = pair.first.solid === groundId ? floorSurfaceOf(drawing) : surfaceOf(drawing.solids.find(({ id: solidId }) => solidId === pair.first.solid));
-    const secondSurface = surfaceOf(drawing.solids.find(({ id: solidId }) => solidId === pair.second.solid));
-    // MuJoCo's mj_contactParam at equal priority: friction the larger, solref and solimp the mean (solmix 1 each),
-    // margins summed.
-    const mu = Math.max(leastFriction, firstSurface.friction, secondSurface.friction);
-    const bothStandard = firstSurface.solref[0] > 0 && secondSurface.solref[0] > 0;
-    const solref = [0, 1].map((k) => (bothStandard ? 0.5 * firstSurface.solref[k] + 0.5 * secondSurface.solref[k] : Math.min(firstSurface.solref[k], secondSurface.solref[k])));
-    const solimp = [0, 1, 2, 3, 4].map((k) => 0.5 * firstSurface.solimp[k] + 0.5 * secondSurface.solimp[k]);
-    const margin = firstSurface.margin + secondSurface.margin;
+    // Its settings as MuJoCo's mj_contactParam mixes them from the two colliders' surfaces (lib/contact.mjs), or the
+    // geom pair's own.
+    const { friction: mu, solref, solimp, margin } = pair.surface;
+    const frictionless = pair.rowsPerSlot === 1;
     const { B, K } = rowReference({ solref, solimp }, timeStep);
     const weight = (solidId) => (solidId === groundId ? 0 : bodies.get(solidId).translation);
     const parameters = [
@@ -2033,9 +2054,12 @@ function contactRelationship(drawing, pair, nodes, bodies, R, id, timeStep, mode
         const tangents = [slot.frame.slice(3, 6), slot.frame.slice(6, 9)];
         const past = define(`${tag}r`, E.subtract(slot.dist, 'margin'));
         const imp = define(`${tag}im`, impedanceAt(solimp, past));
-        // R as MuJoCo works it out for a pyramid: R₀ = (1 - imp) w (1 + μ²) / imp, then 2 μ² R₀.
-        const compliance = define(`${tag}R`, E.multiply(2, 'mu', 'mu', E.max(1e-15, E.divide(E.multiply(E.subtract(1, imp), 'inverseWeight', E.add(1, E.multiply('mu', 'mu'))), imp))));
-        const edges = tangents.flatMap((tangent) => [1, -1].map((side) => normal.map((value, axis) => E.add(value, E.multiply(side, 'mu', tangent[axis])))));
+        // R as MuJoCo works it out for a pyramid: R₀ = (1 - imp) w (1 + μ²) / imp, then 2 μ² R₀; with no friction
+        // (condim 1), one row along the normal, R = (1 - imp) w / imp.
+        const compliance = frictionless
+            ? define(`${tag}R`, E.max(1e-15, E.divide(E.multiply(E.subtract(1, imp), 'inverseWeight'), imp)))
+            : define(`${tag}R`, E.multiply(2, 'mu', 'mu', E.max(1e-15, E.divide(E.multiply(E.subtract(1, imp), 'inverseWeight', E.add(1, E.multiply('mu', 'mu'))), imp))));
+        const edges = frictionless ? [normal] : tangents.flatMap((tangent) => [1, -1].map((side) => normal.map((value, axis) => E.add(value, E.multiply(side, 'mu', tangent[axis])))));
         const rows = edges.map((direction, k) => {
             const G = defineAll(`${tag}g${k + 1}x`, [...E.cross(slot.pos, direction), ...direction]);
             return { G, index: pair.rows[s][k], rate: define(`${tag}v${k + 1}`, E.dot(G, dv)), accel: define(`${tag}a${k + 1}`, E.dot(G, da)) };

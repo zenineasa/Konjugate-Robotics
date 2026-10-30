@@ -18,6 +18,9 @@
 //   body's solid on the last.
 // - A body with no joint is welded to its parent (a fixed joint); a body on the world with a free joint is joined to
 //   nothing, and falls; a mocap body is fixed to the Ground.
+// - Contact as the model has it (importContact): each body's collision geoms that can touch its solid's colliders, in the
+//   solid's frame with their own surfaces; the world's plane through its origin facing up the floor; the <contact>
+//   section's pairs and exclusions; MuJoCo's rule for the rest (lib/contact.mjs). Meshes and other shapes are listed.
 // - A position actuator on a joint is its servo: stiffness kp gear², setpoint its control (0, held to its control
 //   range) over its gear, counted from the ref, most torque its force range times its gear, and its own damping its kv
 //   gear² (or, for a dampratio, as MuJoCo works it out from the inertia it moves). A motor actuator is a torque drive
@@ -283,7 +286,7 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
                     .map((which) => [which, { ...(joint.soft[which].solref ? { solref: joint.soft[which].solref.map(round) } : {}), ...(joint.soft[which].solimp ? { solimp: joint.soft[which].solimp.map(round) } : {}) }]),
                 ...(joint.soft.margin !== undefined && joint.soft.margin !== 0 ? [['margin', round(joint.soft.margin)]] : [])
             ]) : {};
-            if (Object.keys(softness).length && (kind === 'hinge' || kind === 'slider')) entry.softness = softness;
+            if (Object.keys(softness).length && (kind === 'hinge' || kind === 'slider' || kind === 'ball')) entry.softness = softness;
             if (joint?.range) {
                 entry.limits = kind === 'ball' ? { lower: 0, upper: round(joint.range[1]) } : { lower: round(joint.range[0] - joint.reference), upper: round(joint.range[1] - joint.reference) };
             }
@@ -341,6 +344,13 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
         tendonOf.set(tendon.name, { entry, parts });
     }
 
+    // Contact, as the model has it: each body's collision geoms its solid's colliders (in the solid's frame, each with
+    // its own surface), the world's plane through its origin facing up the floor, the <contact> section's pairs between
+    // geoms and exclusions between bodies; MuJoCo's rule (contype and conaffinity, a body and its parent, bodies welded
+    // together) decides the rest (lib/contact.mjs). Only where the model has something that can touch, and its contact
+    // is on.
+    importContact(model, drawing, solidOf, leftOut);
+
     // Actuators: each joint's or tendon's first that the drawing can take, as its drive.
     let drives = 0;
     const driven = new Set();
@@ -394,3 +404,80 @@ export function importModel(model, looks, { name = 'Robot' } = {}) {
     return { drawing, looks: solidLooks, report: { solids: drawing.solids.length, joints, drives, leftOut } };
 }
 
+
+// MuJoCo's geom sizes as a drawing's shape sizes, for the shapes that can touch.
+const shapeSize = {
+    sphere: ([radius]) => ({ radius: round(radius) }),
+    capsule: ([radius, half]) => ({ radius: round(radius), length: round(2 * half) }),
+    cylinder: ([radius, half]) => ({ radius: round(radius), length: round(2 * half) }),
+    box: ([x, y, z]) => ({ x: round(2 * x), y: round(2 * y), z: round(2 * z) })
+};
+// A geom's surface, as lib/contact.mjs keeps it: its sliding friction (the torsional and rolling ones are MuJoCo's
+// condim 4 and 6, which do not come in), its softness and margin, condim, priority, solmix and bits.
+const surfaceOfGeom = (geom) => ({
+    friction: round(geom.friction[0]), solref: geom.solref.map(round), solimp: geom.solimp.map(round), margin: round(geom.margin),
+    condim: geom.condim === 1 ? 1 : 3, priority: geom.priority, solmix: round(geom.solmix), contype: geom.contype, conaffinity: geom.conaffinity
+});
+
+function importContact(model, drawing, solidOf, leftOut) {
+    const collision = model.collision ?? { world: [], pairs: [], excludes: [], contact: true, filterParent: true };
+    const paired = new Set(collision.pairs.flatMap(({ geom1, geom2 }) => [geom1, geom2]));
+    const touches = (geom) => geom.contype !== 0 || geom.conaffinity !== 0 || (geom.name && paired.has(geom.name));
+    const geomPlaces = new Map();
+    const bodySolid = new Map();
+    const meshes = [];
+    const others = [];
+    const condims = new Set();
+    // Each body's geoms, onto the solid it is part of; a body with no solid (fixed to the world with no mass) is part of
+    // the world.
+    const worldGeoms = [...collision.world];
+    model.bodies.forEach((body, index) => {
+        const entry = solidOf.get(index);
+        if (!entry) { worldGeoms.push(...body.colliders.map((geom) => ({ ...geom, frame: compose(body.world, geom.frame) }))); return; }
+        bodySolid.set(body.name, entry.solidId);
+        const root = [...solidOf.values()].find((candidate) => candidate && candidate.solidId === entry.solidId && !candidate.merged);
+        const solid = drawing.solids.find(({ id }) => id === entry.solidId);
+        for (const geom of body.colliders.filter(touches)) {
+            if (!shapeSize[geom.type]) { (geom.type === 'mesh' ? meshes : others).push(`${body.name}${geom.name ? ` (${geom.name})` : ''}`); continue; }
+            if (geom.condim !== 1 && geom.condim !== 3) condims.add(geom.condim);
+            const inSolid = compose(root.bodyInSolid, compose(entry.inBody, geom.frame));
+            (solid.colliders ??= []).push({
+                shape: geom.type, size: shapeSize[geom.type](geom.size), position: roundVector(inSolid.position), rotation: roundVector(inSolid.quaternion),
+                surface: surfaceOfGeom(geom), ...(geom.name ? { name: geom.name } : {})
+            });
+            if (geom.name) geomPlaces.set(geom.name, { solid: solid.id, index: solid.colliders.length - 1 });
+        }
+    });
+    // The floor: a plane of the world's through its origin, facing up; any other geom of the world is left out.
+    let floor = null;
+    for (const geom of worldGeoms.filter(touches)) {
+        const up = rotate(geom.frame.quaternion, [0, 0, 1]);
+        if (geom.type === 'plane' && !floor && Math.hypot(...geom.frame.position) < 1e-12 && up[2] > 1 - 1e-12) {
+            floor = geom;
+            if (geom.name) geomPlaces.set(geom.name, { solid: groundId, index: 0 });
+            if (geom.condim !== 1 && geom.condim !== 3) condims.add(geom.condim);
+            continue;
+        }
+        others.push(`the world's ${geom.type}${geom.name ? ` ${geom.name}` : ''}${geom.type === 'plane' ? ', not through the origin facing up' : ''}`);
+    }
+    const anything = drawing.solids.some(({ colliders }) => colliders?.length) || floor;
+    if (meshes.length) leftOut.push(`the collision meshes of ${meshes.join(', ')}: a mesh does not touch anything yet`);
+    if (others.length) leftOut.push(`the collision shapes ${others.join(', ')}, which do not touch anything yet`);
+    if (condims.size) leftOut.push(`contact of condim ${[...condims].join(' and ')} (torsional or rolling friction): taken as condim 3, sliding friction alone`);
+    if (!anything) return;
+    if (!collision.contact) { leftOut.push('the model\'s contact, which it turns off: contact is off here too, and can be turned on'); return; }
+    if (!collision.filterParent) leftOut.push('the model\'s flag letting a body touch its parent: here a body never touches its parent');
+    const geomPairs = [];
+    for (const pair of collision.pairs) {
+        const [first, second] = [pair.geom1, pair.geom2].map((name) => geomPlaces.get(name));
+        if (!first || !second) { leftOut.push(`the contact pair ${pair.name ?? `of ${pair.geom1} and ${pair.geom2}`}, on a geom that did not come in`); continue; }
+        if (pair.friction[0] !== pair.friction[1]) leftOut.push(`the contact pair ${pair.name ?? `of ${pair.geom1} and ${pair.geom2}`}'s two sliding frictions: taken as the first`);
+        geomPairs.push({ first, second, surface: { friction: round(pair.friction[0]), solref: pair.solref.map(round), solimp: pair.solimp.map(round), margin: round(pair.margin), condim: pair.condim === 1 ? 1 : 3 } });
+    }
+    const exclude = [];
+    for (const { body1, body2 } of collision.excludes) {
+        const pair = [body1, body2].map((name) => bodySolid.get(name));
+        if (pair.every(Boolean) && pair[0] !== pair[1]) exclude.push(pair);
+    }
+    drawing.contact = { floor: Boolean(floor), automatic: true, pairs: [], exclude, floorSurface: floor ? surfaceOfGeom(floor) : {}, geomPairs, parentRule: 'mujoco' };
+}

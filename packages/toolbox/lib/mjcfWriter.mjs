@@ -28,7 +28,7 @@
 // Names: each body is named by its solid's id and each joint by its joint's id (`s3`, `j2`), so names in the drawing
 // can be anything; the model builder knows them by the same ids.
 
-import { collidersOf, contactPairs, floorSurfaceOf, leastFriction, surfaceOf } from './contact.mjs';
+import { collidersOf, contactPairs } from './contact.mjs';
 import { couplingsOf, structure, solidById, frameById, frameInWorld, groundId, massOf, poseOf, tendonsOf } from './drawing.mjs';
 import { directionToLocal, formatNumber, formatVector, normalize, relativePose, scale, toLocal } from './math.mjs';
 import { mjcfGeometry } from './shapes.mjs';
@@ -140,13 +140,9 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
     if (touching.length) {
         write(1, '<contact>');
         const geomName = (entry) => (entry.solid === groundId ? 'floor' : solidById(drawing, entry.solid).colliders && solidById(drawing, entry.solid).touches !== false ? `${entry.solid}c${entry.index + 1}` : entry.solid);
-        for (const { first, second } of touching) {
-            const [a, b] = [first, second].map((entry) => (entry.solid === groundId ? floorSurfaceOf(drawing) : surfaceOf(solidById(drawing, entry.solid))));
-            const mu = Math.max(leastFriction, a.friction, b.friction);
-            const standard = a.solref[0] > 0 && b.solref[0] > 0;
-            const solref = [0, 1].map((k) => (standard ? 0.5 * a.solref[k] + 0.5 * b.solref[k] : Math.min(a.solref[k], b.solref[k])));
-            const solimp = a.solimp.map((value, k) => 0.5 * value + 0.5 * b.solimp[k]);
-            write(2, `<pair geom1="${geomName(first)}" geom2="${geomName(second)}" condim="3" friction="${formatVector([mu, mu, 0.005, 0.0001, 0.0001])}" solref="${formatVector(solref)}" solimp="${formatVector(solimp)}" margin="${formatNumber(a.margin + b.margin)}"/>`);
+        for (const { first, second, surface } of touching) {
+            const { friction: mu, solref, solimp, margin, condim } = surface;
+            write(2, `<pair geom1="${geomName(first)}" geom2="${geomName(second)}" condim="${condim}" friction="${formatVector([mu, mu, 0.005, 0.0001, 0.0001])}" solref="${formatVector(solref)}" solimp="${formatVector(solimp)}" margin="${formatNumber(margin)}"/>`);
         }
         write(1, '</contact>');
     }

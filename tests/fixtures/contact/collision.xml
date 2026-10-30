@@ -1,0 +1,57 @@
+<!-- Copyright © 2026 Zenin Easa Panthakkalakath -->
+<!-- Contact as a model has it, for the import's tests (tests/unit/contact.test.mjs, tests/engine/contact.test.mjs):
+     a floor of its own friction and solmix; solids dropped onto it whose contype and conaffinity let some touch and not
+     others (the pill touches the floor but not the ball), one of higher priority (the brick, its own friction and
+     softness), one with no friction and the highest priority (the puck, condim 1), one that touches nothing by the
+     rule but the floor by an explicit pair (the ghost); and an arm on a base fixed to the world, its first link
+     touching the base (MuJoCo's rule: a body and its parent touch where one is welded to the world) but for an
+     exclusion, its tip welded to its second link, and a cylinder on it that touches only the floor. MuJoCo's solver
+     runs until it has converged: stopped at its usual tolerance, rounding on one machine but not another starts the
+     ghost sliding sideways (1.3e-8 m in a second on Apple silicon), where it falls straight down. -->
+<mujoco model="Collision">
+  <compiler angle="radian"/>
+  <option timestep="0.001" integrator="implicitfast" tolerance="1e-15" iterations="1000"/>
+  <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05" friction="0.8 0.005 0.0001" solmix="2" conaffinity="7"/>
+    <body name="Ball" pos="0 0 0.12">
+      <freejoint/>
+      <geom name="ball" type="sphere" size="0.05" mass="0.2"/>
+    </body>
+    <body name="Pill" pos="0.02 0.01 0.25" quat="0.96 0.1 0.2 0.15">
+      <freejoint/>
+      <geom name="pill" type="capsule" fromto="-0.06 0 0 0.06 0 0" size="0.03" mass="0.1" contype="2" conaffinity="2"/>
+    </body>
+    <body name="Brick" pos="-0.3 0 0.08" quat="0.95 0.2 0.1 0.2">
+      <freejoint/>
+      <geom name="brick" type="box" size="0.05 0.03 0.02" mass="0.3" priority="1" friction="0.4 0.005 0.0001" solref="0.03 1"/>
+    </body>
+    <body name="Puck" pos="-0.28 0.01 0.25">
+      <freejoint/>
+      <geom name="puck" type="sphere" size="0.04" mass="0.1" condim="1" priority="2"/>
+    </body>
+    <body name="Ghost" pos="0 -0.3 0.1">
+      <freejoint/>
+      <geom name="ghost" type="sphere" size="0.04" mass="0.1" contype="0" conaffinity="0"/>
+    </body>
+    <body name="Base" pos="0.5 0 0.05">
+      <inertial pos="0 0 0" mass="2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="base" type="sphere" size="0.05" mass="0"/>
+      <body name="Link1" pos="0 0 0.06">
+        <joint name="Shoulder" type="hinge" axis="0 1 0" damping="0.01"/>
+        <geom name="link1" type="capsule" fromto="0 0 0 0.15 0 0" size="0.02" mass="0.2"/>
+        <body name="Link2" pos="0.15 0 0">
+          <joint name="Elbow" type="hinge" axis="0 1 0" damping="0.01"/>
+          <geom name="link2" type="capsule" fromto="0 0 0 0.12 0 0" size="0.015" mass="0.1"/>
+          <geom name="drum" type="cylinder" pos="0.06 0 0" size="0.01 0.005" mass="0.01" contype="4" conaffinity="0"/>
+          <body name="Tip" pos="0.12 0 0">
+            <geom name="tip" type="sphere" size="0.025" mass="0.05"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+  <contact>
+    <pair name="Ghost on the floor" geom1="ghost" geom2="floor" friction="0.5 0.5 0.005 0.0001 0.0001" solref="0.01 1"/>
+    <exclude body1="Base" body2="Link1"/>
+  </contact>
+</mujoco>

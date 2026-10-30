@@ -128,3 +128,28 @@ test('a two-finger gripper lifts a box off the floor by friction alone, as the r
     assert.ok(Math.abs(seriesOf(run, drawing, joint('Left')).at(-1) - 0.0285) < 0.001, 'The finger should stop at the box.');
     assert.ok(run.series('Part.z').at(-1) > 0.07, 'The box should come off the floor.');
 });
+
+test('an imported model touches as MuJoCo running its own file has it: bits, priority, no friction, a pair and an exclusion', async () => {
+    const path = join(roboticsRoot, 'tests', 'fixtures', 'contact', 'collision.xml');
+    const drawing = await fixture('collision.xml');
+    assert.deepEqual(checkDrawing(drawing).errors, []);
+    const run = await runDocument(directory, 'collision', buildModel(drawing, { timeStep: 0.001, runTime: 1 }).document);
+    const reference = simulate(drawing, run.times);
+    const solids = ['Ball', 'Pill', 'Brick', 'Puck', 'Ghost', 'Link1', 'Link2', 'Tip'];
+    for (const name of solids) {
+        const solid = solidNamed(drawing, name);
+        const difference = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${name}.${symbol}`), reference[solid.id].map((place) => place[axis]))));
+        assert.ok(difference < 1e-9, `${name} differs from the reference by ${difference} m.`);
+    }
+    // The pill passes through the ball to the floor, the ghost rests on the floor by its pair alone, and the puck,
+    // dropped onto the brick, is knocked off it onto the floor.
+    assert.ok(run.series('Pill.z').at(-1) < 0.031 && Math.abs(run.series('Ghost.z').at(-1) - 0.04) < 0.001, 'The pill and the ghost should rest on the floor.');
+    assert.ok(Math.abs(run.series('Puck.x').at(-1) + 0.28) > 0.01, 'The brick should have moved the puck.');
+    if (withoutMujoco) return;
+    const mujoco = await runReference(directory, { mjcfPath: path, joints: [{ name: 'Shoulder' }, { name: 'Elbow' }], controls: {}, centres: solids, times: run.times });
+    for (const name of solids) {
+        const difference = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${name}.${symbol}`), mujoco[name].map((place) => place[axis]))));
+        console.log(`collision, ${name}: Konjugate and MuJoCo running the model's own file place it within ${difference.toExponential(2)} m.`);
+        assert.ok(difference < 1e-9, `${name} is ${difference} m from where MuJoCo has it.`);
+    }
+});

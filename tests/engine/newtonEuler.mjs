@@ -48,7 +48,7 @@ import { add, cross, dot, fromAxisAngle, multiply, normalize, rotate, scale, sub
 import { closure, closureFrame, closureRate, constraintPolishes, constraintSweeps, impedanceAt, rowReference, softnessOf } from '../../packages/toolbox/lib/modelBuilder.mjs';
 import { couplingsOf, tendonsOf } from '../../packages/toolbox/lib/drawing.mjs';
 import { collide, numbers } from '../../packages/toolbox/lib/collision.mjs';
-import { contactPairs, floorSurfaceOf, leastFriction, surfaceOf } from '../../packages/toolbox/lib/contact.mjs';
+import { contactPairs } from '../../packages/toolbox/lib/contact.mjs';
 
 export const gravity = 9.81;
 
@@ -637,13 +637,14 @@ function contactRows(contacts, bodies, poses, qd, timeStep) {
             const tangents = [slot.frame.slice(3, 6), slot.frame.slice(6, 9)];
             const past = slot.dist - contact.margin;
             const imp = impedanceAt(contact.solimp, past);
-            const compliance = 2 * contact.mu * contact.mu * Math.max(1e-15, ((1 - imp) * contact.w * (1 + contact.mu * contact.mu)) / imp);
-            for (const tangent of tangents) {
-                for (const side of [1, -1]) {
-                    const direction = add(normal, scale(tangent, side * contact.mu));
-                    const J = Array.from({ length: n }, (_, k) => dot(direction, subtract(pointVelocity(b.body, k, slot.pos), pointVelocity(a.body, k, slot.pos))));
-                    rows.push({ type: 'contact', J, compliance, low: 0, high: touching ? 1e30 : 0, reference: -B * dot3(J, qd) - K * imp * past });
-                }
+            // A pyramid's four edges, or with no friction (condim 1) the normal alone.
+            const compliance = contact.frictionless
+                ? Math.max(1e-15, ((1 - imp) * contact.w) / imp)
+                : 2 * contact.mu * contact.mu * Math.max(1e-15, ((1 - imp) * contact.w * (1 + contact.mu * contact.mu)) / imp);
+            const directions = contact.frictionless ? [normal] : tangents.flatMap((tangent) => [1, -1].map((side) => add(normal, scale(tangent, side * contact.mu))));
+            for (const direction of directions) {
+                const J = Array.from({ length: n }, (_, k) => dot(direction, subtract(pointVelocity(b.body, k, slot.pos), pointVelocity(a.body, k, slot.pos))));
+                rows.push({ type: 'contact', J, compliance, low: 0, high: touching ? 1e30 : 0, reference: -B * dot3(J, qd) - K * imp * past });
             }
         }
     }
@@ -662,8 +663,32 @@ function stepQuaternion(q, omega, timeStep) {
     turned.forEach((value, index) => { q[index] = value; });
 }
 
+// A lone solid joined to nothing (carrying nothing) turns as MuJoCo's implicitfast steps it: its gyroscopic torque
+// taken at the step's end speed, its angular acceleration (I - h D)⁻¹ I α, D = -([ω]× I - [I ω]×), I its inertia about
+// its centre in the world.
+function gyroscopic(bodies, q, qd, qdd, timeStep) {
+    const out = [...qdd];
+    bodies.forEach((body, i) => {
+        if (body.kind !== 'free' || bodies.some((other) => other.parent === i)) return;
+        const k = body.firstSpeed;
+        const w = qd.slice(k, k + 3);
+        const turn = unitQuaternion(q[i].slice(3));
+        const axes = [0, 1, 2].map((axis) => rotate(turn, [0, 1, 2].map((c) => Number(c === axis))));
+        const I = [0, 1, 2].map((r) => [0, 1, 2].map((c) => axes.reduce((sum, axis, a) => sum + body.mass * body.unit[a] * axis[r] * axis[c], 0)));
+        const Iw = I.map((row) => dot3(row, w));
+        const skew = ([x, y, z]) => [[0, -z, y], [z, 0, -x], [-y, x, 0]];
+        const product = (a, b) => a.map((row) => [0, 1, 2].map((j) => row.reduce((sum, value, m) => sum + value * b[m][j], 0)));
+        const D = product(skew(w), I).map((row, r) => row.map((value, c) => skew(Iw)[r][c] - value));
+        const A = I.map((row, r) => row.map((value, c) => value - timeStep * D[r][c]));
+        const turned = solve(A, I.map((row) => dot3(row, qdd.slice(k, k + 3))));
+        turned.forEach((value, axis) => { out[k + axis] = value; });
+    });
+    return out;
+}
+
 // One step: the speeds from the accelerations, then each joint's coordinates from its new speeds.
 function step(bodies, q, qd, qdd, timeStep) {
+    qdd = gyroscopic(bodies, q, qd, qdd, timeStep);
     const speeds = qd.map((value, k) => value + timeStep * qdd[k]);
     const coordinates = q.map((values, i) => {
         const body = bodies[i];
@@ -745,15 +770,11 @@ export function simulate(drawing, times, timeStep = 0.001, { sweeps, polishes } 
     };
     const groundPose = poseOf(drawing, 'ground');
     const indexOf = new Map(bodies.map(({ id }, index) => [id, index]));
-    const contacts = contactList.map(({ first, second }) => {
-        const [a, b] = [first, second].map((entry) => (entry.solid === 'ground' ? floorSurfaceOf(drawing) : surfaceOf(drawing.solids.find(({ id }) => id === entry.solid))));
-        const standard = a.solref[0] > 0 && b.solref[0] > 0;
+    const contacts = contactList.map(({ first, second, surface }) => {
         const end = (entry) => ({ body: entry.solid === 'ground' ? -1 : indexOf.get(entry.solid), collider: entry.collider, ground: groundPose });
         return {
             first: end(first), second: end(second),
-            mu: Math.max(leastFriction, a.friction, b.friction), margin: a.margin + b.margin,
-            solref: [0, 1].map((k) => (standard ? 0.5 * a.solref[k] + 0.5 * b.solref[k] : Math.min(a.solref[k], b.solref[k]))),
-            solimp: a.solimp.map((value, k) => 0.5 * value + 0.5 * b.solimp[k]),
+            mu: surface.friction, margin: surface.margin, solref: surface.solref, solimp: surface.solimp, frictionless: surface.condim === 1,
             w: translationWeight(end(first).body) + translationWeight(end(second).body)
         };
     });
