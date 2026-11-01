@@ -68,3 +68,20 @@ test('written as equations, each pair\'s functions give the numbers they give', 
         });
     }
 });
+
+test('two equal boxes stacked, the top one turned an eighth of a turn, touch at the eight corners of their overlap', () => {
+    const turned = [Math.SQRT1_2, -Math.SQRT1_2, 0, Math.SQRT1_2, Math.SQRT1_2, 0, 0, 0, 1];
+    const lower = { kind: 'box', size: [0.05, 0.05, 0.05], pos: [0, 0, 0], mat: [1, 0, 0, 0, 1, 0, 0, 0, 1] };
+    const upper = { kind: 'box', size: [0.05, 0.05, 0.05], pos: [0, 0, 0.099], mat: turned };
+    const found = collide(numbers, lower, upper, 0).filter(({ active }) => active);
+    assert.equal(found.length, 8, 'The overlap is an octagon, eight contacts, as MuJoCo has it.');
+    // MuJoCo puts them at the octagon's corners, (0.05, 0.05 (2^0.5 - 1)) and its turns, midway through the 1 mm overlap.
+    const near = 0.05 * (Math.SQRT2 - 1);
+    const expected = [[near, 0.05], [0.05, near], [0.05, -near], [near, -0.05], [-near, -0.05], [-0.05, -near], [-0.05, near], [-near, 0.05]];
+    for (const [x, y] of expected) {
+        const match = found.find(({ pos }) => Math.abs(pos[0] - x) < 1e-12 && Math.abs(pos[1] - y) < 1e-12);
+        assert.ok(match, `a contact at (${x}, ${y})`);
+        assert.ok(Math.abs(match.pos[2] - 0.0495) < 1e-12 && Math.abs(match.dist + 0.001) < 1e-12, 'midway through the overlap, 1 mm deep');
+        assert.deepEqual(match.frame.slice(0, 3).map((value) => Math.round(value * 1e12) / 1e12), [0, 0, 1]);
+    }
+});

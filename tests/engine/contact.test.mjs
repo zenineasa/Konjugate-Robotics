@@ -153,3 +153,34 @@ test('an imported model touches as MuJoCo running its own file has it: bits, pri
         assert.ok(difference < 1e-9, `${name} is ${difference} m from where MuJoCo has it.`);
     }
 });
+
+test('boxes on boxes and spheres on cylinders move as MuJoCo running its own file has them: a face on a face, a corner, a side, a rim', async () => {
+    const path = join(roboticsRoot, 'tests', 'fixtures', 'contact', 'shapes.xml');
+    const drawing = await fixture('shapes.xml');
+    assert.deepEqual(checkDrawing(drawing).errors, []);
+    // Each box against the table and the other box holds up to eight points; the cylinders against the boxes are not
+    // built yet, and never come near them here.
+    const { pairs, unsupported } = contactPairs(drawing);
+    assert.equal(pairs.find(({ name }) => name === 'Table and Brick').slots, 8);
+    assert.deepEqual(unsupported.map(({ kinds }) => kinds.join(' and ')), Array(4).fill('cylinder and box'));
+    const run = await runDocument(directory, 'shapes', buildModel(drawing, { timeStep: 0.001, runTime: 1 }).document);
+    const reference = simulate(drawing, run.times);
+    const solids = ['Brick', 'Cube', 'Ball', 'Pebble'];
+    for (const name of solids) {
+        const solid = solidNamed(drawing, name);
+        const difference = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${name}.${symbol}`), reference[solid.id].map((place) => place[axis]))));
+        assert.ok(difference < 1e-9, `${name} differs from the reference by ${difference} m.`);
+    }
+    // The brick and the cube come to rest on the table, the ball rolls off the log onto the floor, and the pebble,
+    // caught by the post's rim, rolls off it onto the floor.
+    assert.ok(Math.abs(run.series('Brick.z').at(-1) - 0.12) < 0.001 && Math.abs(run.series('Cube.z').at(-1) - 0.125) < 0.001, 'The brick and the cube should rest on the table.');
+    assert.ok(run.series('Ball.x').at(-1) > 0.5 && Math.abs(run.series('Ball.z').at(-1) - 0.03) < 0.001, 'The ball should roll off the log.');
+    assert.ok(run.series('Pebble.y').at(-1) > 0.1 && Math.abs(run.series('Pebble.z').at(-1) - 0.012) < 0.001, 'The pebble should roll off the post.');
+    if (withoutMujoco) return;
+    const mujoco = await runReference(directory, { mjcfPath: path, joints: [], controls: {}, centres: solids, times: run.times });
+    for (const name of solids) {
+        const difference = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${name}.${symbol}`), mujoco[name].map((place) => place[axis]))));
+        console.log(`shapes, ${name}: Konjugate and MuJoCo running the model's own file place it within ${difference.toExponential(2)} m.`);
+        assert.ok(difference < 1e-9, `${name} is ${difference} m from where MuJoCo has it.`);
+    }
+});

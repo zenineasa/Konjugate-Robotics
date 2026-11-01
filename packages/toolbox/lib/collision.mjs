@@ -2,7 +2,8 @@
 
 // Where two shapes touch, as MuJoCo 3.16 finds it (its engine_collision_primitive.c and engine_collision_box.c, and
 // mju_makeFrame), for each pair of shapes the toolbox collides: a plane (the floor) with a sphere, a capsule, a
-// cylinder or a box; a sphere with a sphere, a capsule or a box; a capsule with a capsule or a box. Each function gives a fixed
+// cylinder or a box; a sphere with a sphere, a capsule, a cylinder or a box; a capsule with a capsule or a box; a box
+// with a box. Each function gives a fixed
 // number of contact slots, as many as the pair can have at once, each { active, dist, pos, frame }: whether MuJoCo
 // would have that contact now (in the order its function makes them), how far apart the shapes are there (negative
 // when they overlap), the point (midway through the overlap) and the frame (the normal, from the first shape to the
@@ -50,7 +51,7 @@ export const numbers = Object.freeze({
 export const geomOrder = ['plane', 'sphere', 'capsule', 'cylinder', 'box'];
 export const contactSlots = Object.freeze({
     'plane|sphere': 1, 'plane|capsule': 2, 'plane|cylinder': 4, 'plane|box': 4,
-    'sphere|sphere': 1, 'sphere|capsule': 1, 'sphere|box': 1, 'capsule|capsule': 2, 'capsule|box': 2
+    'sphere|sphere': 1, 'sphere|capsule': 1, 'sphere|cylinder': 1, 'sphere|box': 1, 'capsule|capsule': 2, 'capsule|box': 2, 'box|box': 8
 });
 export const pairKey = (first, second) => `${first}|${second}`;
 export const collides = (first, second) => pairKey(...[first, second].sort((a, b) => geomOrder.indexOf(a) - geomOrder.indexOf(b))) in contactSlots;
@@ -61,8 +62,9 @@ export function collide(A, first, second, margin) {
     const key = pairKey(first.kind, second.kind);
     const found = {
         'plane|sphere': planeSphere, 'plane|capsule': planeCapsule, 'plane|cylinder': planeCylinder, 'plane|box': planeBox,
-        'sphere|sphere': sphereSphere, 'sphere|capsule': sphereCapsule, 'sphere|box': sphereBox, 'capsule|capsule': capsuleCapsule,
-        'capsule|box': capsuleBox
+        'sphere|sphere': sphereSphere, 'sphere|capsule': sphereCapsule, 'sphere|cylinder': sphereCylinder, 'sphere|box': sphereBox,
+        'capsule|capsule': capsuleCapsule,
+        'capsule|box': capsuleBox, 'box|box': boxBox
     }[key];
     if (!found) throw new Error(`MuJoCo's ${first.kind} and ${second.kind} collision is not built yet.`);
     return found(A, first, second, A.num(margin)).map((slot, index) => ({ ...slot, frame: makeFrame(A, slot.frame, `f${index + 1}`) }));
@@ -226,6 +228,49 @@ function sphereCapsule(A, sphere, capsule, margin) {
     const along = clip(A, v3.dot(A, axis, v3.sub(A, sphere.pos, capsule.pos)), A.neg(capsule.size[1]), capsule.size[1]);
     const nearest = v3.name(A, 'scq', v3.add(A, capsule.pos, v3.scale(A, axis, along)));
     return [sphereSphereAt(A, sphere.pos, sphere.size[0], sphere.mat, nearest, capsule.size[0], capsule.mat, margin, 'sc')];
+}
+
+// mjc_SphereCylinder: the sphere's centre beside the cylinder (within its height) against the axis's point level with
+// it, as two spheres; over a cap (within its radius) against the cap's plane, the normal turned to point from the
+// sphere; otherwise against the rim's nearest point, as a sphere of no size. A centre inside the cylinder goes out
+// through the side or the cap, whichever is nearer (the cap where they are equal).
+function sphereCylinder(A, sphere, cylinder, margin) {
+    const radius = cylinder.size[0];
+    const height = cylinder.size[1];
+    const axis = column(cylinder.mat, 2);
+    const offset = v3.sub(A, sphere.pos, cylinder.pos);
+    const along = A.name('syx', v3.dot(A, offset, axis));
+    const radial = v3.name(A, 'syr', v3.sub(A, offset, v3.scale(A, axis, along)));
+    const radialSquared = A.name('syq', v3.dot(A, radial, radial));
+    const radialLength = A.name('syl', A.sqrt(radialSquared));
+    const beside = A.lt(A.abs(along), height);
+    const over = A.lt(radialSquared, A.mul(radius, radius));
+    // Inside both: the side only where the cap is no nearer.
+    const capNearer = A.lt(A.sub(height, A.abs(along)), A.sub(radius, radialLength));
+    const side = A.name('sys', A.pick(A.and(beside, over), A.not(capNearer), beside));
+    const cap = A.name('syc', A.and(A.not(side), over));
+    const top = A.gt(along, 0);
+    const sign = A.pick(top, A.num(1), A.num(-1));
+    // Beside: two spheres, the second of the cylinder's radius at the axis's point level with the centre.
+    const level = v3.name(A, 'syv', v3.add(A, cylinder.pos, v3.scale(A, axis, along)));
+    const bySide = sphereSphereAt(A, sphere.pos, sphere.size[0], sphere.mat, level, radius, cylinder.mat, margin, 'syb');
+    // Over a cap: the cap's plane, facing out of the cylinder, the normal then turned to point from the sphere.
+    const capCentre = v3.name(A, 'syk', v3.add(A, cylinder.pos, v3.scale(A, axis, A.mul(sign, height))));
+    const outward = v3.scale(A, axis, sign);
+    const plane = { pos: capCentre, mat: [0, 0, outward[0], 0, 0, outward[1], 0, 0, outward[2]].map((value) => (typeof value === 'number' ? A.num(value) : value)) };
+    const byCap = planeSphereAt(A, plane, sphere.pos, sphere.size[0], margin, 'sya');
+    // Otherwise the rim's nearest point, a sphere of no size.
+    const safeLength = A.pick(A.gt(radialSquared, 0), radialLength, A.num(1));
+    const rim = v3.name(A, 'sye', v3.add(A, capCentre, v3.scale(A, radial, A.div(radius, safeLength))));
+    const byRim = sphereSphereAt(A, sphere.pos, sphere.size[0], sphere.mat, rim, A.num(0), cylinder.mat, margin, 'syo');
+    const choose = (bySideValue, byCapValue, byRimValue) => A.pick(side, bySideValue, A.pick(cap, byCapValue, byRimValue));
+    const capNormal = byCap.frame.slice(0, 3).map((value) => A.neg(value));
+    return [{
+        active: A.or(A.and(side, bySide.active), A.and(cap, byCap.active), A.and(A.not(side), A.not(cap), byRim.active)),
+        dist: A.name('syd', choose(bySide.dist, byCap.dist, byRim.dist)),
+        pos: v3.name(A, 'syp', [0, 1, 2].map((i) => choose(bySide.pos[i], byCap.pos[i], byRim.pos[i]))),
+        frame: [...v3.name(A, 'syn', [0, 1, 2].map((i) => choose(bySide.frame[i], capNormal[i], byRim.frame[i]))), ...noTangent(A)]
+    }];
 }
 
 // mjraw_CapsuleCapsule: the two segments' nearest points; when the axes are parallel, up to two pairs of points from
@@ -485,3 +530,190 @@ function capsuleBox(A, capsule, box, margin) {
     const [two] = sphereBox(A, sphereAt(A.add(secondPos, bestSegment), 'cb2'), box, margin, 'cb2');
     return [{ ...one, active: A.and(any, one.active) }, { ...two, active: A.and(any, A.gt(secondPos, -3), two.active) }];
 }
+
+// ---- box against box ---------------------------------------------------------------------------------------------
+// mjc_BoxBox: the axis along which the boxes overlap least, of their six face normals and the nine cross products of
+// an edge of each (those of edges nearly parallel left out), the first such in that order where two are equal. Along
+// a face: the other box's face turned most against it is clipped to it, and each corner of what remains (the other
+// box's corners within the face, the face's corners within the other box's, and where their edges cross) is a contact
+// while within the margin, each at its own depth, midway through it. Along two edges: one contact, midway between
+// their nearest points. None where any axis separates them by more than the margin. As MuJoCo has it to rounding
+// wherever they overlap by less than a millimetre; deeper, where an edge's axis lies within a few degrees of a face's
+// and they overlap about as much along each, MuJoCo sometimes takes the face where this takes the edge.
+function boxBox(A, first, second, margin) {
+    const A1 = [0, 1, 2].map((i) => column(first.mat, i));
+    const A2 = [0, 1, 2].map((j) => column(second.mat, j));
+    const s1 = first.size;
+    const s2 = second.size;
+    const between = v3.name(A, 'bbd', v3.sub(A, second.pos, first.pos));
+    const reach = (axis) => A.add(...[0, 1, 2].map((k) => A.mul(s1[k], A.abs(v3.dot(A, axis, A1[k])))), ...[0, 1, 2].map((k) => A.mul(s2[k], A.abs(v3.dot(A, axis, A2[k])))));
+    // Each axis, turned to point from the first box to the second, and how far they overlap along it.
+    const candidates = [];
+    [[A1, 'a'], [A2, 'b']].forEach(([axes, tag]) => axes.forEach((axis, k) => {
+        const along = A.name(`bb${tag}c${k + 1}`, v3.dot(A, between, axis));
+        const sign = A.pick(A.lt(along, 0), A.num(-1), A.num(1));
+        candidates.push({
+            kind: tag === 'a' ? 'first' : 'second', index: k, usable: A.always,
+            axis: v3.name(A, `bb${tag}n${k + 1}`, v3.scale(A, axis, sign)),
+            depth: A.name(`bb${tag}o${k + 1}`, A.sub(reach(axis), A.abs(along)))
+        });
+    }));
+    A1.forEach((a, i) => A2.forEach((b, j) => {
+        const tag = `bbe${i + 1}${j + 1}`;
+        const raw = v3.name(A, `${tag}x`, v3.cross(A, a, b));
+        const length = A.name(`${tag}l`, A.sqrt(v3.dot(A, raw, raw)));
+        const usable = A.name(`${tag}u`, A.ge(length, 1e-6));
+        const safe = A.pick(usable, length, A.num(1));
+        const unit = raw.map((value) => A.div(value, safe));
+        const along = A.name(`${tag}c`, v3.dot(A, between, unit));
+        const sign = A.pick(A.lt(along, 0), A.num(-1), A.num(1));
+        const axis = v3.name(A, `${tag}n`, v3.scale(A, unit, sign));
+        candidates.push({ kind: 'edge', i, j, usable, axis, depth: A.name(`${tag}o`, A.sub(reach(axis), A.abs(along))) });
+    }));
+    const apart = A.name('bbsep', A.or(...candidates.map(({ usable, depth }) => A.and(usable, A.lt(depth, A.neg(margin))))));
+    // The least overlap, the first of equals: each candidate's whether it is nearer than those before it, named once.
+    let least = A.num(1e30);
+    let chosen = candidates.map(() => A.never);
+    candidates.forEach(({ usable, depth }, c) => {
+        const nearer = A.name(`bbg${c + 1}`, A.and(usable, A.lt(depth, least)));
+        chosen = chosen.map((was, k) => (k === c ? nearer : A.and(was, A.not(nearer))));
+        least = A.name(`bbm${c + 1}`, A.pick(nearer, depth, least));
+    });
+    chosen = chosen.map((flag, c) => A.name(`bbk${c + 1}`, flag));
+    const pickOf = (values) => values.reduceRight((rest, value, c) => A.pick(chosen[c], value, rest), values[values.length - 1]);
+    const normal = v3.name(A, 'bbn', [0, 1, 2].map((axis) => pickOf(candidates.map((candidate) => candidate.axis[axis]))));
+    const alongEdge = A.name('bbae', A.or(...chosen.slice(6)));
+    const fromFirst = A.name('bbaf', A.or(...chosen.slice(0, 3)));
+    const which = (flags) => (values) => values.reduceRight((rest, value, k) => A.pick(flags[k], value, rest), values[values.length - 1]);
+
+    // Along a face: the reference box owns it (its outward normal `out`), the incident box is the other.
+    const faceIndex = [0, 1, 2].map((k) => A.name(`bbfi${k + 1}`, A.or(chosen[k], chosen[3 + k])));
+    const byFace = which(faceIndex);
+    const ref = {
+        pos: v3.pick(A, fromFirst, first.pos, second.pos), axes: [0, 1, 2].map((k) => v3.pick(A, fromFirst, A1[k], A2[k])),
+        size: [0, 1, 2].map((k) => A.pick(fromFirst, s1[k], s2[k]))
+    };
+    const inc = {
+        pos: v3.pick(A, fromFirst, second.pos, first.pos), axes: [0, 1, 2].map((k) => v3.pick(A, fromFirst, A2[k], A1[k])),
+        size: [0, 1, 2].map((k) => A.pick(fromFirst, s2[k], s1[k]))
+    };
+    const out = v3.name(A, 'bbo', v3.scale(A, normal, A.pick(fromFirst, A.num(1), A.num(-1))));
+    // The face's own axes (the other two, in order) and half sizes; its centre.
+    const others = [[1, 2], [0, 2], [0, 1]];
+    const U = v3.name(A, 'bbu', [0, 1, 2].map((axis) => byFace(others.map(([u]) => ref.axes[u][axis]))));
+    const V = v3.name(A, 'bbv', [0, 1, 2].map((axis) => byFace(others.map(([, v]) => ref.axes[v][axis]))));
+    const su = A.name('bbsu', byFace(others.map(([u]) => ref.size[u])));
+    const sv = A.name('bbsv', byFace(others.map(([, v]) => ref.size[v])));
+    const sk = byFace(ref.size);
+    const centre = v3.name(A, 'bbfc', v3.add(A, ref.pos, v3.scale(A, out, sk)));
+    // The incident face: the incident box's face turned most against `out`, the first of equals.
+    let most = A.num(1e30);
+    let incident = Array.from({ length: 6 }, () => A.never);
+    [0, 1, 2].forEach((j) => {
+        const facing = A.name(`bbic${j + 1}`, v3.dot(A, inc.axes[j], out));
+        [[facing, 2 * j], [A.neg(facing), 2 * j + 1]].forEach(([value, f]) => {
+            const nearer = A.name(`bbih${f + 1}`, A.lt(value, most));
+            incident = incident.map((was, k) => (k === f ? nearer : A.and(was, A.not(nearer))));
+            most = A.name(`bbim${f + 1}`, A.pick(nearer, value, most));
+        });
+    });
+    incident = incident.map((flag, f) => A.name(`bbif${f + 1}`, flag));
+    const byIncident = which(incident);
+    const incAxis = (k) => [0, 1, 2].map((axis) => inc.axes[k][axis]);
+    const fi = v3.name(A, 'bbia', [0, 1, 2].map((axis) => byIncident([0, 1, 2].flatMap((j) => [incAxis(j)[axis], A.neg(incAxis(j)[axis])]))));
+    const fs = A.name('bbis', byIncident([0, 1, 2].flatMap((j) => [inc.size[j], inc.size[j]])));
+    const ea = v3.name(A, 'bbie', [0, 1, 2].map((axis) => byIncident([0, 1, 2].flatMap((j) => [incAxis(others[j][0])[axis], incAxis(others[j][0])[axis]]))));
+    const eb = v3.name(A, 'bbig', [0, 1, 2].map((axis) => byIncident([0, 1, 2].flatMap((j) => [incAxis(others[j][1])[axis], incAxis(others[j][1])[axis]]))));
+    const sa = A.name('bbisa', byIncident([0, 1, 2].flatMap((j) => [inc.size[others[j][0]], inc.size[others[j][0]]])));
+    const sb = A.name('bbisb', byIncident([0, 1, 2].flatMap((j) => [inc.size[others[j][1]], inc.size[others[j][1]]])));
+    // In the face's coordinates (x along U, y along V, h along out from the face): the incident face's centre and its
+    // two half edges.
+    const local = (vector, tag) => [U, V, out].map((axis, k) => A.name(`${tag}${k + 1}`, v3.dot(A, vector, axis)));
+    const c2 = local(v3.sub(A, v3.add(A, inc.pos, v3.scale(A, fi, fs)), centre), 'bbq');
+    const e1 = local(v3.scale(A, ea, sa), 'bbr');
+    const e2 = local(v3.scale(A, eb, sb), 'bbt');
+    const cornerSigns = [[1, 1], [-1, 1], [-1, -1], [1, -1]];
+    const corners = cornerSigns.map(([a, b], q) => [0, 1, 2].map((k) => A.name(`bbw${q + 1}${k + 1}`, A.add(c2[k], A.mul(a, e1[k]), A.mul(b, e2[k])))));
+    const points = [];
+    // The incident face's corners within the face.
+    corners.forEach(([x, y, h]) => points.push({ x, y, h, valid: A.and(A.le(A.abs(x), su), A.le(A.abs(y), sv)) }));
+    // The face's corners strictly within the incident face (by the incident face's own coordinates), at its height there.
+    const det = A.name('bbdet', A.sub(A.mul(e1[0], e2[1]), A.mul(e1[1], e2[0])));
+    const flat = A.lt(A.abs(det), minimumValue);
+    const safeDet = A.pick(flat, A.num(1), det);
+    cornerSigns.forEach(([a, b], q) => {
+        const px = A.sub(A.mul(a, su), c2[0]);
+        const py = A.sub(A.mul(b, sv), c2[1]);
+        const alpha = A.name(`bbya${q + 1}`, A.div(A.sub(A.mul(px, e2[1]), A.mul(py, e2[0])), safeDet));
+        const beta = A.name(`bbyb${q + 1}`, A.div(A.sub(A.mul(e1[0], py), A.mul(e1[1], px)), safeDet));
+        points.push({
+            x: A.mul(a, su), y: A.mul(b, sv), h: A.add(c2[2], A.mul(alpha, e1[2]), A.mul(beta, e2[2])),
+            valid: A.and(A.not(flat), A.lt(A.abs(alpha), 1), A.lt(A.abs(beta), 1))
+        });
+    });
+    // Where each incident edge crosses each of the face's four edge lines, strictly, within the face's other extent.
+    corners.forEach((start, q) => {
+        const end = corners[(q + 1) % 4];
+        [[0, 1, su, sv], [0, -1, su, sv], [1, 1, sv, su], [1, -1, sv, su]].forEach(([k, sign, limit, otherLimit], l) => {
+            const fa = A.sub(A.mul(sign, start[k]), limit);
+            const fb = A.sub(A.mul(sign, end[k]), limit);
+            const crosses = A.or(A.and(A.lt(fa, 0), A.gt(fb, 0)), A.and(A.gt(fa, 0), A.lt(fb, 0)));
+            const t = A.name(`bbz${q + 1}${l + 1}`, A.div(fa, A.pick(crosses, A.sub(fa, fb), A.num(1))));
+            const at = [0, 1, 2].map((m) => A.add(start[m], A.mul(t, A.sub(end[m], start[m]))));
+            points.push({ x: at[0], y: at[1], h: at[2], valid: A.and(crosses, A.le(A.abs(at[1 - k]), otherLimit)) });
+        });
+    });
+    const facePoints = points.map(({ x, y, h, valid }, p) => {
+        const touches = A.name(`bbpv${p + 1}`, A.and(A.not(apart), A.not(alongEdge), valid, A.le(h, margin)));
+        const dist = A.name(`bbph${p + 1}`, h);
+        const pos = v3.name(A, `bbpp${p + 1}`, v3.add(A, centre, v3.add(A, v3.add(A, v3.scale(A, U, x), v3.scale(A, V, y)), v3.scale(A, out, A.mul(0.5, dist)))));
+        return { touches, dist, pos };
+    });
+
+    // Along two edges: the supporting edge of each (the edge farthest along the axis toward the other box), and the
+    // point midway between their nearest points, each kept within its edge.
+    const edges = candidates.slice(6);
+    const byEdge = (values) => values.reduceRight((rest, value, e) => A.pick(chosen[6 + e], value, rest), values[values.length - 1]);
+    const ia = edges.map(({ i }) => i);
+    const jb = edges.map(({ j }) => j);
+    const signOf = (value) => A.pick(A.lt(value, 0), A.num(-1), A.num(1));
+    const corner = (pos, axes, size, toward, tag) => {
+        const signs = axes.map((axis, k) => A.name(`${tag}s${k + 1}`, signOf(v3.dot(A, axis, toward))));
+        return { signs, point: v3.name(A, `${tag}c`, axes.reduce((sum, axis, k) => v3.add(A, sum, v3.scale(A, axis, A.mul(size[k], signs[k]))), pos)) };
+    };
+    const away = v3.scale(A, normal, -1);
+    const k1 = corner(first.pos, A1, s1, normal, 'bbx1');
+    const k2 = corner(second.pos, A2, s2, away, 'bbx2');
+    const u = v3.name(A, 'bbxu', [0, 1, 2].map((axis) => byEdge(ia.map((i) => A1[i][axis]))));
+    const v = v3.name(A, 'bbxv', [0, 1, 2].map((axis) => byEdge(jb.map((j) => A2[j][axis]))));
+    const su1 = A.name('bbxa', byEdge(ia.map((i) => s1[i])));
+    const sv2 = A.name('bbxb', byEdge(jb.map((j) => s2[j])));
+    const p1 = v3.name(A, 'bbxp', v3.sub(A, k1.point, v3.scale(A, u, A.mul(su1, byEdge(ia.map((i) => k1.signs[i]))))));
+    const p2 = v3.name(A, 'bbxq', v3.sub(A, k2.point, v3.scale(A, v, A.mul(sv2, byEdge(jb.map((j) => k2.signs[j]))))));
+    const w = v3.sub(A, p1, p2);
+    const uv = A.name('bbxuv', v3.dot(A, u, v));
+    const uw = A.name('bbxuw', v3.dot(A, u, w));
+    const vw = A.name('bbxvw', v3.dot(A, v, w));
+    const den = A.sub(1, A.mul(uv, uv));
+    const safeDen = A.pick(A.lt(den, minimumValue), A.num(1), den);
+    const ta = clip(A, A.div(A.sub(A.mul(uv, vw), uw), safeDen), A.neg(su1), su1);
+    const tb = clip(A, A.div(A.sub(vw, A.mul(uv, uw)), safeDen), A.neg(sv2), sv2);
+    const edgePos = v3.name(A, 'bbxm', v3.scale(A, v3.add(A, v3.add(A, p1, v3.scale(A, u, ta)), v3.add(A, p2, v3.scale(A, v, tb))), 0.5));
+    const edgePoint = { touches: A.name('bbxt', A.and(A.not(apart), alongEdge)), dist: A.name('bbxd', A.neg(least)), pos: edgePos };
+
+    // Slot k holds the (k+1)th contact: the edges' first, then the face's points in order.
+    const all = [edgePoint, ...facePoints];
+    const before = [A.num(0)];
+    all.forEach(({ touches }, p) => before.push(A.name(`bbcn${p + 1}`, A.add(before[p], A.pick(touches, 1, 0)))));
+    return Array.from({ length: 8 }, (_, k) => {
+        const takers = all.map(({ touches }, p) => A.name(`bbs${k + 1}t${p + 1}`, A.and(touches, A.gt(before[p], k - 0.5), A.lt(before[p], k + 0.5))));
+        const pickAll = (values) => values.reduceRight((rest, value, p) => A.pick(takers[p], value, rest), values[values.length - 1]);
+        return {
+            active: A.or(...takers),
+            dist: A.name(`bbs${k + 1}d`, pickAll(all.map(({ dist }) => dist))),
+            pos: [0, 1, 2].map((axis) => A.name(`bbs${k + 1}p${axis + 1}`, pickAll(all.map(({ pos }) => pos[axis])))),
+            frame: [...normal, ...noTangent(A)]
+        };
+    });
+}
+
