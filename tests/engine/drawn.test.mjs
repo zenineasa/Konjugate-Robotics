@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { exampleDrawing, examples } from '../../packages/toolbox/lib/examples.mjs';
+import { updateContact } from '../../packages/toolbox/lib/contact.mjs';
 import { addFrameAt, addJoint, addKeyframe, addSolid, createDrawing, massOf, reverseJoint, structure, updateBattery, updateJoint, updateSolid } from '../../packages/toolbox/lib/drawing.mjs';
 import { between, fromAxisAngle, scale } from '../../packages/toolbox/lib/math.mjs';
 import { writeMjcf } from '../../packages/toolbox/lib/mjcfWriter.mjs';
@@ -670,15 +671,18 @@ test('every equation a build writes reads back in the canvas as the same express
             Add: () => v.reduce((a, b) => a + b, 0), Multiply: () => v.reduce((a, b) => a * b, 1), Negate: () => -v[0], Subtract: () => v[0] - v[1],
             Divide: () => v[0] / v[1], Power: () => v[0] ** v[1], Sqrt: () => Math.sqrt(v[0]), Sin: () => Math.sin(v[0]), Cos: () => Math.cos(v[0]),
             Tanh: () => Math.tanh(v[0]), Arcsin: () => Math.asin(v[0]), Arctan2: () => Math.atan2(v[0], v[1]), Min: () => Math.min(...v), Max: () => Math.max(...v),
-            Less: () => Number(v[0] < v[1]), Greater: () => Number(v[0] > v[1]), LessEqual: () => Number(v[0] <= v[1]), GreaterEqual: () => Number(v[0] >= v[1])
+            Less: () => Number(v[0] < v[1]), Greater: () => Number(v[0] > v[1]), LessEqual: () => Number(v[0] <= v[1]), GreaterEqual: () => Number(v[0] >= v[1]),
+            And: () => Number(v.every((value) => value !== 0)), Or: () => Number(v.some((value) => value !== 0)), Not: () => Number(v[0] === 0)
         }[operator]();
     };
     let seed = 3;
     const random = () => ((seed = (seed * 16807) % 2147483647) / 2147483647) * 1.6 - 0.8;
-    // Every example, and a solid joined to nothing (its free joint's six axes solved through L D Lᵀ): every relationship's
-    // equations (several setting values, or one adding a rate) and every node's source terms (a motor's winding, the
-    // battery's voltage).
-    for (const [id, drawing] of [...examples.map(({ id: exampleId }) => [exampleId, exampleDrawing(exampleId)]), ['floating', floatingDrawing()]]) {
+    // Every example, a solid joined to nothing (its free joint's six axes solved through L D Lᵀ) and the two-link arm
+    // with contact on (a cylinder against boxes, boxes against boxes and against the floor, their conditions joined by
+    // And, Or and Not): every relationship's equations (several setting values, or one adding a rate) and every node's
+    // source terms (a motor's winding, the battery's voltage).
+    for (const [id, drawing] of [...examples.map(({ id: exampleId }) => [exampleId, exampleDrawing(exampleId)]), ['floating', floatingDrawing()],
+        ['two-link arm touching', updateContact(exampleDrawing('twoLinkArm'), {})]]) {
         const { document } = buildModel(drawing);
         const terms = document.nodes.flatMap((node) => node.sourceTerms.map(({ expressionModel }) => ({ name: `${node.name}'s source term`, equationModel: {
             bindings: expressionModel.bindings, definitions: [], outputs: [{ latex: expressionModel.latex, mathJson: expressionModel.mathJson }]

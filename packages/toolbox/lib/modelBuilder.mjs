@@ -2039,7 +2039,8 @@ function contactRelationship(drawing, pair, nodes, bodies, R, id, timeStep, mode
     });
     const [first, second] = ends;
     const algebra = expressionAlgebra(define);
-    const slots = collide(algebra, first.shape, second.shape, 0);
+    // Worked out only while the spheres about the two come within their margin and a centimetre to spare.
+    const slots = collide(algebra, first.shape, second.shape, 0, { reach: margin + 0.01 });
     const relative = (of) => [0, 1, 2, 3, 4, 5].map((k) => E.subtract(second[of][k], first[of][k]));
     const dv = defineAll('dv', relative('velocity'));
     const da = defineAll('da', relative('acceleration'));
@@ -2049,7 +2050,7 @@ function contactRelationship(drawing, pair, nodes, bodies, R, id, timeStep, mode
     slots.forEach((slot, s) => {
         const tag = `k${s + 1}`;
         // Touching: found by the function, and closer than the margin (MuJoCo leaves out a contact at its margin).
-        const touching = define(`${tag}on`, E.multiply(slot.active, E.cases([[E.less(slot.dist, 'margin'), 1]], 0)));
+        const touching = define(`${tag}on`, E.cases([[E.and(algebra.test(slot.active), E.less(slot.dist, 'margin')), 1]], 0));
         const normal = slot.frame.slice(0, 3);
         const tangents = [slot.frame.slice(3, 6), slot.frame.slice(6, 9)];
         const past = define(`${tag}r`, E.subtract(slot.dist, 'margin'));
@@ -2099,28 +2100,50 @@ function contactRelationship(drawing, pair, nodes, bodies, R, id, timeStep, mode
 
 // lib/collision.mjs's algebra as equations: a condition an expression of 1 or 0, each value named by `define`.
 export function expressionAlgebra(define) {
-    const indicator = (condition) => E.cases([[condition, 1]], 0);
+    // A condition: a comparison, or comparisons joined by And, Or and Not, written as such into the piecewise values it
+    // chooses between; a number, 1 or 0, only where it is named or counted (a named condition is that number, and
+    // tested as more than a half).
+    class Condition { constructor(test) { this.test = test; } }
     const isNumber = (value) => typeof value === 'number';
+    const test = (condition) => (condition instanceof Condition ? condition.test : E.greater(condition, 0.5));
+    const number = (value) => (value instanceof Condition ? E.cases([[value.test, 1]], 0) : value);
+    const numeric = (operation) => (...values) => operation(...values.map(number));
+    const compare = (operation, build) => (a, b) => (isNumber(a) && isNumber(b) ? Number(operation(a, b)) : new Condition(build(number(a), number(b))));
+    const join = (identity, absorbing, build) => (...conditions) => {
+        if (conditions.some((condition) => isNumber(condition) && (condition > 0.5) === absorbing)) return Number(absorbing);
+        const kept = conditions.filter((condition) => !isNumber(condition));
+        if (!kept.length) return Number(identity);
+        return kept.length === 1 ? kept[0] : new Condition(build(...kept.map(test)));
+    };
     return {
         num: (value) => value,
-        add: (...values) => E.add(...values),
-        sub: (a, b) => E.subtract(a, b),
-        mul: (...values) => E.multiply(...values),
-        div: (a, b) => E.divide(a, b),
-        neg: (a) => E.negate(a),
-        sqrt: (a) => E.sqrt(a),
-        abs: (a) => (isNumber(a) ? Math.abs(a) : E.max(a, E.negate(a))),
-        min: (a, b) => (isNumber(a) && isNumber(b) ? Math.min(a, b) : E.min(a, b)),
-        max: (a, b) => (isNumber(a) && isNumber(b) ? Math.max(a, b) : E.max(a, b)),
-        gt: (a, b) => (isNumber(a) && isNumber(b) ? Number(a > b) : indicator(E.greater(a, b))),
-        lt: (a, b) => (isNumber(a) && isNumber(b) ? Number(a < b) : indicator(E.less(a, b))),
-        ge: (a, b) => (isNumber(a) && isNumber(b) ? Number(a >= b) : E.subtract(1, indicator(E.less(a, b)))),
-        le: (a, b) => (isNumber(a) && isNumber(b) ? Number(a <= b) : E.subtract(1, indicator(E.greater(a, b)))),
-        and: (...conditions) => E.multiply(...conditions),
-        or: (...conditions) => E.subtract(1, E.multiply(...conditions.map((condition) => E.subtract(1, condition)))),
-        not: (condition) => E.subtract(1, condition),
-        pick: (condition, a, b) => (isNumber(condition) ? (condition > 0.5 ? a : b) : E.cases([[E.greater(condition, 0.5), a]], b)),
-        name: (tag, value) => define(`x${tag}`, value),
+        add: numeric((...values) => E.add(...values)),
+        sub: numeric((a, b) => E.subtract(a, b)),
+        mul: numeric((...values) => E.multiply(...values)),
+        div: numeric((a, b) => E.divide(a, b)),
+        neg: numeric((a) => E.negate(a)),
+        sqrt: numeric((a) => E.sqrt(a)),
+        abs: numeric((a) => (isNumber(a) ? Math.abs(a) : E.max(a, E.negate(a)))),
+        min: numeric((a, b) => (isNumber(a) && isNumber(b) ? Math.min(a, b) : E.min(a, b))),
+        max: numeric((a, b) => (isNumber(a) && isNumber(b) ? Math.max(a, b) : E.max(a, b))),
+        gt: compare((a, b) => a > b, E.greater),
+        lt: compare((a, b) => a < b, E.less),
+        ge: compare((a, b) => a >= b, E.greaterEqual),
+        le: compare((a, b) => a <= b, E.lessEqual),
+        and: join(true, false, E.and),
+        or: join(false, true, E.or),
+        not: (condition) => (isNumber(condition) ? Number(condition <= 0.5) : new Condition(E.not(test(condition)))),
+        pick: (condition, a, b) => {
+            if (isNumber(condition)) return condition > 0.5 ? a : b;
+            // Between two conditions, a condition; otherwise a piecewise value.
+            if (a instanceof Condition || b instanceof Condition) {
+                return new Condition(E.or(E.and(test(condition), test(a)), E.and(E.not(test(condition)), test(b))));
+            }
+            return E.cases([[test(condition), a]], b);
+        },
+        name: (tag, value) => define(`x${tag}`, number(value)),
+        // A condition as a piecewise value's condition, and as 1 or 0.
+        test, number,
         always: 1,
         never: 0
     };

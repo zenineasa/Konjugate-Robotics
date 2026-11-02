@@ -29,21 +29,21 @@ test('without contact turned on nothing touches, and a drawing builds as it did'
 
 test('the pairs that touch: MuJoCo\'s rule (not joined, not welded together, not a weld and its parent, not two that cannot move), named pairs and exclusions', () => {
     let arm = updateContact(exampleDrawing('twoLinkArm'), {});
-    // The base is fixed to the Ground, so it never touches the floor; the turret, the upper arm and the forearm do, and
-    // the turret and the forearm, two boxes, touch each other. A cylinder and a box would touch but cannot yet: said so.
-    assert.deepEqual(names(arm), ['Floor and Turret', 'Floor and Upper arm', 'Floor and Forearm', 'Turret and Forearm']);
-    assert.deepEqual(contactPairs(arm).unsupported.map(({ kinds }) => kinds.join(' and ')), ['cylinder and box', 'cylinder and box']);
-    assert.match(checkDrawing(arm).warnings.map(({ message }) => message).join(' '), /Base and Forearm: a cylinder against a box does not touch yet; they pass through each other/);
+    // The base is fixed to the Ground, so it never touches the floor; the turret, the upper arm and the forearm do, the
+    // base (a cylinder) touches the two links (boxes) beyond the one it turns, and the turret and the forearm, two
+    // boxes, touch each other. Every pair of shapes touches, so none is said not to.
+    assert.deepEqual(names(arm), ['Floor and Turret', 'Floor and Upper arm', 'Floor and Forearm', 'Base and Upper arm', 'Base and Forearm', 'Turret and Forearm']);
+    assert.deepEqual(contactPairs(arm).unsupported, []);
     // Excluded, then named back, then as the rule has it again.
     const forearm = named(arm, 'Forearm');
     arm = setTouching(arm, 'ground', forearm, false);
-    assert.deepEqual(names(arm), ['Floor and Turret', 'Floor and Upper arm', 'Turret and Forearm']);
+    assert.deepEqual(names(arm), ['Floor and Turret', 'Floor and Upper arm', 'Base and Upper arm', 'Base and Forearm', 'Turret and Forearm']);
     arm = updateContact(arm, { floor: false });
-    assert.deepEqual(names(arm), ['Turret and Forearm']);
+    assert.deepEqual(names(arm), ['Base and Upper arm', 'Base and Forearm', 'Turret and Forearm']);
     arm = setTouching(arm, 'ground', forearm, true);
-    assert.deepEqual(names(arm), ['Floor and Forearm', 'Turret and Forearm']);
+    assert.deepEqual(names(arm), ['Floor and Forearm', 'Base and Upper arm', 'Base and Forearm', 'Turret and Forearm']);
     arm = setTouching(updateContact(arm, { floor: true }), 'ground', forearm, null);
-    assert.equal(names(arm).length, 4);
+    assert.equal(names(arm).length, 6);
     // A solid that does not touch has no colliders; one of several colliders is numbered.
     const turret = named(arm, 'Turret');
     assert.deepEqual(collidersOf(updateSolid(arm, turret, { touches: false }).solids.find(({ id }) => id === turret)), []);

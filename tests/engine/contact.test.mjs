@@ -158,11 +158,11 @@ test('boxes on boxes and spheres on cylinders move as MuJoCo running its own fil
     const path = join(roboticsRoot, 'tests', 'fixtures', 'contact', 'shapes.xml');
     const drawing = await fixture('shapes.xml');
     assert.deepEqual(checkDrawing(drawing).errors, []);
-    // Each box against the table and the other box holds up to eight points; the cylinders against the boxes are not
-    // built yet, and never come near them here.
+    // Each box against the table and the other box holds up to eight points; the cylinders (the log and the post) touch
+    // the boxes too, as MuJoCo's rule has it, though they never come near them here.
     const { pairs, unsupported } = contactPairs(drawing);
     assert.equal(pairs.find(({ name }) => name === 'Table and Brick').slots, 8);
-    assert.deepEqual(unsupported.map(({ kinds }) => kinds.join(' and ')), Array(4).fill('cylinder and box'));
+    assert.deepEqual(unsupported, []);
     const run = await runDocument(directory, 'shapes', buildModel(drawing, { timeStep: 0.001, runTime: 1 }).document);
     const reference = simulate(drawing, run.times);
     const solids = ['Brick', 'Cube', 'Ball', 'Pebble'];
@@ -182,5 +182,34 @@ test('boxes on boxes and spheres on cylinders move as MuJoCo running its own fil
         const difference = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${name}.${symbol}`), mujoco[name].map((place) => place[axis]))));
         console.log(`shapes, ${name}: Konjugate and MuJoCo running the model's own file place it within ${difference.toExponential(2)} m.`);
         assert.ok(difference < 1e-9, `${name} is ${difference} m from where MuJoCo has it.`);
+    }
+});
+
+test('cylinders against capsules, cylinders and boxes move as the reference has them, and a rod across a log as MuJoCo has it', async () => {
+    const path = join(roboticsRoot, 'tests', 'fixtures', 'contact', 'cylinders.xml');
+    const drawing = await fixture('cylinders.xml');
+    assert.deepEqual(checkDrawing(drawing).errors, []);
+    const run = await runDocument(directory, 'cylinders', buildModel(drawing, { timeStep: 0.001, runTime: 1 }).document);
+    const reference = simulate(drawing, run.times);
+    const solids = ['Can', 'Lower', 'Upper', 'Lid', 'Rod'];
+    // Whether a contact lies flat is decided to a nanometre, which a can rocking as it settles brings within reach.
+    for (const name of solids) {
+        const solid = solidNamed(drawing, name);
+        const difference = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${name}.${symbol}`), reference[solid.id].map((place) => place[axis]))));
+        assert.ok(difference < 1e-8, `${name} differs from the reference by ${difference} m.`);
+    }
+    // The can stands on the table, the cans stack, the lid rests on the post, and the rod rolls off the log to the floor.
+    const end = (name, symbol) => run.series(`${name}.${symbol}`).at(-1);
+    assert.ok(Math.abs(end('Can', 'z') - 0.16) < 0.001 && Math.abs(end('Lower', 'z') - 0.16) < 0.001 && Math.abs(end('Upper', 'z') - 0.28) < 0.001, 'The cans should stand on the table, one on the other.');
+    assert.ok(Math.abs(end('Lid', 'z') - 0.12) < 0.001, 'The lid should rest on the post.');
+    assert.ok(Math.abs(end('Rod', 'z') - 0.012) < 0.001 && end('Rod', 'x') > -0.35, 'The rod should roll off the log onto the floor.');
+    if (withoutMujoco) return;
+    const mujoco = await runReference(directory, { mjcfPath: path, joints: [], controls: {}, centres: solids, times: run.times });
+    for (const name of solids) {
+        const difference = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${name}.${symbol}`), mujoco[name].map((place) => place[axis]))));
+        console.log(`cylinders, ${name}: Konjugate and MuJoCo running the model's own file place it within ${difference.toExponential(2)} m.`);
+        // The rod touches the log at one point at a time, where the two find the same contact; on a flat face MuJoCo
+        // places its contacts by rules of its own, a fraction of a millimetre from these.
+        assert.ok(difference < (name === 'Rod' ? 1e-8 : 1e-3), `${name} is ${difference} m from where MuJoCo has it.`);
     }
 });

@@ -228,6 +228,26 @@ export function inverseDynamics(bodies, q, qd, qdd, g = gravity, poses = place(b
     return result;
 }
 
+// The matrix's solution for each of `vectors` at once: the same eliminations as solve's, so the same numbers, the
+// matrix eliminated once for them all.
+function solveMany(matrix, vectors) {
+    const n = matrix.length;
+    const m = vectors.length;
+    if (!m) return [];
+    const a = matrix.map((row, i) => [...row, ...vectors.map((vector) => vector[i])]);
+    for (let column = 0; column < n; column += 1) {
+        let pivot = column;
+        for (let row = column + 1; row < n; row += 1) if (Math.abs(a[row][column]) > Math.abs(a[pivot][column])) pivot = row;
+        [a[column], a[pivot]] = [a[pivot], a[column]];
+        for (let row = 0; row < n; row += 1) {
+            if (row === column) continue;
+            const factor = a[row][column] / a[column][column];
+            for (let k = column; k < n + m; k += 1) a[row][k] -= factor * a[column][k];
+        }
+    }
+    return vectors.map((_, j) => a.map((row, i) => row[n + j] / row[i]));
+}
+
 function solve(matrix, vector) {
     const n = vector.length;
     const a = matrix.map((row, i) => [...row, vector[i]]);
@@ -398,7 +418,7 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
         if (!loops.length) return { qdd: free };
         const { J, wanted: wantedAt } = loopJ();
         const wanted = wantedAt(free);
-        const response = J.map((row) => solve(matrix, row));
+        const response = solveMany(matrix, J);
         const K = J.map((row, i) => response.map((column) => dot3(row, column) + (i === response.indexOf(column) ? closure.compliance : 0)));
         const force = solve(K, wanted);
         return { qdd: free.map((value, k) => value + response.reduce((sum, column, row) => sum + column[k] * force[row], 0)) };
@@ -423,7 +443,7 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
         if (row.type === 'loop') row.wanted = loopWanted[index];
         else row.wanted = row.reference - dot3(row.J, a0);
     });
-    const response = rows.map((row) => solve(M0, row.J));
+    const response = solveMany(M0, rows.map((row) => row.J));
     const K = rows.map((row) => response.map((column) => dot3(row.J, column)));
     const held = rows.filter(({ type }) => type === 'loop').map(({ index }) => index);
     const bounded = rows.filter(({ type }) => type === 'friction' || type === 'limit' || type === 'equality' || type === 'contact').map(({ index }) => index);
@@ -456,10 +476,14 @@ export function forwardDynamics(bodies, q, qd, loops = [], timeStep = 0.001, inp
         const next = new Map(bounded.map((r) => [r, start.get(r) + residualOf(r, start) / (A(r, r) + rows[r].compliance)]));
         const inside = new Map(bounded.map((r) => [r, next.get(r) > rows[r].low && next.get(r) < rows[r].high]));
         const held = new Map(bounded.map((r) => [r, Math.max(rows[r].low, Math.min(rows[r].high, next.get(r)))]));
-        const values = bounded.length ? solve(
-            bounded.map((i) => bounded.map((j) => (i === j ? (inside.get(i) ? A(i, i) + rows[i].compliance : 1) : inside.get(i) && inside.get(j) ? A(i, j) : 0))),
-            bounded.map((i) => (inside.get(i) ? b(i) - bounded.reduce((sum, j) => sum + (j !== i && !inside.get(j) ? A(i, j) * held.get(j) : 0), 0) : held.get(i)))
+        // Solved over the rows inside alone: a held row stands apart, at its bound.
+        const within = bounded.filter((r) => inside.get(r));
+        const solvedWithin = within.length ? solve(
+            within.map((i) => within.map((j) => (i === j ? A(i, i) + rows[i].compliance : A(i, j)))),
+            within.map((i) => b(i) - bounded.reduce((sum, j) => sum + (j !== i && !inside.get(j) ? A(i, j) * held.get(j) : 0), 0))
         ) : [];
+        const withinValue = new Map(within.map((r, k) => [r, solvedWithin[k]]));
+        const values = bounded.map((r) => (inside.get(r) ? withinValue.get(r) : held.get(r)));
         const solved = new Map(bounded.map((r, k) => [r, values[k]]));
         const fits = bounded.every((r, k) => {
             if (!(rows[r].high - rows[r].low > 1e-300)) return true;
@@ -629,7 +653,8 @@ function contactRows(contacts, bodies, poses, qd, timeStep) {
             return { kind: collider.kind, size: collider.size, pos: add(pose.position, rotate(pose.rotation, collider.position)), mat: matrix.flat() };
         };
         const [a, b] = [contact.first, contact.second];
-        const slots = collide(numbers, shape(a), shape(b), 0);
+        // As the model builder does: nothing worked out while the spheres about the two lie apart.
+        const slots = collide(numbers, shape(a), shape(b), 0, { reach: contact.margin + 0.01 });
         const { B, K } = rowReference({ solref: contact.solref, solimp: contact.solimp }, timeStep);
         for (const slot of slots) {
             const touching = slot.active && slot.dist < contact.margin;

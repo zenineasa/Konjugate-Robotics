@@ -1,0 +1,59 @@
+<!-- Copyright © 2026 Zenin Easa Panthakkalakath -->
+<!-- Cylinders against capsules, cylinders and boxes, for tests/engine/contact.test.mjs: a can standing on a table fixed
+     to the world (a cap on a box's face), a lid resting on a post (a box's face on a cap), a can stacked on another
+     standing on the table (a cap on a cap), and a rod dropped across a log lying on its side (a capsule against a
+     cylinder's side). MuJoCo finds these by its convex search, here run to a tolerance it reaches, and places several
+     contacts on a flat face by rules of its own; the rod touches the log at one point at a time, where the two agree.
+     MuJoCo's solver runs until it has converged, as in collision.xml. Each geom touches nothing by MuJoCo's rule
+     (contype and conaffinity 0), only the pairs named below: every pair that may touch is in Konjugate's graph whether
+     or not it ever does, so a scene where everything may touch everything is large. -->
+<mujoco model="Cylinders">
+  <compiler angle="radian"/>
+  <option timestep="0.001" integrator="implicitfast" tolerance="1e-15" iterations="1000" ccd_tolerance="1e-14" ccd_iterations="2000"/>
+  <default>
+    <geom contype="0" conaffinity="0"/>
+  </default>
+  <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05"/>
+    <body name="Table" pos="0 0 0.05">
+      <inertial pos="0 0 0" mass="5" diaginertia="0.05 0.05 0.05"/>
+      <geom name="table" type="box" size="0.2 0.15 0.05" mass="0"/>
+    </body>
+    <body name="Can" pos="-0.1 0.05 0.161" quat="0.9998 0.015 0.01 0">
+      <freejoint/>
+      <geom name="can" type="cylinder" size="0.03 0.06" mass="0.2"/>
+    </body>
+    <body name="Lower" pos="0.1 -0.05 0.1595">
+      <freejoint/>
+      <geom name="lower" type="cylinder" size="0.035 0.06" mass="0.2"/>
+    </body>
+    <body name="Upper" pos="0.103 -0.05 0.2805" quat="0.99995 0.01 0 0">
+      <freejoint/>
+      <geom name="upper" type="cylinder" size="0.03 0.06" mass="0.1"/>
+    </body>
+    <body name="Post" pos="0.4 0 0.05">
+      <inertial pos="0 0 0" mass="2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="post" type="cylinder" size="0.025 0.05" mass="0"/>
+    </body>
+    <body name="Lid" pos="0.405 0.01 0.1195" quat="0.9997 0.01 0.02 0.01">
+      <freejoint/>
+      <geom name="lid" type="box" size="0.06 0.05 0.02" mass="0.1"/>
+    </body>
+    <body name="Log" pos="-0.4 0 0.04" quat="0.70710678 0.70710678 0 0">
+      <inertial pos="0 0 0" mass="2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="log" type="cylinder" size="0.04 0.12" mass="0"/>
+    </body>
+    <body name="Rod" pos="-0.39 0.01 0.13" quat="0.68 0.2 0.68 0.15">
+      <freejoint/>
+      <geom name="rod" type="capsule" size="0.012 0.05" mass="0.05"/>
+    </body>
+  </worldbody>
+  <contact>
+    <pair geom1="can" geom2="table"/>
+    <pair geom1="lower" geom2="table"/>
+    <pair geom1="upper" geom2="lower"/>
+    <pair geom1="post" geom2="lid"/>
+    <pair geom1="rod" geom2="log"/>
+    <pair geom1="floor" geom2="rod"/>
+  </contact>
+</mujoco>

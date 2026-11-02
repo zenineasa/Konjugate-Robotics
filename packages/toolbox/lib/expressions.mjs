@@ -69,6 +69,12 @@ export const max = (a, b) => ['Max', a, b];
 export const cases = (pairs, otherwise) => ['Which', ...pairs.flat(), 'True', otherwise];
 export const greater = (a, b) => ['Greater', a, b];
 export const less = (a, b) => ['Less', a, b];
+export const greaterEqual = (a, b) => ['GreaterEqual', a, b];
+export const lessEqual = (a, b) => ['LessEqual', a, b];
+// Conditions joined, for a piecewise value's conditions only.
+export const and = (...conditions) => ['And', ...conditions];
+export const or = (...conditions) => ['Or', ...conditions];
+export const not = (condition) => ['Not', condition];
 
 // Sum of products of two equally long lists.
 export const dot = (left, right) => add(left.map((value, index) => multiply(value, right[index])));
@@ -91,7 +97,8 @@ export const cross = (a, b) => [
 const latexFunctions = {
     Sin: '\\sin', Cos: '\\cos', Tanh: '\\tanh', Arcsin: '\\arcsin', Min: '\\min', Max: '\\max', Arctan2: '\\arctan'
 };
-const latexComparisons = { Less: '<', Greater: '>' };
+const latexComparisons = { Less: '<', Greater: '>', LessEqual: '\\le ', GreaterEqual: '\\ge ' };
+const latexLogic = { And: '\\land ', Or: '\\lor ' };
 
 function numberLatex(value) {
     const text = String(value);
@@ -116,6 +123,8 @@ export function toLatex(expression) {
     };
     if (latexFunctions[operator]) return `${latexFunctions[operator]}${parenthesize(operands.map(toLatex).join(','))}`;
     if (latexComparisons[operator]) return operands.map(toLatex).join(latexComparisons[operator]);
+    if (latexLogic[operator]) return operands.map((operand) => parenthesize(toLatex(operand))).join(latexLogic[operator]);
+    if (operator === 'Not') return `\\lnot ${parenthesize(toLatex(operands[0]))}`;
     switch (operator) {
     case 'Add': return operands.map((operand, index) => {
         if (index === 0) return toLatex(operand);
@@ -176,6 +185,11 @@ export function evaluate(expression, values) {
     case 'Max': return Math.max(value[0], value[1]);
     case 'Greater': return value[0] > value[1] ? 1 : 0;
     case 'Less': return value[0] < value[1] ? 1 : 0;
+    case 'GreaterEqual': return value[0] >= value[1] ? 1 : 0;
+    case 'LessEqual': return value[0] <= value[1] ? 1 : 0;
+    case 'And': return value.every((item) => item !== 0) ? 1 : 0;
+    case 'Or': return value.some((item) => item !== 0) ? 1 : 0;
+    case 'Not': return value[0] === 0 ? 1 : 0;
     default: throw new Error(`Unknown operator ${operator}.`);
     }
 }

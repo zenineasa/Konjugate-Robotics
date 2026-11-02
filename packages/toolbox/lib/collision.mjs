@@ -3,7 +3,8 @@
 // Where two shapes touch, as MuJoCo 3.16 finds it (its engine_collision_primitive.c and engine_collision_box.c, and
 // mju_makeFrame), for each pair of shapes the toolbox collides: a plane (the floor) with a sphere, a capsule, a
 // cylinder or a box; a sphere with a sphere, a capsule, a cylinder or a box; a capsule with a capsule or a box; a box
-// with a box. Each function gives a fixed
+// with a box. A cylinder against a capsule, a cylinder or a box, which MuJoCo finds by its iterative convex search, is
+// found here exactly (see "the largest gap" below), with points of its own where it lies flat. Each function gives a fixed
 // number of contact slots, as many as the pair can have at once, each { active, dist, pos, frame }: whether MuJoCo
 // would have that contact now (in the order its function makes them), how far apart the shapes are there (negative
 // when they overlap), the point (midway through the overlap) and the frame (the normal, from the first shape to the
@@ -51,23 +52,39 @@ export const numbers = Object.freeze({
 export const geomOrder = ['plane', 'sphere', 'capsule', 'cylinder', 'box'];
 export const contactSlots = Object.freeze({
     'plane|sphere': 1, 'plane|capsule': 2, 'plane|cylinder': 4, 'plane|box': 4,
-    'sphere|sphere': 1, 'sphere|capsule': 1, 'sphere|cylinder': 1, 'sphere|box': 1, 'capsule|capsule': 2, 'capsule|box': 2, 'box|box': 8
+    'sphere|sphere': 1, 'sphere|capsule': 1, 'sphere|cylinder': 1, 'sphere|box': 1, 'capsule|capsule': 2, 'capsule|cylinder': 2, 'capsule|box': 2, 'cylinder|cylinder': 4, 'cylinder|box': 4, 'box|box': 8
 });
 export const pairKey = (first, second) => `${first}|${second}`;
 export const collides = (first, second) => pairKey(...[first, second].sort((a, b) => geomOrder.indexOf(a) - geomOrder.indexOf(b))) in contactSlots;
 
 // The contacts between `first` and `second` (already in MuJoCo's order: the first's kind no later than the second's),
-// within `margin`.
-export function collide(A, first, second, margin) {
+// within `margin`. Given `reach` (how near two shapes must come to touch: at least the margin they touch within),
+// none, and nothing worked out, while the spheres about the two lie further apart than that, as MuJoCo's own first
+// test of a pair: as equations, the pair's contacts are a choice the engine works out only when taken.
+export function collide(A, first, second, margin, { reach = null } = {}) {
     const key = pairKey(first.kind, second.kind);
     const found = {
         'plane|sphere': planeSphere, 'plane|capsule': planeCapsule, 'plane|cylinder': planeCylinder, 'plane|box': planeBox,
         'sphere|sphere': sphereSphere, 'sphere|capsule': sphereCapsule, 'sphere|cylinder': sphereCylinder, 'sphere|box': sphereBox,
-        'capsule|capsule': capsuleCapsule,
-        'capsule|box': capsuleBox, 'box|box': boxBox
+        'capsule|capsule': capsuleCapsule, 'capsule|cylinder': capsuleCylinder,
+        'capsule|box': capsuleBox, 'cylinder|cylinder': cylinderCylinder, 'cylinder|box': cylinderBox, 'box|box': boxBox
     }[key];
     if (!found) throw new Error(`MuJoCo's ${first.kind} and ${second.kind} collision is not built yet.`);
-    return found(A, first, second, A.num(margin)).map((slot, index) => ({ ...slot, frame: makeFrame(A, slot.frame, `f${index + 1}`) }));
+    const contacts = () => found(A, first, second, A.num(margin)).map((slot, index) => ({ ...slot, frame: makeFrame(A, slot.frame, `f${index + 1}`) }));
+    if (reach === null || first.kind === 'plane') return contacts();
+    const radius = (shape) => ({ sphere: shape.size[0], capsule: shape.size[0] + shape.size[1], cylinder: Math.hypot(shape.size[0], shape.size[1]), box: Math.hypot(...shape.size) })[shape.kind];
+    const apart = radius(first) + radius(second) + reach;
+    const between = v3.sub(A, second.pos, first.pos);
+    const near = A.name('near', A.le(v3.dot(A, between, between), apart * apart));
+    const none = () => ({ active: A.never, dist: A.num(0), pos: [A.num(0), A.num(0), A.num(0)], frame: Array.from({ length: 9 }, () => A.num(0)) });
+    // In numbers, the choice is made here.
+    if (typeof near === 'boolean') return near ? contacts() : Array.from({ length: contactSlots[key] }, none);
+    return contacts().map((slot) => ({
+        active: A.and(near, slot.active),
+        dist: A.pick(near, slot.dist, A.num(0)),
+        pos: slot.pos.map((value) => A.pick(near, value, A.num(0))),
+        frame: slot.frame.map((value) => A.pick(near, value, A.num(0)))
+    }));
 }
 
 // ---- vectors over an algebra ------------------------------------------------------------------------------------
@@ -715,5 +732,626 @@ function boxBox(A, first, second, margin) {
             frame: [...normal, ...noTangent(A)]
         };
     });
+}
+
+// ---- the largest gap: capsules, cylinders and boxes, exactly ------------------------------------------------------
+// MuJoCo finds a cylinder against a capsule, a cylinder or a box by its iterative convex search, to its tolerance.
+// These find the same contact exactly, by what makes it exact for any two convex shapes: their signed distance (less
+// than nothing where they overlap, by the least they must move apart) is the largest gap between them along any
+// direction n, n · (c2 - c1) less how far each reaches along it, and the contact's normal is that direction, its point
+// midway between where each reaches furthest. Each shape's reach is a sum of terms: a segment's, L |n · a| (a capsule's
+// axis, a cylinder's, a box's edges); a disc's, R (1 - (n · b)²)^½ (a cylinder's caps); a ball's, r. Where none of its
+// absolute values changes sign and no disc is face on, the gap is smooth, and its largest is found in closed form or
+// by a few Newton steps on a circle of directions; elsewhere the direction is fixed (a face's normal, two edges' cross
+// product). Any direction's gap is no more than the largest, so the largest over every such candidate is exact.
+
+const dot3 = (A, a, b) => v3.dot(A, a, b);
+// v less its part along the unit `axis`.
+const square = (A, v, axis) => v3.sub(A, v, v3.scale(A, axis, dot3(A, v, axis)));
+const signNumber = (A, value) => A.pick(A.lt(value, 0), A.num(-1), A.num(1));
+
+// The gap along unit n: n · d less each segment's L |n · a| and each disc's R (1 - (n · b)²)^½ and the balls' r.
+function gapAlong(A, n, { d, segments, discs, radius }) {
+    const reach = [...segments.map(({ length, axis }) => A.mul(length, A.abs(dot3(A, n, axis)))),
+        ...discs.map(({ radius: R, axis }) => { const c = dot3(A, n, axis); return A.mul(R, A.sqrt(A.max(0, A.sub(1, A.mul(c, c))))); })];
+    return A.sub(A.sub(dot3(A, n, d), A.add(...reach)), radius);
+}
+
+// The direction on the circle square to the unit `axis` where the gap (`terms`) is largest, by Newton's steps from
+// `starts`, each turning n by at most half a radian. Each search keeps the way each segment faces its start: within an
+// arc of the circle between two creases of the gap (where a segment turns square to n) the gap is smooth, so the search
+// settles on that arc's largest, however near a crease it lies (a start in every arc; the creases themselves are
+// candidates of their own). Where it settles beyond its arc, its gap read there is less, and the arc's largest is at
+// a crease. The best of the starts' ends.
+function circleSearch(A, axis, terms, starts, steps, tag) {
+    const { d, segments, discs } = terms;
+    // Along the circle's tangent t = axis × n, each u · t is n · (u × axis): those cross products once for the circle.
+    const crossed = (u, label) => v3.name(A, `${tag}${label}`, v3.cross(A, u, axis));
+    const dx = crossed(d, 'x');
+    const ex = segments.map(({ axis: e }, j) => crossed(e, `e${j}`));
+    const bx = discs.map(({ axis: b }, j) => crossed(b, `c${j}`));
+    const ends = starts.map((start, k) => {
+        let n = start;
+        // Each segment's reach, L |n · e|, as L σ n · e with σ its start's.
+        const facing = segments.map(({ length, axis: e }, j) => A.name(`${tag}${k}f${j}`, A.mul(length, signNumber(A, dot3(A, start, e)))));
+        const reachAxis = v3.name(A, `${tag}${k}r`, segments.reduce((sum, { axis: e }, j) => v3.add(A, sum, v3.scale(A, e, facing[j])), [A.num(0), A.num(0), A.num(0)]));
+        const reachCrossed = v3.name(A, `${tag}${k}q`, segments.reduce((sum, _, j) => v3.add(A, sum, v3.scale(A, ex[j], facing[j])), [A.num(0), A.num(0), A.num(0)]));
+        for (let i = 0; i < steps; i += 1) {
+            let slope = A.sub(dot3(A, n, dx), dot3(A, n, reachCrossed));
+            let bend = A.add(A.neg(dot3(A, n, d)), dot3(A, n, reachAxis));
+            discs.forEach(({ radius, axis: b }, j) => {
+                const c = A.name(`${tag}${k}c${j}x${i}`, dot3(A, n, b));
+                const ct = A.name(`${tag}${k}e${j}x${i}`, dot3(A, n, bx[j]));
+                const s = A.name(`${tag}${k}s${j}x${i}`, A.sqrt(A.max(1e-24, A.sub(1, A.mul(c, c)))));
+                slope = A.add(slope, A.div(A.mul(radius, c, ct), s));
+                bend = A.add(bend, A.mul(radius, A.add(A.div(A.sub(A.mul(ct, ct), A.mul(c, c)), s), A.div(A.mul(c, c, ct, ct), A.mul(s, s, s)))));
+            });
+            slope = A.name(`${tag}${k}g${i}`, slope);
+            bend = A.name(`${tag}${k}h${i}`, bend);
+            // Newton's step where the gap curves down; elsewhere its curvature shifted down by ten times its slope (a
+            // step uphill in proportion to the slope, not a fixed one, which leaps past a direction near a cap's normal).
+            const curving = A.lt(bend, A.mul(-1e-3, A.abs(slope)));
+            const damped = A.pick(curving, bend, A.sub(A.neg(A.abs(bend)), A.add(A.mul(10, A.abs(slope)), 1e-12)));
+            const step = A.name(`${tag}${k}d${i}`, clip(A, A.div(A.neg(slope), damped), -0.5, 0.5));
+            // n + step t is √(1 + step²) long, t being a unit square to n.
+            const t = v3.cross(A, axis, n);
+            const length = A.sqrt(A.add(1, A.mul(step, step)));
+            n = v3.name(A, `${tag}${k}n${i}`, v3.scale(A, v3.add(A, n, v3.scale(A, t, step)), A.div(1, length)));
+        }
+        return n;
+    });
+    let best = ends[0];
+    let bestScore = A.name(`${tag}v0`, gapAlong(A, ends[0], terms));
+    ends.slice(1).forEach((n, k) => {
+        const value = A.name(`${tag}v${k + 1}`, gapAlong(A, n, terms));
+        const better = A.name(`${tag}b${k + 1}`, A.gt(value, bestScore));
+        best = v3.name(A, `${tag}w${k + 1}`, v3.pick(A, better, n, best));
+        bestScore = A.name(`${tag}u${k + 1}`, A.pick(better, value, bestScore));
+    });
+    return best;
+}
+
+// The direction where the gap (`terms`) is largest anywhere on the sphere, by Newton's steps in the plane square to n
+// from `starts` (each step at most half a radian; uphill, half a radian, where the gap is not curving down), each search
+// keeping one way for each segment to face (as circleSearch does, so it settles beside a crease): a start's own, or
+// the signs given with it ({ start, signs }) for a search of that region however its start faces; the best of the
+// starts' ends. Each disc's reach is R |n - (n · b) b|; along unit tangents t₁, t₂ square to n its slope is
+// -R (t · b) (n · b) / s and its curvature -R ((t₁ · t₂) - (t₁ · b)(t₂ · b)) / s + R (t₁ · b)(t₂ · b)(n · b)² / s³,
+// s = (1 - (n · b)²)^½.
+function sphereSearch(A, terms, starts, steps, tag) {
+    const { d, segments, discs } = terms;
+    const ends = starts.map((given, k) => {
+        const start = Array.isArray(given) ? given : given.start;
+        let n = start;
+        const facing = segments.map(({ length, axis: e }, j) => A.name(`${tag}${k}f${j}`,
+            A.mul(length, Array.isArray(given) ? signNumber(A, dot3(A, start, e)) : A.num(given.signs[j]))));
+        const toward = v3.name(A, `${tag}${k}w`, segments.reduce((sum, { axis: e }, j) => v3.sub(A, sum, v3.scale(A, e, facing[j])), d));
+        for (let i = 0; i < steps; i += 1) {
+            const name = (label, value) => A.name(`${tag}${k}${label}${i}`, value);
+            const helper = v3.pick(A, A.lt(A.abs(n[0]), 0.9), [A.num(1), A.num(0), A.num(0)], [A.num(0), A.num(1), A.num(0)]);
+            const t1 = normalize(A, `${tag}${k}t${i}`, square(A, helper, n)).unit;
+            const t2 = v3.name(A, `${tag}${k}T${i}`, v3.cross(A, n, t1));
+            let g1 = dot3(A, t1, toward);
+            let g2 = dot3(A, t2, toward);
+            let along = dot3(A, n, toward);
+            let h11 = A.num(0);
+            let h12 = A.num(0);
+            let h22 = A.num(0);
+            discs.forEach(({ radius, axis: b }, j) => {
+                const c = name(`c${j}x`, dot3(A, n, b));
+                const p1 = name(`p${j}x`, dot3(A, t1, b));
+                const p2 = name(`q${j}x`, dot3(A, t2, b));
+                const size = name(`s${j}x`, A.sqrt(A.max(1e-24, A.sub(1, A.mul(c, c)))));
+                const cube = A.mul(size, size, size);
+                g1 = A.add(g1, A.div(A.mul(radius, p1, c), size));
+                g2 = A.add(g2, A.div(A.mul(radius, p2, c), size));
+                along = A.sub(along, A.mul(radius, size));
+                h11 = A.sub(h11, A.mul(radius, A.sub(A.div(A.sub(1, A.mul(p1, p1)), size), A.div(A.mul(p1, p1, c, c), cube))));
+                h12 = A.sub(h12, A.mul(radius, A.sub(A.div(A.neg(A.mul(p1, p2)), size), A.div(A.mul(p1, p2, c, c), cube))));
+                h22 = A.sub(h22, A.mul(radius, A.sub(A.div(A.sub(1, A.mul(p2, p2)), size), A.div(A.mul(p2, p2, c, c), cube))));
+            });
+            g1 = name('g1', g1);
+            g2 = name('g2', g2);
+            along = name('nG', along);
+            h11 = name('h11', A.sub(h11, along));
+            h12 = name('h12', h12);
+            h22 = name('h22', A.sub(h22, along));
+            // Newton's step where the gap curves down every way; elsewhere its curvature shifted down past its largest by
+            // ten times its slope (Levenberg and Marquardt's), so the step uphill is in proportion; at most half a radian.
+            const gradientSize = name('gs', A.sqrt(A.add(A.mul(g1, g1), A.mul(g2, g2))));
+            const largest = A.add(A.mul(0.5, A.add(h11, h22)), A.sqrt(A.add(A.mul(0.25, A.mul(A.sub(h11, h22), A.sub(h11, h22))), A.mul(h12, h12))));
+            const shift = name('hm', A.max(0, A.add(largest, A.mul(10, gradientSize), 1e-12)));
+            const k11 = A.sub(h11, shift);
+            const k22 = A.sub(h22, shift);
+            const det = name('hd', A.sub(A.mul(k11, k22), A.mul(h12, h12)));
+            const x1 = name('x1', A.div(A.neg(A.sub(A.mul(k22, g1), A.mul(h12, g2))), det));
+            const x2 = name('x2', A.div(A.neg(A.sub(A.mul(k11, g2), A.mul(h12, g1))), det));
+            const stepSize = A.sqrt(A.add(A.mul(x1, x1), A.mul(x2, x2)));
+            const scale = A.div(0.5, A.max(0.5, stepSize));
+            const u1 = name('u1', A.mul(x1, scale));
+            const u2 = name('u2', A.mul(x2, scale));
+            const length = A.sqrt(A.add(1, A.mul(u1, u1), A.mul(u2, u2)));
+            n = v3.name(A, `${tag}${k}n${i}`, v3.scale(A, v3.add(A, n, v3.add(A, v3.scale(A, t1, u1), v3.scale(A, t2, u2))), A.div(1, length)));
+        }
+        return n;
+    });
+    let best = ends[0];
+    let bestScore = A.name(`${tag}v0`, gapAlong(A, ends[0], terms));
+    ends.slice(1).forEach((n, k) => {
+        const value = A.name(`${tag}v${k + 1}`, gapAlong(A, n, terms));
+        const better = A.name(`${tag}b${k + 1}`, A.gt(value, bestScore));
+        best = v3.name(A, `${tag}x${k + 1}`, v3.pick(A, better, n, best));
+        bestScore = A.name(`${tag}y${k + 1}`, A.pick(better, value, bestScore));
+    });
+    return best;
+}
+
+// Starting directions on the circle square to unit `axis` just either side of where it crosses the plane square to
+// unit `other` (a crease of the gap: n · other changes sign), or none where `other` lies along `axis`.
+function besideCrease(A, axis, other, fallback, tag) {
+    const crease = normalize(A, `${tag}k`, v3.cross(A, axis, other));
+    const at = v3.pick(A, A.lt(crease.length, 1e-9), fallback, crease.unit);
+    return [1, -1].flatMap((sign, m) => {
+        const point = v3.scale(A, at, sign);
+        const t = v3.cross(A, axis, point);
+        return [0.05, -0.05].map((step, j) => normalize(A, `${tag}${m}${j}`, v3.add(A, point, v3.scale(A, t, step))).unit);
+    });
+}
+
+// Of `candidates` ({ n, valid, pos }, each n a unit direction from the first shape to the second and pos its contact
+// point), the one of largest gap (the first of those within a nanometre of it): { gap, chosen, n, pos }.
+function largestGap(A, candidates, terms, tag) {
+    let gap = A.num(-1e30);
+    let chosen = candidates.map(() => A.never);
+    candidates.forEach(({ n, valid }, c) => {
+        const value = A.name(`${tag}v${c + 1}`, gapAlong(A, n, terms));
+        // Larger by more than a nanometre: of directions as good as that (a cap's or a face's normal, and a search
+        // that ended beside it), the first, so whether a contact lies flat turns on the shapes, not on rounding.
+        const better = A.name(`${tag}q${c + 1}`, A.and(valid, A.gt(value, A.add(gap, 1e-9))));
+        chosen = chosen.map((was, k) => (k === c ? better : A.and(was, A.not(better))));
+        gap = A.name(`${tag}m${c + 1}`, A.pick(better, value, gap));
+    });
+    chosen = chosen.map((flag, c) => A.name(`${tag}k${c + 1}`, flag));
+    const pickOf = (values) => values.reduceRight((rest, value, c) => A.pick(chosen[c], value, rest), values[values.length - 1]);
+    return {
+        gap, chosen,
+        n: v3.name(A, `${tag}n`, [0, 1, 2].map((axis) => pickOf(candidates.map(({ n }) => n[axis])))),
+        pos: v3.name(A, `${tag}p`, [0, 1, 2].map((axis) => pickOf(candidates.map(({ pos }) => pos[axis]))))
+    };
+}
+
+// A cylinder's point reaching furthest along -n (toward a shape on n's far side): on its rim, or (n along its axis) its
+// cap's centre.
+function cylinderFacing(A, cylinder, n, tag) {
+    const b = column(cylinder.mat, 2);
+    const nb = dot3(A, n, b);
+    const across = normalize(A, `${tag}r`, square(A, n, b));
+    const radial = v3.pick(A, A.lt(across.length, 1e-12), [A.num(0), A.num(0), A.num(0)], across.unit);
+    return v3.name(A, `${tag}f`, v3.sub(A, v3.sub(A, cylinder.pos, v3.scale(A, b, A.mul(signNumber(A, nb), cylinder.size[1]))), v3.scale(A, radial, cylinder.size[0])));
+}
+
+// A capsule against a cylinder: the deepest contact, exactly; and its other end's ball against the cylinder, where it
+// touches too (a capsule lying along the side or across a cap), as MuJoCo gives a second contact there.
+function capsuleCylinder(A, capsule, cylinder, margin) {
+    const a = column(capsule.mat, 2);
+    const b = column(cylinder.mat, 2);
+    const L = capsule.size[1];
+    const r = capsule.size[0];
+    const H = cylinder.size[1];
+    const R = cylinder.size[0];
+    const d = v3.name(A, 'ycd', v3.sub(A, cylinder.pos, capsule.pos));
+    const terms = { d, segments: [{ length: L, axis: a }, { length: H, axis: b }], discs: [{ radius: R, axis: b }], radius: r };
+    const along = (n, t) => v3.add(A, v3.add(A, capsule.pos, v3.scale(A, a, t)), v3.scale(A, n, r));
+    const midway = (p, q) => v3.scale(A, v3.add(A, p, q), 0.5);
+    const endToward = (n) => A.mul(signNumber(A, dot3(A, n, a)), L);
+    const candidates = [];
+    // Face on to a cap: the capsule's end (or, lying square to the cap, its point over the cap's centre) on the cap.
+    [1, -1].forEach((sign, k) => {
+        const n = v3.scale(A, b, sign);
+        const capCentre = v3.sub(A, cylinder.pos, v3.scale(A, b, A.mul(sign, H)));
+        const flat = A.lt(A.abs(dot3(A, n, a)), 1e-12);
+        const t = A.name(`yct${k}`, A.pick(flat, clip(A, dot3(A, v3.sub(A, capCentre, capsule.pos), a), A.neg(L), L), endToward(n)));
+        const p = v3.name(A, `yca${k}`, along(n, t));
+        const q = v3.sub(A, p, v3.scale(A, n, dot3(A, v3.sub(A, p, capCentre), n)));
+        candidates.push({ n, valid: A.always, pos: midway(p, q) });
+    });
+    // Square to both axes: the capsule's segment against the cylinder's side, their lines' nearest points.
+    const crossed = normalize(A, 'ycx', v3.cross(A, a, b));
+    [1, -1].forEach((sign, k) => {
+        const n = v3.name(A, `ycxn${k}`, v3.scale(A, crossed.unit, sign));
+        const line = v3.sub(A, cylinder.pos, v3.scale(A, n, R));
+        const w = v3.sub(A, capsule.pos, line);
+        const ab = dot3(A, a, b);
+        const den = A.sub(1, A.mul(ab, ab));
+        const safe = A.pick(A.lt(den, minimumValue), A.num(1), den);
+        const aw = dot3(A, a, w);
+        const bw = dot3(A, b, w);
+        const t = clip(A, A.div(A.sub(A.mul(ab, bw), aw), safe), A.neg(L), L);
+        const u = clip(A, A.div(A.sub(bw, A.mul(ab, aw)), safe), A.neg(H), H);
+        candidates.push({ n, valid: A.ge(crossed.length, 1e-9), pos: midway(along(n, t), v3.add(A, line, v3.scale(A, b, u))) });
+    });
+    // Square to the cylinder's axis: the capsule's end against the cylinder's side.
+    [1, -1].forEach((sign, k) => {
+        const w = v3.sub(A, d, v3.scale(A, a, A.mul(sign, L)));
+        const n = normalize(A, `ycs${k}`, square(A, w, b)).unit;
+        const p = v3.name(A, `ycsa${k}`, along(n, A.mul(sign, L)));
+        const q = v3.add(A, v3.sub(A, cylinder.pos, v3.scale(A, n, R)), v3.scale(A, b, clip(A, dot3(A, v3.sub(A, p, cylinder.pos), b), A.neg(H), H)));
+        candidates.push({ n, valid: A.always, pos: midway(p, q) });
+    });
+    // Smooth: the capsule's end against the rim, for each way the axes may point; n in the plane of w and b.
+    [[1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(([sa, sb], k) => {
+        const w = v3.sub(A, v3.sub(A, d, v3.scale(A, a, A.mul(sa, L))), v3.scale(A, b, A.mul(sb, H)));
+        const across = normalize(A, `ycm${k}`, square(A, w, b));
+        const wu = across.length;
+        const wb = dot3(A, w, b);
+        const n = normalize(A, `ycmn${k}`, v3.add(A, v3.scale(A, across.unit, A.sub(wu, R)), v3.scale(A, b, wb))).unit;
+        const p = v3.name(A, `ycma${k}`, along(n, endToward(n)));
+        candidates.push({ n, valid: A.gt(wu, R), pos: midway(p, cylinderFacing(A, cylinder, n, `ycmf${k}`)) });
+    });
+    // The capsule's segment lying square to n against the rim: Newton's steps on the circle square to its axis, from
+    // where the cylinder's centre is (from each end of its axis) and from where its axis points.
+    const fallback = normalize(A, 'ycwf', square(A, [A.num(1), A.num(0), A.num(0)], a)).unit;
+    const startOf = (v, tag) => { const u = normalize(A, tag, square(A, v, a)); return v3.pick(A, A.lt(u.length, 1e-9), fallback, u.unit); };
+    const rimward = startOf(b, 'ycwb');
+    const starts = [startOf(d, 'ycw0'), rimward, v3.scale(A, rimward, -1), ...besideCrease(A, a, b, fallback, 'ycwk')];
+    {
+        const n = circleSearch(A, a, terms, starts, 14, 'ycc');
+        const q = cylinderFacing(A, cylinder, n, 'yccf');
+        const p = along(n, clip(A, dot3(A, v3.sub(A, q, capsule.pos), a), A.neg(L), L));
+        candidates.push({ n, valid: A.always, pos: midway(p, q) });
+    }
+    const deepest = largestGap(A, candidates, terms, 'ycl');
+    const dist = A.name('ycdist', deepest.gap);
+    // The other end: the one further along the axis from the deepest contact.
+    const far = A.mul(A.neg(signNumber(A, dot3(A, v3.sub(A, deepest.pos, capsule.pos), a))), L);
+    const end = v3.name(A, 'yce', v3.add(A, capsule.pos, v3.scale(A, a, far)));
+    const [second] = sphereCylinder(A, { pos: end, size: [r], mat: capsule.mat }, cylinder, margin);
+    return [
+        { active: A.le(dist, margin), dist, pos: deepest.pos, frame: [...deepest.n, ...noTangent(A)] },
+        { ...second, active: A.and(A.le(dist, margin), second.active) }
+    ];
+}
+
+// The same algebra, its names prefixed (to call a function of fixed names twice for one pair).
+const prefixed = (A, prefix) => ({ ...A, name: (tag, value) => A.name(`${prefix}${tag}`, value) });
+// A plane through `pos` facing unit `normal`, as the floor functions take one.
+const planeAt = (A, pos, normal) => ({ pos, mat: [A.num(0), A.num(0), normal[0], A.num(0), A.num(0), normal[1], A.num(0), A.num(0), normal[2]] });
+const pointOf = (A, slot) => ({ active: slot.active, dist: slot.dist, pos: slot.pos });
+
+// The part of the line from p to q (each a contact point, its dist) within `inside(t)`'s interval of t from 0 to 1,
+// as its two ends: [enter, leave], each at its own dist, both off where the interval is empty.
+function clipped(A, p, q, low, high, tag) {
+    const at = (t, label) => ({
+        dist: A.name(`${tag}${label}d`, A.add(p.dist, A.mul(t, A.sub(q.dist, p.dist)))),
+        pos: v3.name(A, `${tag}${label}p`, v3.add(A, p.pos, v3.scale(A, v3.sub(A, q.pos, p.pos), t)))
+    });
+    const some = A.le(low, high);
+    return [{ ...at(low, 'a'), active: A.and(p.active, some) }, { ...at(high, 'b'), active: A.and(p.active, q.active, some, A.gt(A.sub(high, low), 1e-12)) }];
+}
+
+// The interval of t in [0, 1] where p + t (q - p) lies within the rectangle of half sizes su, sv along U, V about
+// `centre` (in its plane).
+function rectInterval(A, p, q, centre, U, V, su, sv, tag) {
+    let low = A.num(0);
+    let high = A.num(1);
+    [[U, su], [V, sv]].forEach(([axis, half], k) => {
+        const x0 = A.name(`${tag}x${k}`, dot3(A, v3.sub(A, p, centre), axis));
+        const dx = A.name(`${tag}e${k}`, dot3(A, v3.sub(A, q, p), axis));
+        const moving = A.gt(A.abs(dx), 1e-15);
+        const safe = A.pick(moving, dx, A.num(1));
+        const ta = A.div(A.sub(A.neg(half), x0), safe);
+        const tb = A.div(A.sub(half, x0), safe);
+        const outside = A.gt(A.abs(x0), half);
+        low = A.name(`${tag}l${k}`, A.pick(moving, A.max(low, A.min(ta, tb)), A.pick(outside, A.num(2), low)));
+        high = A.name(`${tag}h${k}`, A.pick(moving, A.min(high, A.max(ta, tb)), high));
+    });
+    return [low, high];
+}
+
+// The interval of t in [0, 1] where p + t (q - p), projected along unit `axis`, lies within radius R of `centre`.
+function discInterval(A, p, q, centre, axis, R, tag) {
+    const r0 = v3.name(A, `${tag}r`, square(A, v3.sub(A, p, centre), axis));
+    const e = v3.name(A, `${tag}e`, square(A, v3.sub(A, q, p), axis));
+    const ee = A.name(`${tag}a`, dot3(A, e, e));
+    const re = A.name(`${tag}b`, dot3(A, r0, e));
+    const rr = A.sub(dot3(A, r0, r0), A.mul(R, R));
+    const moving = A.gt(ee, 1e-24);
+    const safe = A.pick(moving, ee, A.num(1));
+    const disc = A.name(`${tag}c`, A.sub(A.mul(re, re), A.mul(ee, rr)));
+    const root = A.sqrt(A.max(0, disc));
+    const low = A.pick(moving, A.pick(A.ge(disc, 0), A.max(0, A.div(A.sub(A.neg(re), root), safe)), A.num(2)), A.pick(A.le(rr, 0), A.num(0), A.num(2)));
+    const high = A.pick(moving, A.min(1, A.div(A.add(A.neg(re), root), safe)), A.num(1));
+    return [A.name(`${tag}l`, low), A.name(`${tag}h`, high)];
+}
+
+// Whether a point lies over the rectangle (within its half sizes along U and V about `centre`) and within `depth` of
+// its plane on the far side (inside the solid the rectangle is a face of).
+const overRect = (A, pos, dist, centre, U, V, su, sv, depth) => {
+    const r = v3.sub(A, pos, centre);
+    return A.and(A.le(A.abs(dot3(A, r, U)), su), A.le(A.abs(dot3(A, r, V)), sv), A.ge(dist, A.neg(depth)));
+};
+const overDisc = (A, pos, dist, centre, axis, R, depth) => {
+    const r = square(A, v3.sub(A, pos, centre), axis);
+    return A.and(A.le(dot3(A, r, r), A.mul(R, R)), A.ge(dist, A.neg(depth)));
+};
+
+// A cylinder lying on, standing on or tipped against a flat face (a plane through `centre` facing unit `out`, toward the
+// cylinder): MuJoCo's plane against cylinder there (two points along its side, or three on its rim), the line between
+// the first two kept where it lies `within` the face (an interval of t from `interval`), the other two where `over` it.
+// Each point's normal is -out (from the cylinder to the face).
+function cylinderOnFace(A, cylinder, centre, out, margin, interval, over, tag) {
+    const B = prefixed(A, tag);
+    const slots = planeCylinder(B, planeAt(A, centre, out), cylinder, margin);
+    const [low, high] = interval(slots[0].pos, slots[1].pos, `${tag}i`);
+    const line = clipped(A, pointOf(A, slots[0]), { ...pointOf(A, slots[1]), active: A.always }, low, high, `${tag}k`);
+    const rim = slots.slice(2).map((slot) => ({ ...pointOf(A, slot), active: A.and(slot.active, over(slot.pos, slot.dist)) }));
+    return [...line, ...rim].map((point) => ({ ...point, active: A.and(point.active, A.le(point.dist, margin)), normal: v3.scale(A, out, -1) }));
+}
+
+// The contact slots for a pair whose deepest contact may lie flat: where `flat` holds and any of `points` touches, the
+// first four of `points` that touch (each { active, dist, pos, normal }); otherwise the deepest alone, in the first.
+function flatOrDeepest(A, flat, points, deepest, dist, margin, tag) {
+    const anyFlat = A.name(`${tag}f`, A.and(flat, A.or(...points.map(({ active }) => active))));
+    const before = [A.num(0)];
+    points.forEach(({ active }, p) => before.push(A.name(`${tag}c${p + 1}`, A.add(before[p], A.pick(active, 1, 0)))));
+    return [0, 1, 2, 3].map((k) => {
+        const takers = points.map(({ active }, p) => A.name(`${tag}t${k + 1}x${p + 1}`, A.and(active, A.gt(before[p], k - 0.5), A.lt(before[p], k + 0.5))));
+        const pickAll = (values) => values.reduceRight((rest, value, p) => A.pick(takers[p], value, rest), values[values.length - 1]);
+        const one = k === 0;
+        const flatDist = pickAll(points.map((point) => point.dist));
+        const flatPos = [0, 1, 2].map((i) => pickAll(points.map((point) => point.pos[i])));
+        const flatNormal = [0, 1, 2].map((i) => pickAll(points.map((point) => point.normal[i])));
+        return {
+            active: A.name(`${tag}s${k + 1}a`, A.pick(anyFlat, A.or(...takers), one ? A.le(dist, margin) : A.never)),
+            dist: A.name(`${tag}s${k + 1}d`, one ? A.pick(anyFlat, flatDist, dist) : flatDist),
+            pos: v3.name(A, `${tag}s${k + 1}p`, one ? v3.pick(A, anyFlat, flatPos, deepest.pos) : flatPos),
+            frame: [...v3.name(A, `${tag}s${k + 1}n`, one ? v3.pick(A, anyFlat, flatNormal, deepest.n) : flatNormal), ...noTangent(A)]
+        };
+    });
+}
+
+// A cylinder against a box: the deepest contact, exactly.
+function cylinderBox(A, cylinder, box, margin) {
+    const b = column(cylinder.mat, 2);
+    const H = cylinder.size[1];
+    const R = cylinder.size[0];
+    const E = [0, 1, 2].map((k) => column(box.mat, k));
+    const s = box.size;
+    const d = v3.name(A, 'ybd', v3.sub(A, box.pos, cylinder.pos));
+    const terms = { d, segments: [{ length: H, axis: b }, ...E.map((axis, k) => ({ length: s[k], axis }))], discs: [{ radius: R, axis: b }], radius: A.num(0) };
+    const midway = (p, q) => v3.scale(A, v3.add(A, p, q), 0.5);
+    const reaching = (n, tag) => cylinderFacing(A, cylinder, v3.scale(A, n, -1), tag);
+    // The box's corner reaching furthest along -n, for the signs given (each +1 where n · e_k > 0).
+    const cornerOf = (signs) => E.reduce((sum, axis, k) => v3.sub(A, sum, v3.scale(A, axis, A.mul(signs[k], s[k]))), box.pos);
+    const signsAlong = (n) => E.map((axis) => signNumber(A, dot3(A, n, axis)));
+    const candidates = [];
+    // A face of the box: the cylinder's point reaching furthest, on the face's plane.
+    E.forEach((axis, k) => [1, -1].forEach((sign, m) => {
+        const n = v3.scale(A, axis, sign);
+        const p = reaching(n, `ybfp${k}${m}`);
+        const plane = v3.sub(A, box.pos, v3.scale(A, n, s[k]));
+        candidates.push({ n, valid: A.always, pos: midway(p, v3.sub(A, p, v3.scale(A, n, dot3(A, v3.sub(A, p, plane), n)))) });
+    }));
+    // A cap of the cylinder: the box's corner reaching furthest, on the cap's plane.
+    [1, -1].forEach((sign, m) => {
+        const n = v3.scale(A, b, sign);
+        const q = v3.name(A, `ybcq${m}`, cornerOf(signsAlong(n)));
+        const cap = v3.add(A, cylinder.pos, v3.scale(A, b, A.mul(sign, H)));
+        candidates.push({ n, valid: A.always, pos: midway(v3.sub(A, q, v3.scale(A, n, dot3(A, v3.sub(A, q, cap), n))), q) });
+    });
+    // The cylinder's side against an edge of the box: their lines' nearest points.
+    E.forEach((axis, k) => {
+        const crossed = normalize(A, `ybx${k}`, v3.cross(A, b, axis));
+        [1, -1].forEach((sign, m) => {
+            const n = v3.name(A, `ybxn${k}${m}`, v3.scale(A, crossed.unit, sign));
+            const line = v3.add(A, cylinder.pos, v3.scale(A, n, R));
+            const signs = signsAlong(n).map((value, j) => (j === k ? A.num(0) : value));
+            const edge = v3.name(A, `ybxe${k}${m}`, cornerOf(signs));
+            const w = v3.sub(A, line, edge);
+            const be = dot3(A, b, axis);
+            const den = A.sub(1, A.mul(be, be));
+            const safe = A.pick(A.lt(den, minimumValue), A.num(1), den);
+            const bw = dot3(A, b, w);
+            const ew = dot3(A, axis, w);
+            const t = clip(A, A.div(A.sub(A.mul(be, ew), bw), safe), A.neg(H), H);
+            const u = clip(A, A.div(A.sub(ew, A.mul(be, bw)), safe), A.neg(s[k]), s[k]);
+            candidates.push({ n, valid: A.ge(crossed.length, 1e-9), pos: midway(v3.add(A, line, v3.scale(A, b, t)), v3.add(A, edge, v3.scale(A, axis, u))) });
+        });
+    });
+    // Each corner of the box against the cylinder's side (n square to its axis) and against its rim (smooth).
+    for (let corner = 0; corner < 8; corner += 1) {
+        const signs = [0, 1, 2].map((k) => ((corner >> k) & 1 ? -1 : 1));
+        const w0 = E.reduce((sum, axis, k) => v3.sub(A, sum, v3.scale(A, axis, A.mul(signs[k], s[k]))), d);
+        const q = v3.name(A, `ybvq${corner}`, cornerOf(signs.map((value) => A.num(value))));
+        const side = normalize(A, `ybvs${corner}`, square(A, w0, b)).unit;
+        const onSide = v3.add(A, v3.add(A, cylinder.pos, v3.scale(A, side, R)), v3.scale(A, b, clip(A, dot3(A, v3.sub(A, q, cylinder.pos), b), A.neg(H), H)));
+        candidates.push({ n: side, valid: A.always, pos: midway(onSide, q) });
+        [1, -1].forEach((sb, m) => {
+            const w = v3.sub(A, w0, v3.scale(A, b, A.mul(sb, H)));
+            const across = normalize(A, `ybvm${corner}${m}`, square(A, w, b));
+            const n = normalize(A, `ybvn${corner}${m}`, v3.add(A, v3.scale(A, across.unit, A.sub(across.length, R)), v3.scale(A, b, dot3(A, w, b)))).unit;
+            candidates.push({ n, valid: A.gt(across.length, R), pos: midway(reaching(n, `ybvr${corner}${m}`), q) });
+        });
+    }
+    // An edge of the box lying square to n against the rim: Newton's steps on the circle square to it.
+    E.forEach((axis, k) => {
+        const fallback = normalize(A, `ybef${k}`, square(A, [A.num(1), A.num(0), A.num(0)], axis)).unit;
+        const startOf = (v, tag) => { const u = normalize(A, tag, square(A, v, axis)); return v3.pick(A, A.lt(u.length, 1e-9), fallback, u.unit); };
+        // The middle of each quarter between the box's faces' normals, and either side of the cylinder's crease.
+        const [u, v] = [0, 1, 2].filter((j) => j !== k).map((j) => E[j]);
+        const diagonals = [[1, 1], [1, -1], [-1, 1], [-1, -1]].map(([p, q], m) => normalize(A, `ybeq${k}${m}`, v3.add(A, v3.scale(A, u, p), v3.scale(A, v, q))).unit);
+        // And the circle's directions nearest the cylinder's axis, where a cap is nearly face on and the gap is steep.
+        const rimward = startOf(b, `ybeb${k}`);
+        const starts = [...diagonals, rimward, v3.scale(A, rimward, -1), ...besideCrease(A, axis, b, fallback, `ybek${k}`)];
+        const n = circleSearch(A, axis, terms, starts, 14, `ybe${k}c`);
+        const p = reaching(n, `ybep${k}`);
+        const signs = signsAlong(n).map((value, j) => (j === k ? A.num(0) : value));
+        const edge = cornerOf(signs);
+        const q = v3.add(A, edge, v3.scale(A, axis, clip(A, dot3(A, v3.sub(A, p, edge), axis), A.neg(s[k]), s[k])));
+        candidates.push({ n, valid: A.always, pos: midway(p, q) });
+    });
+    const deepest = largestGap(A, candidates, terms, 'ybl');
+    const dist = A.name('ybdist', deepest.gap);
+    // Deepest along a face's normal (candidates 1 to 6): the cylinder on that face. Along a cap's normal (7 and 8): the
+    // box's corners over the cap, and the cylinder's rim over the box's face turned most toward it. Otherwise the
+    // deepest alone. The faces in the candidates' order: each axis, + then -.
+    const faces = E.flatMap((axis, k) => [1, -1].map((sign) => ({ out: v3.scale(A, axis, -sign), k })));
+    const faceChosen = deepest.chosen.slice(0, 6);
+    const capChosen = deepest.chosen.slice(6, 8);
+    const pickFace = (flags, values) => values.reduceRight((rest, value, c) => A.pick(flags[c], value, rest), values[values.length - 1]);
+    const faceData = (flags, tag) => {
+        const out = v3.name(A, `${tag}o`, [0, 1, 2].map((i) => pickFace(flags, faces.map(({ out: o }) => o[i]))));
+        const sk = A.name(`${tag}k`, pickFace(flags, faces.map(({ k }) => s[k])));
+        const others = [[1, 2], [0, 2], [0, 1]];
+        const U = v3.name(A, `${tag}u`, [0, 1, 2].map((i) => pickFace(flags, faces.map(({ k }) => E[others[k][0]][i]))));
+        const V = v3.name(A, `${tag}v`, [0, 1, 2].map((i) => pickFace(flags, faces.map(({ k }) => E[others[k][1]][i]))));
+        const su = A.name(`${tag}su`, pickFace(flags, faces.map(({ k }) => s[others[k][0]])));
+        const sv = A.name(`${tag}sv`, pickFace(flags, faces.map(({ k }) => s[others[k][1]])));
+        const centre = v3.name(A, `${tag}c`, v3.add(A, box.pos, v3.scale(A, out, sk)));
+        return { out, centre, U, V, su, sv, depth: A.mul(2, sk) };
+    };
+    const onFace = (face, tag) => cylinderOnFace(A, cylinder, face.centre, face.out, margin,
+        (p, q, label) => rectInterval(A, p, q, face.centre, face.U, face.V, face.su, face.sv, label),
+        (pos, d2) => overRect(A, pos, d2, face.centre, face.U, face.V, face.su, face.sv, face.depth), tag);
+    const flatFace = onFace(faceData(faceChosen, 'ybff'), 'ybfa');
+    // The box's face turned most toward the cylinder (its outward normal most against the deepest's).
+    let most = A.num(1e30);
+    let turned = faces.map(() => A.never);
+    faces.forEach(({ out }, c) => {
+        const value = A.name(`ybtv${c + 1}`, dot3(A, out, deepest.n));
+        const nearer = A.name(`ybtq${c + 1}`, A.lt(value, most));
+        turned = turned.map((was, k) => (k === c ? nearer : A.and(was, A.not(nearer))));
+        most = A.name(`ybtm${c + 1}`, A.pick(nearer, value, most));
+    });
+    const rimOnBox = onFace(faceData(turned.map((flag, c) => A.name(`ybtk${c + 1}`, flag)), 'ybtf'), 'ybta');
+    // The cap facing the box, and the box's corners over it.
+    const capSign = A.name('ybcs', signNumber(A, dot3(A, deepest.n, b)));
+    const capOut = v3.name(A, 'ybco', v3.scale(A, b, capSign));
+    const capCentre = v3.name(A, 'ybcc', v3.add(A, cylinder.pos, v3.scale(A, capOut, H)));
+    const corners = planeBox(prefixed(A, 'ybcb'), planeAt(A, capCentre, capOut), box, margin)
+        .map((slot) => ({ ...pointOf(A, slot), active: A.and(slot.active, overDisc(A, slot.pos, slot.dist, capCentre, b, R, A.mul(2, H))), normal: capOut }));
+    const isFace = A.name('ybif', A.or(...faceChosen));
+    const isCap = A.name('ybic', A.or(...capChosen));
+    const off = (point) => ({ ...point, active: A.never });
+    const points = [
+        ...flatFace.map((point, k) => ({
+            active: A.pick(isFace, point.active, A.pick(isCap, corners[k].active, A.never)),
+            dist: A.pick(isFace, point.dist, corners[k].dist),
+            pos: v3.pick(A, isFace, point.pos, corners[k].pos),
+            normal: v3.pick(A, isFace, point.normal, corners[k].normal)
+        })),
+        // Only where that face is turned within 2.6 degrees of facing the cap (a big box resting on a small post).
+        ...rimOnBox.map((point) => ({ ...point, active: A.and(isCap, A.lt(most, -0.999), point.active) }))
+    ];
+    return flatOrDeepest(A, A.or(isFace, isCap), points.map((point) => point ?? off(point)), deepest, dist, margin, 'ybz');
+}
+
+// A cylinder against a cylinder: the deepest contact, exactly.
+function cylinderCylinder(A, first, second, margin) {
+    const a = column(first.mat, 2);
+    const b = column(second.mat, 2);
+    const [R1, H1] = first.size;
+    const [R2, H2] = second.size;
+    const d = v3.name(A, 'yyd', v3.sub(A, second.pos, first.pos));
+    const terms = { d, segments: [{ length: H1, axis: a }, { length: H2, axis: b }], discs: [{ radius: R1, axis: a }, { radius: R2, axis: b }], radius: A.num(0) };
+    const midway = (p, q) => v3.scale(A, v3.add(A, p, q), 0.5);
+    const reaching = (n, tag) => cylinderFacing(A, first, v3.scale(A, n, -1), tag);
+    const facing = (n, tag) => cylinderFacing(A, second, n, tag);
+    const onPlane = (p, origin, n) => v3.sub(A, p, v3.scale(A, n, dot3(A, v3.sub(A, p, origin), n)));
+    const candidates = [];
+    // A cap of either, face on.
+    [1, -1].forEach((sign, m) => {
+        const n = v3.scale(A, a, sign);
+        const q = facing(n, `yyaq${m}`);
+        candidates.push({ n, valid: A.always, pos: midway(onPlane(q, v3.add(A, first.pos, v3.scale(A, a, A.mul(sign, H1))), n), q) });
+        const nb = v3.scale(A, b, sign);
+        const p = reaching(nb, `yybp${m}`);
+        candidates.push({ n: nb, valid: A.always, pos: midway(p, onPlane(p, v3.sub(A, second.pos, v3.scale(A, b, A.mul(sign, H2))), nb)) });
+    });
+    // The two sides: their lines' nearest points.
+    const crossed = normalize(A, 'yyx', v3.cross(A, a, b));
+    [1, -1].forEach((sign, m) => {
+        const n = v3.name(A, `yyxn${m}`, v3.scale(A, crossed.unit, sign));
+        const p0 = v3.add(A, first.pos, v3.scale(A, n, R1));
+        const q0 = v3.sub(A, second.pos, v3.scale(A, n, R2));
+        const w = v3.sub(A, p0, q0);
+        const ab = dot3(A, a, b);
+        const den = A.sub(1, A.mul(ab, ab));
+        const safe = A.pick(A.lt(den, minimumValue), A.num(1), den);
+        const aw = dot3(A, a, w);
+        const bw = dot3(A, b, w);
+        const t = clip(A, A.div(A.sub(A.mul(ab, bw), aw), safe), A.neg(H1), H1);
+        const u = clip(A, A.div(A.sub(bw, A.mul(ab, aw)), safe), A.neg(H2), H2);
+        candidates.push({ n, valid: A.ge(crossed.length, 1e-9), pos: midway(v3.add(A, p0, v3.scale(A, a, t)), v3.add(A, q0, v3.scale(A, b, u))) });
+    });
+    // One's side against the other's rim: Newton's steps on the circle square to its axis.
+    const startsFor = (axis, tag) => {
+        const fallback = normalize(A, `${tag}f`, square(A, [A.num(1), A.num(0), A.num(0)], axis)).unit;
+        const startOf = (v, label) => { const u = normalize(A, `${tag}${label}`, square(A, v, axis)); return v3.pick(A, A.lt(u.length, 1e-9), fallback, u.unit); };
+        const other = axis === a ? b : a;
+        const H = axis === a ? H2 : H1;
+        const rimward = startOf(other, 'r');
+        return [startOf(d, 'd'), rimward, v3.scale(A, rimward, -1), ...besideCrease(A, axis, other, fallback, `${tag}k`)];
+    };
+    {
+        const n = circleSearch(A, a, terms, startsFor(a, 'yysa'), 14, 'yyca');
+        const q = facing(n, 'yycaq');
+        candidates.push({ n, valid: A.always, pos: midway(v3.add(A, v3.add(A, first.pos, v3.scale(A, n, R1)), v3.scale(A, a, clip(A, dot3(A, v3.sub(A, q, first.pos), a), A.neg(H1), H1))), q) });
+    }
+    {
+        const n = circleSearch(A, b, terms, startsFor(b, 'yysb'), 14, 'yycb');
+        const p = reaching(n, 'yycbp');
+        candidates.push({ n, valid: A.always, pos: midway(p, v3.add(A, v3.sub(A, second.pos, v3.scale(A, n, R2)), v3.scale(A, b, clip(A, dot3(A, v3.sub(A, p, second.pos), b), A.neg(H2), H2)))) });
+    }
+    // Rim against rim: Newton's steps on the sphere, from beside the best so far (which may be a cap's normal, where a
+    // disc's reach has a point and no slope) and from each way the axes may point.
+    const sofar = largestGap(A, candidates, terms, 'yyk');
+    const helper = v3.pick(A, A.lt(A.abs(sofar.n[0]), 0.9), [A.num(1), A.num(0), A.num(0)], [A.num(0), A.num(1), A.num(0)]);
+    const side1 = normalize(A, 'yyt', square(A, helper, sofar.n)).unit;
+    const side2 = v3.cross(A, sofar.n, side1);
+    const beside = [[side1, 0.02], [side1, -0.02], [side2, 0.02], [side2, -0.02]].map(([side, step], m) => normalize(A, `yyh${m}`, v3.add(A, sofar.n, v3.scale(A, side, step))).unit);
+    // And from a thousandth of a radian off each cap's normal, the way the rest of the gap rises there (the largest
+    // may lie a hair from where a disc is face on).
+    const offCaps = [[a, 1, 0], [a, -1, 0], [b, 1, 1], [b, -1, 1]].map(([axis, sign, j], m) => {
+        const tip = v3.scale(A, axis, sign);
+        const other = j === 0 ? { length: H2, axis: b, radius: R2 } : { length: H1, axis: a, radius: R1 };
+        // The rest of the gap's gradient at the tip: n · d less the other's segment and disc.
+        const across = normalize(A, `yyq${m}`, square(A, tip, other.axis));
+        const rest = v3.sub(A, v3.sub(A, d, v3.scale(A, other.axis, A.mul(other.length, signNumber(A, dot3(A, tip, other.axis))))), v3.scale(A, across.unit, other.radius));
+        const rise = normalize(A, `yyc${m}`, square(A, rest, tip));
+        return normalize(A, `yyo${m}`, v3.add(A, tip, v3.scale(A, v3.pick(A, A.lt(rise.length, 1e-12), side1, rise.unit), 1e-3))).unit;
+    });
+    const starts = [...beside, ...offCaps, ...[[1, 1], [1, -1], [-1, 1], [-1, -1]].map(([sa, sb], m) => ({
+        start: normalize(A, `yyss${m}`, v3.sub(A, v3.sub(A, d, v3.scale(A, a, A.mul(sa, H1))), v3.scale(A, b, A.mul(sb, H2)))).unit, signs: [sa, sb]
+    }))];
+    {
+        const n = sphereSearch(A, terms, starts, 14, 'yyr');
+        candidates.push({ n, valid: A.always, pos: midway(reaching(n, 'yyrp'), facing(n, 'yyrq')) });
+    }
+    const deepest = largestGap(A, candidates, terms, 'yyl');
+    const dist = A.name('yydist', deepest.gap);
+    // Deepest along a cap's normal (candidates 1 to 4): each cylinder on the other's cap facing it, its points over
+    // that cap (the second's dropped where the first's already has one); otherwise the deepest alone.
+    const isCap = A.name('yyic', A.or(...deepest.chosen.slice(0, 4)));
+    const signA = A.name('yysa', signNumber(A, dot3(A, deepest.n, a)));
+    const signB = A.name('yysb', signNumber(A, dot3(A, deepest.n, b)));
+    const outA = v3.name(A, 'yyoa', v3.scale(A, a, signA));
+    const outB = v3.name(A, 'yyob', v3.scale(A, b, A.neg(signB)));
+    const capA = v3.name(A, 'yyca', v3.add(A, first.pos, v3.scale(A, outA, H1)));
+    const capB = v3.name(A, 'yycb', v3.add(A, second.pos, v3.scale(A, outB, H2)));
+    const onA = cylinderOnFace(A, second, capA, outA, margin, (p, q, label) => discInterval(A, p, q, capA, a, R1, label),
+        (pos, d2) => overDisc(A, pos, d2, capA, a, R1, A.mul(2, H1)), 'yypa').map((point) => ({ ...point, normal: outA }));
+    const onB = cylinderOnFace(A, first, capB, outB, margin, (p, q, label) => discInterval(A, p, q, capB, b, R2, label),
+        (pos, d2) => overDisc(A, pos, d2, capB, b, R2, A.mul(2, H2)), 'yypb');
+    const repeated = (point) => A.or(...onA.map((other) => {
+        const gap = v3.sub(A, point.pos, other.pos);
+        return A.and(other.active, A.lt(dot3(A, gap, gap), 1e-14));
+    }));
+    // The second's cap only where it is turned within 2.6 degrees of facing the first's (one stacked on the other).
+    const facingCaps = A.name('yyff', A.gt(A.abs(dot3(A, deepest.n, b)), 0.999));
+    const facingFirst = A.name('yyfa', A.gt(A.abs(dot3(A, deepest.n, a)), 0.999));
+    const points = [...onA.map((point) => ({ ...point, active: A.and(facingFirst, point.active) })),
+        ...onB.map((point) => ({ ...point, active: A.and(facingCaps, point.active, A.not(repeated(point))) }))];
+    return flatOrDeepest(A, isCap, points, deepest, dist, margin, 'yyz');
 }
 

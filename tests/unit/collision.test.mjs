@@ -2,8 +2,9 @@
 
 // Where two shapes touch (lib/collision.mjs), against MuJoCo 3.16's own contacts for the same shapes where MuJoCo put
 // them (tests/fixtures/contact/mujocoContacts.json: random poses, and poses square to each other, for each pair the
-// toolbox collides); and the same functions written as equations (lib/modelBuilder.mjs's expressionAlgebra) giving
-// the same numbers.
+// toolbox collides as MuJoCo's own functions do; mujocoConvexContacts.json: a cylinder against a capsule, a cylinder
+// or a box, which MuJoCo finds by its convex search, run to a tolerance it reaches); and the same functions written as
+// equations (lib/modelBuilder.mjs's expressionAlgebra) giving the same numbers.
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -15,6 +16,8 @@ import { expressionAlgebra } from '../../packages/toolbox/lib/modelBuilder.mjs';
 import { roboticsRoot } from '../../scripts/konjugatePaths.mjs';
 
 const { cases } = JSON.parse(await readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', 'mujocoContacts.json'), 'utf8'));
+const { cases: convexCases } = JSON.parse(await readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', 'mujocoConvexContacts.json'), 'utf8'));
+const convexPairs = ['capsule|cylinder', 'cylinder|box', 'cylinder|cylinder'];
 const differ = (a, b) => Math.max(...a.map((value, index) => Math.abs(value - b[index])));
 
 test('each pair\'s contacts are MuJoCo\'s: as many, each at its distance, point and frame', () => {
@@ -30,11 +33,70 @@ test('each pair\'s contacts are MuJoCo\'s: as many, each at its distance, point 
         }
         seen.set(key, (seen.get(key) ?? 0) + contacts.length);
     }
-    for (const key of Object.keys(contactSlots)) assert.ok(seen.get(key) > 0, `${key} should touch in some case`);
+    for (const key of Object.keys(contactSlots).filter((pair) => !convexPairs.includes(pair))) assert.ok(seen.get(key) > 0, `${key} should touch in some case`);
+});
+
+// How far a shape reaches along unit n, written here from each shape's own geometry.
+const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const axisOf = (shape, k) => [shape.mat[k], shape.mat[3 + k], shape.mat[6 + k]];
+const reach = (shape, n) => {
+    const centre = dot(shape.pos, n);
+    if (shape.kind === 'capsule') return centre + shape.size[1] * Math.abs(dot(n, axisOf(shape, 2))) + shape.size[0];
+    if (shape.kind === 'cylinder') { const c = dot(n, axisOf(shape, 2)); return centre + shape.size[1] * Math.abs(c) + shape.size[0] * Math.sqrt(Math.max(0, 1 - c * c)); }
+    return centre + [0, 1, 2].reduce((sum, k) => sum + shape.size[k] * Math.abs(dot(n, axisOf(shape, k))), 0);
+};
+const gapAlong = (first, second, n) => -(reach(first, n) + reach(second, n.map((value) => -value)));
+
+test('a cylinder against a capsule, a cylinder or a box: the deepest contact exactly, as MuJoCo\'s convex search closes on it', () => {
+    let single = 0;
+    for (const { first, second, contacts } of convexCases) {
+        const key = pairKey(first.kind, second.kind);
+        const touching = collide(numbers, first, second, 0).filter(({ active }) => active);
+        assert.ok(touching.length > 0, `${key}: they overlap, so they touch`);
+        const deepest = touching.reduce((best, slot) => (slot.dist < best.dist ? slot : best));
+        // The gap along the deepest contact's normal is its distance (within the nanometre by which a cap's or a face's
+        // normal is preferred), and along MuJoCo's normals no wider: the largest.
+        assert.ok(Math.abs(gapAlong(first, second, deepest.frame.slice(0, 3)) - deepest.dist) < 2e-9, `${key}: the distance is the gap along the normal`);
+        for (const { frame } of contacts) assert.ok(gapAlong(first, second, frame.slice(0, 3)) <= deepest.dist + 1e-9, `${key}: MuJoCo found a wider gap`);
+        // Where MuJoCo gives one contact at the gap along its normal (not one of a flat face's, which it places and
+        // deepens by rules of its own), the same contact, to its search's precision.
+        if (contacts.length !== 1) continue;
+        const [theirs] = contacts;
+        if (Math.abs(gapAlong(first, second, theirs.frame.slice(0, 3)) - theirs.dist) > 1e-8) continue;
+        single += 1;
+        assert.ok(Math.abs(theirs.dist - deepest.dist) < 1e-8, `${key}: ${deepest.dist} deep, MuJoCo ${theirs.dist}`);
+        assert.ok(differ(theirs.frame.slice(0, 3), deepest.frame.slice(0, 3)) < 1e-4, `${key}: the normal differs from MuJoCo's by ${differ(theirs.frame.slice(0, 3), deepest.frame.slice(0, 3))}`);
+    }
+    assert.ok(single >= 55, `Most cases have one such contact, not ${single}.`);
+});
+
+test('flat on a face: a cylinder standing on a box, lying across one, under a lid, and cans stacked, touch at several points', () => {
+    const I = [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    const lying = [1, 0, 0, 0, 0, -1, 0, 1, 0];
+    const cylinder = (pos, mat = I, size = [0.04, 0.06]) => ({ kind: 'cylinder', size, pos, mat });
+    const box = (pos, size) => ({ kind: 'box', size, pos, mat: I });
+    const touching = (first, second) => collide(numbers, first, second, 0).filter(({ active }) => active);
+    const near = (points, expected, message) => {
+        assert.equal(points.length, expected.length, message);
+        for (const [x, y, z, dist] of expected) {
+            assert.ok(points.some(({ pos, dist: d }) => Math.abs(pos[0] - x) < 1e-12 && Math.abs(pos[1] - y) < 1e-12 && Math.abs(pos[2] - z) < 1e-12 && Math.abs(d - dist) < 1e-12), `${message}: a point at (${x}, ${y}, ${z})`);
+        }
+    };
+    const third = 0.04 * Math.sqrt(3) / 2;
+    // Standing 9 mm into a table: three points on its rim (MuJoCo's plane against cylinder), midway through the overlap.
+    near(touching(cylinder([0.01, 0, -0.009]), box([0, 0, -0.11], [0.1, 0.1, 0.05])), [[0.05, 0, -0.0645, -0.009], [-0.01, third, -0.0645, -0.009], [-0.01, -third, -0.0645, -0.009]], 'standing on a box');
+    // Lying along a narrow box: the two ends of the line along its side, where it lies over the box.
+    near(touching(cylinder([0, 0, 0.039], lying), box([0, 0, -0.05], [0.02, 0.1, 0.05])), [[0, -0.06, -0.0005, -0.001], [0, 0.06, -0.0005, -0.001]], 'lying on a box');
+    // A big lid on a small post: the post's rim, over the lid's face.
+    near(touching(cylinder([0, 0, 0]), box([0.01, 0, 0.109], [0.1, 0.1, 0.05])), [[0.04, 0, 0.0595, -0.001], [-0.02, -third, 0.0595, -0.001], [-0.02, third, 0.0595, -0.001]], 'a lid on a post');
+    // A can on a can, 1 cm off its axis: the upper can's rim, where it lies over the lower can's cap.
+    near(touching(cylinder([0, 0, 0]), cylinder([0.01, 0, 0.119])), [[-0.01, third, 0.0595, -0.001], [-0.01, -third, 0.0595, -0.001], [0.04, 0, 0.0595, -0.001]], 'a can on a can');
+    // A can lying across a narrow post: where its side crosses the post's cap.
+    near(touching(cylinder([0, 0, 0], I, [0.01, 0.06]), cylinder([0, 0, 0.099], lying)), [[0, -0.01, 0.0595, -0.001], [0, 0.01, 0.0595, -0.001]], 'lying across a post');
 });
 
 test('written as equations, each pair\'s functions give the numbers they give', () => {
-    for (const { first, second } of cases.filter((_, index) => index % 3 === 0)) {
+    for (const { first, second } of [...cases.filter((_, index) => index % 3 === 0), ...convexCases.filter((_, index) => index % 6 === 0)]) {
         const definitions = new Map();
         const algebra = expressionAlgebra((symbol, expression) => {
             if (typeof expression === 'number') return expression;
@@ -61,7 +123,7 @@ test('written as equations, each pair\'s functions give the numbers they give', 
         };
         const expected = collide(numbers, first, second, 0);
         slots.forEach((slot, k) => {
-            assert.equal(evaluate(slot.active) > 0.5, expected[k].active, `${first.kind} and ${second.kind}, slot ${k + 1}: whether it touches`);
+            assert.equal(evaluate(algebra.number(slot.active)) > 0.5, expected[k].active, `${first.kind} and ${second.kind}, slot ${k + 1}: whether it touches`);
             if (!expected[k].active) return;
             const error = Math.max(Math.abs(evaluate(slot.dist) - expected[k].dist), differ(slot.pos.map(evaluate), expected[k].pos), differ(slot.frame.map(evaluate), expected[k].frame));
             assert.ok(error < 1e-12, `${first.kind} and ${second.kind}, slot ${k + 1}: differs by ${error}`);
