@@ -1,0 +1,53 @@
+<!-- Copyright © 2026 Zenin Easa Panthakkalakath -->
+<!-- Meshes against the floor, a sphere and a capsule, for tests/engine/contact.test.mjs: a pebble of thirty corners
+     dropped tilted onto the floor (its deepest corner, then those of the face it lands on), a box made as a mesh dropped
+     nearly flat (four corners at once), and a ramp fixed to the table with a ball rolling down it and a pin dropped
+     lying along its flat top (two contacts, at its ends). MuJoCo collides a mesh as its convex hull, and finds a sphere
+     or a capsule against it by its convex search, here run to a tolerance it reaches. The pebble's and the box's inertia
+     are given: MuJoCo works out a mesh's in single precision. Each geom touches nothing by MuJoCo's rule (contype and
+     conaffinity 0), only the pairs named below. -->
+<mujoco model="Meshes">
+  <compiler angle="radian" meshdir="meshes"/>
+  <option timestep="0.001" integrator="implicitfast" tolerance="1e-15" iterations="1000" ccd_tolerance="1e-14" ccd_iterations="2000"/>
+  <default>
+    <geom contype="0" conaffinity="0"/>
+  </default>
+  <asset>
+    <mesh name="rock" file="rock.obj"/>
+    <mesh name="crate" file="crate.obj"/>
+    <mesh name="wedge" file="wedge.obj"/>
+  </asset>
+  <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05"/>
+    <body name="Rock" pos="0 0 0.08" quat="0.9 0.3 0.2 0.25">
+      <freejoint/>
+      <inertial pos="0 0 0" mass="0.1" diaginertia="2.6e-5 3.1e-5 3.6e-5"/>
+      <geom name="rock" type="mesh" mesh="rock"/>
+    </body>
+    <body name="Crate" pos="-0.2 0 0.05" quat="0.9998 0.012 0.008 0">
+      <freejoint/>
+      <inertial pos="0 0 0" mass="0.1" diaginertia="2.0833333333333333e-5 3.75e-5 4.3333333333333333e-5"/>
+      <geom name="crate" type="mesh" mesh="crate"/>
+    </body>
+    <body name="Ramp" pos="0.3 0 0">
+      <inertial pos="0 0 0.03" mass="2" diaginertia="0.01 0.01 0.01"/>
+      <geom name="ramp" type="mesh" mesh="wedge" mass="0"/>
+    </body>
+    <body name="Ball" pos="0.255 0.01 0.07">
+      <freejoint/>
+      <geom name="ball" type="sphere" size="0.012" mass="0.02"/>
+    </body>
+    <body name="Pin" pos="0.34 0 0.075" quat="0.70710678 0.70710678 0 0">
+      <freejoint/>
+      <geom name="pin" type="capsule" size="0.006 0.03" mass="0.01"/>
+    </body>
+  </worldbody>
+  <contact>
+    <pair geom1="floor" geom2="rock"/>
+    <pair geom1="floor" geom2="crate"/>
+    <pair geom1="floor" geom2="ball"/>
+    <pair geom1="floor" geom2="pin"/>
+    <pair geom1="ball" geom2="ramp"/>
+    <pair geom1="pin" geom2="ramp"/>
+  </contact>
+</mujoco>

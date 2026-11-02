@@ -650,7 +650,7 @@ function contactRows(contacts, bodies, poses, qd, timeStep) {
             const pose = body === -1 ? ground : poses[body];
             const rotation = multiply(pose.rotation, collider.rotation);
             const matrix = [0, 1, 2].map((row) => [0, 1, 2].map((column) => rotate(rotation, [0, 1, 2].map((axis) => (axis === column ? 1 : 0)))[row]));
-            return { kind: collider.kind, size: collider.size, pos: add(pose.position, rotate(pose.rotation, collider.position)), mat: matrix.flat() };
+            return { kind: collider.kind, size: collider.size, pos: add(pose.position, rotate(pose.rotation, collider.position)), mat: matrix.flat(), hull: collider.hull, centre: collider.centre };
         };
         const [a, b] = [contact.first, contact.second];
         // As the model builder does: nothing worked out while the spheres about the two lie apart.

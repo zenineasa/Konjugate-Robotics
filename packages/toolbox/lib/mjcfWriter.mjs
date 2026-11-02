@@ -108,7 +108,10 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
         const geometry = mjcfGeometry(solid.shape, solid.size);
         // Colliders other than its own shape, each a geom of its own (its own shape's geom is its first collider).
         if (solid.colliders && solid.touches !== false) {
-            collidersOf(solid).forEach((collider, index) => write(depth + 1, `<geom name="${id}c${index + 1}" type="${collider.kind}" size="${formatVector(collider.size)}" pos="${formatVector(collider.position)}" quat="${formatVector(collider.rotation)}" mass="0" contype="0" conaffinity="0"/>`));
+            collidersOf(solid).forEach((collider, index) => {
+                const shape = collider.kind === 'mesh' ? `mesh="${meshName(collider.hull)}"` : `size="${formatVector(collider.size)}"`;
+                write(depth + 1, `<geom name="${id}c${index + 1}" type="${collider.kind}" ${shape} pos="${formatVector(collider.position)}" quat="${formatVector(collider.rotation)}" mass="0" contype="0" conaffinity="0"/>`);
+            });
         }
         if (solid.shape === 'mesh') {
             // An imported solid: its inertia as it is, along its own (principal) axes, and the box about it to show.
@@ -121,6 +124,9 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
         write(depth, '</body>');
     };
 
+    // Each mesh collider's hull, an asset given by its corners (written after the bodies, placed before them).
+    const meshes = new Map();
+    const meshName = (hull) => { if (!meshes.has(hull)) meshes.set(hull, `hull${meshes.size + 1}`); return meshes.get(hull); };
     write(0, `<mujoco model="${escape(drawing.name || 'Robot')}">`);
     // Angles in radians, as the drawing has them: MuJoCo reads a joint's range in degrees otherwise.
     write(1, '<compiler angle="radian"/>');
@@ -134,6 +140,10 @@ export function writeMjcf(drawing, { timestep = mujocoTimestep } = {}) {
         body(root, groundId, 2, true);
     }
     write(1, '</worldbody>');
+    if (meshes.size) {
+        const at = lines.findIndex((line) => line.trim() === '<worldbody>');
+        lines.splice(at, 0, '  <asset>', ...[...meshes].map(([hull, name]) => `    <mesh name="${name}" vertex="${hull.points.map(formatVector).join('  ')}"/>`), '  </asset>');
+    }
 
     // The pairs that touch, each with the friction, softness and margin MuJoCo would mix from its two geoms.
     const touching = contactPairs(drawing, built).pairs;

@@ -26,8 +26,12 @@ import { simulate } from './newtonEuler.mjs';
 
 const directory = await mkdtemp(join(tmpdir(), 'robotics-contact-'));
 const withoutMujoco = await mujocoMissing();
-const fixture = async (name) => {
-    const model = readModel({ [name]: await readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', name), 'utf8') }, name);
+// A model of tests/fixtures/contact, with the meshes it names (from there too).
+const fixture = async (name, meshes = []) => {
+    const read = (path) => readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', path), 'utf8');
+    const files = { [name]: await read(name) };
+    for (const mesh of meshes) files[mesh] = await read(mesh);
+    const model = readModel(files, name);
     return importModel(model, model.bodies.map((body) => bodyLook(model, body)), { name }).drawing;
 };
 const largestDifference = (values, reference) => Math.max(...values.map((value, index) => Math.abs(value - reference[index])));
@@ -211,5 +215,37 @@ test('cylinders against capsules, cylinders and boxes move as the reference has 
         // The rod touches the log at one point at a time, where the two find the same contact; on a flat face MuJoCo
         // places its contacts by rules of its own, a fraction of a millimetre from these.
         assert.ok(difference < (name === 'Rod' ? 1e-8 : 1e-3), `${name} is ${difference} m from where MuJoCo has it.`);
+    }
+});
+
+test('meshes against the floor, a sphere and a capsule move as the reference and MuJoCo have them: a pebble, a box, a ramp', async () => {
+    const path = join(roboticsRoot, 'tests', 'fixtures', 'contact', 'meshes.xml');
+    const drawing = await fixture('meshes.xml', ['meshes/rock.obj', 'meshes/crate.obj', 'meshes/wedge.obj']);
+    assert.deepEqual(checkDrawing(drawing).errors, []);
+    const { pairs, unsupported } = contactPairs(drawing);
+    assert.deepEqual(unsupported, []);
+    assert.deepEqual(pairs.map(({ name, slots }) => `${name} ${slots}`), ['Floor and Rock 4', 'Floor and Crate 4', 'Floor and Ball 1', 'Floor and Pin 2', 'Ball and Ramp 1', 'Pin and Ramp 2']);
+    const run = await runDocument(directory, 'meshes', buildModel(drawing, { timeStep: 0.001, runTime: 1 }).document);
+    const reference = simulate(drawing, run.times);
+    const solids = ['Rock', 'Crate', 'Ball', 'Pin'];
+    for (const name of solids) {
+        const solid = solidNamed(drawing, name);
+        const difference = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${name}.${symbol}`), reference[solid.id].map((place) => place[axis]))));
+        assert.ok(difference < 1e-8, `${name} differs from the reference by ${difference} m.`);
+    }
+    // The pebble and the box come to rest on the floor, the ball rolls down the ramp onto the floor, and the pin lies on
+    // the ramp's top.
+    const end = (name, symbol) => run.series(`${name}.${symbol}`).at(-1);
+    assert.ok(Math.abs(end('Crate', 'z') - 0.015) < 0.001, 'The box should rest flat on the floor.');
+    assert.ok(end('Rock', 'z') < 0.035, 'The pebble should rest on the floor.');
+    assert.ok(end('Ball', 'x') < 0.22 && Math.abs(end('Ball', 'z') - 0.012) < 0.001, 'The ball should roll down the ramp onto the floor.');
+    assert.ok(Math.abs(end('Pin', 'z') - 0.066) < 0.001, 'The pin should lie on the ramp\'s top.');
+    if (withoutMujoco) return;
+    const mujoco = await runReference(directory, { mjcfPath: path, joints: [], controls: {}, centres: solids, times: run.times });
+    for (const name of solids) {
+        const difference = Math.max(...['x', 'y', 'z'].map((symbol, axis) => largestDifference(run.series(`${name}.${symbol}`), mujoco[name].map((place) => place[axis]))));
+        console.log(`meshes, ${name}: Konjugate and MuJoCo running the model's own file place it within ${difference.toExponential(2)} m.`);
+        // MuJoCo keeps a mesh's corners in single precision (a ten millionth of a metre here, the pebble landing hard).
+        assert.ok(difference < 1e-6, `${name} is ${difference} m from where MuJoCo has it.`);
     }
 });

@@ -29,7 +29,8 @@
 // Pure, no dependencies but frames.mjs, inertia.mjs and drawing.mjs.
 
 import { compose, rotate } from './frames.mjs';
-import { principal } from './inertia.mjs';
+import { hullOf } from './hull.mjs';
+import { meshInertia, principal } from './inertia.mjs';
 import { createDrawing, defaultDrive, defaultTendonDrive, groundId } from './drawing.mjs';
 
 const conjugate = ([w, x, y, z]) => [w, -x, -y, -z];
@@ -419,6 +420,17 @@ const surfaceOfGeom = (geom) => ({
     condim: geom.condim === 1 ? 1 : 3, priority: geom.priority, solmix: round(geom.solmix), contype: geom.contype, conaffinity: geom.conaffinity
 });
 
+// A mesh geom as a collider: its convex hull's corners and the mesh's centre (where MuJoCo puts its geom), in the
+// geom's frame; null where its mesh cannot be read or spans no volume.
+function meshCollider(model, geom) {
+    try {
+        const triangles = model.meshTriangles(geom.mesh);
+        return { points: hullOf(triangles.flat()).points.map(roundVector), centre: roundVector(meshInertia(triangles).centre) };
+    } catch {
+        return null;
+    }
+}
+
 function importContact(model, drawing, solidOf, leftOut) {
     const collision = model.collision ?? { world: [], pairs: [], excludes: [], contact: true, filterParent: true };
     const paired = new Set(collision.pairs.flatMap(({ geom1, geom2 }) => [geom1, geom2]));
@@ -438,11 +450,12 @@ function importContact(model, drawing, solidOf, leftOut) {
         const root = [...solidOf.values()].find((candidate) => candidate && candidate.solidId === entry.solidId && !candidate.merged);
         const solid = drawing.solids.find(({ id }) => id === entry.solidId);
         for (const geom of body.colliders.filter(touches)) {
-            if (!shapeSize[geom.type]) { (geom.type === 'mesh' ? meshes : others).push(`${body.name}${geom.name ? ` (${geom.name})` : ''}`); continue; }
+            const mesh = geom.type === 'mesh' ? meshCollider(model, geom) : null;
+            if (!shapeSize[geom.type] && !mesh) { (geom.type === 'mesh' ? meshes : others).push(`${body.name}${geom.name ? ` (${geom.name})` : ''}`); continue; }
             if (geom.condim !== 1 && geom.condim !== 3) condims.add(geom.condim);
             const inSolid = compose(root.bodyInSolid, compose(entry.inBody, geom.frame));
             (solid.colliders ??= []).push({
-                shape: geom.type, size: shapeSize[geom.type](geom.size), position: roundVector(inSolid.position), rotation: roundVector(inSolid.quaternion),
+                shape: geom.type, ...(mesh ?? { size: shapeSize[geom.type](geom.size) }), position: roundVector(inSolid.position), rotation: roundVector(inSolid.quaternion),
                 surface: surfaceOfGeom(geom), ...(geom.name ? { name: geom.name } : {})
             });
             if (geom.name) geomPlaces.set(geom.name, { solid: solid.id, index: solid.colliders.length - 1 });
@@ -461,7 +474,7 @@ function importContact(model, drawing, solidOf, leftOut) {
         others.push(`the world's ${geom.type}${geom.name ? ` ${geom.name}` : ''}${geom.type === 'plane' ? ', not through the origin facing up' : ''}`);
     }
     const anything = drawing.solids.some(({ colliders }) => colliders?.length) || floor;
-    if (meshes.length) leftOut.push(`the collision meshes of ${meshes.join(', ')}: a mesh does not touch anything yet`);
+    if (meshes.length) leftOut.push(`the collision meshes of ${meshes.join(', ')}, which could not be read as solids`);
     if (others.length) leftOut.push(`the collision shapes ${others.join(', ')}, which do not touch anything yet`);
     if (condims.size) leftOut.push(`contact of condim ${[...condims].join(' and ')} (torsional or rolling friction): taken as condim 3, sliding friction alone`);
     if (!anything) return;

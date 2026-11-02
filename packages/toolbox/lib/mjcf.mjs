@@ -249,7 +249,7 @@ export function readModel(files, main) {
     const worldColliders = [];
     // A geom as MuJoCo would collide it, with MuJoCo's defaults where neither it nor its class says.
     const colliderOf = (child, get, type, size, frame) => ({
-        name: child.attributes.name ?? null, type, size, frame,
+        name: child.attributes.name ?? null, type, size, frame, mesh: type === 'mesh' ? get('mesh') ?? null : null,
         contype: Number(get('contype') ?? 1), conaffinity: Number(get('conaffinity') ?? 1), condim: Number(get('condim') ?? 3),
         priority: Number(get('priority') ?? 0), solmix: Number(get('solmix') ?? 1),
         friction: [1, 0.005, 0.0001].map((value, index) => numbers(get('friction') ?? '1 0.005 0.0001')[index] ?? value),

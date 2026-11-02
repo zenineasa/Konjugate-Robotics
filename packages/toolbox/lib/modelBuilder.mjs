@@ -2035,7 +2035,7 @@ function contactRelationship(drawing, pair, nodes, bodies, R, id, timeStep, mode
         const local = rotationMatrix(entry.collider.rotation).map((row) => row.map(round));
         const pos = defineAll(`${prefix}g`, E.matrixVector(rotation, entry.collider.position.map(round)).map((value, axis) => E.add(centre[axis], value)));
         const mat = defineAll(`${prefix}m`, E.matrixMatrix(rotation, local).flat());
-        return { node, role, prefix, ground, velocity, acceleration, sign: index === 0 ? 1 : -1, shape: { kind: entry.collider.kind, size: entry.collider.size.map(round), pos, mat } };
+        return { node, role, prefix, ground, velocity, acceleration, sign: index === 0 ? 1 : -1, shape: { kind: entry.collider.kind, size: entry.collider.size.map(round), pos, mat, ...(entry.collider.hull ? { hull: entry.collider.hull, centre: entry.collider.centre } : {}) } };
     });
     const [first, second] = ends;
     const algebra = expressionAlgebra(define);

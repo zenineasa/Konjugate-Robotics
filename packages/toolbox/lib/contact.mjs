@@ -23,6 +23,7 @@
 
 import { collides, contactSlots, geomOrder, pairKey } from './collision.mjs';
 import { groundId, solidById, structure, treeOrder } from './drawing.mjs';
+import { hullOf } from './hull.mjs';
 import { mjcfGeometry } from './shapes.mjs';
 
 export const defaultSurface = Object.freeze({
@@ -37,13 +38,23 @@ export const defaultContact = () => ({ floor: true, automatic: true, pairs: [], 
 export const surfaceOf = (owner) => ({ ...defaultSurface, ...(owner?.surface ?? {}) });
 export const floorSurfaceOf = (drawing) => ({ ...defaultSurface, ...(contactOf(drawing)?.floorSurface ?? {}) });
 
+// A mesh collider's hull, worked out once for its corners.
+const hulls = new Map();
+const hullFor = (points) => {
+    const key = JSON.stringify(points);
+    if (!hulls.has(key)) hulls.set(key, hullOf(points));
+    return hulls.get(key);
+};
+
 // A solid's colliders, each { kind (MuJoCo's), size (MuJoCo's), position and rotation in the solid's frame, surface
-// (its own, over the solid's), name }.
+// (its own, over the solid's), name }; a mesh's also its hull (lib/hull.mjs, from its corners, `points`) and centre
+// (the mesh's own, where MuJoCo puts its geom), in its frame.
 export function collidersOf(solid) {
     if (solid.touches === false) return [];
     if (solid.colliders) {
-        return solid.colliders.map(({ shape, size, position = [0, 0, 0], rotation = [1, 0, 0, 0], surface = {}, name = null }) => ({
-            kind: shape, size: mjcfGeometry(shape, size).size, position, rotation, surface: { ...surfaceOf(solid), ...surface }, name
+        return solid.colliders.map(({ shape, size, points, centre = [0, 0, 0], position = [0, 0, 0], rotation = [1, 0, 0, 0], surface = {}, name = null }) => ({
+            kind: shape, size: shape === 'mesh' ? [] : mjcfGeometry(shape, size).size, position, rotation, surface: { ...surfaceOf(solid), ...surface }, name,
+            ...(shape === 'mesh' ? { hull: hullFor(points), centre } : {})
         }));
     }
     if (solid.shape === 'mesh') return [];

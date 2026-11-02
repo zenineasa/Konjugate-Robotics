@@ -219,6 +219,28 @@ test('a box on the floor and spheres against it are equations of a size that doe
     }
 });
 
+test('an imported model\'s collision meshes touch as their convex hulls, against the floor, spheres and capsules', async () => {
+    const read = (path) => readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', path), 'utf8');
+    const files = { 'meshes.xml': await read('meshes.xml') };
+    for (const mesh of ['rock', 'crate', 'wedge']) files[`meshes/${mesh}.obj`] = await read(`meshes/${mesh}.obj`);
+    const model = readModel(files, 'meshes.xml');
+    const { drawing, report } = importModel(model, model.bodies.map((body) => bodyLook(model, body)), { name: 'Meshes' });
+    assert.deepEqual(report.leftOut, []);
+    // Each mesh a collider of its hull's corners: the pebble's thirty corners less three inside, the box's and ramp's own.
+    const corners = (name) => collidersOf(drawing.solids.find((solid) => solid.name === name))[0].hull.points.length;
+    assert.deepEqual(['Rock', 'Crate', 'Ramp'].map(corners), [27, 8, 10]);
+    const { pairs, unsupported } = contactPairs(drawing);
+    assert.deepEqual(unsupported, []);
+    assert.deepEqual(pairs.map(({ name, slots }) => `${name} ${slots}`), ['Floor and Rock 4', 'Floor and Crate 4', 'Floor and Ball 1', 'Floor and Pin 2', 'Ball and Ramp 1', 'Pin and Ramp 2']);
+    // Written back: each hull a mesh of its corners, its geom naming it.
+    const mjcf = writeMjcf(drawing);
+    assert.match(mjcf, /<asset>\n    <mesh name="hull1" vertex="[^"]+"\/>/);
+    assert.match(mjcf, /<geom name="[^"]+" type="mesh" mesh="hull3"/);
+    // A mesh against a box, a cylinder or another mesh does not touch yet, and says so.
+    const touchingAll = updateContact(drawing, { pairs: [[named(drawing, 'Rock'), named(drawing, 'Crate')]] });
+    assert.deepEqual(contactPairs(touchingAll).unsupported.map(({ kinds }) => kinds), [['mesh', 'mesh']]);
+});
+
 test('an imported model touches as MuJoCo has it: its collision geoms, contype and conaffinity, priority, condim, a pair and an exclusion', async () => {
     const xml = await readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', 'collision.xml'), 'utf8');
     const model = readModel({ 'collision.xml': xml }, 'collision.xml');

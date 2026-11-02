@@ -3,8 +3,9 @@
 // Where two shapes touch (lib/collision.mjs), against MuJoCo 3.16's own contacts for the same shapes where MuJoCo put
 // them (tests/fixtures/contact/mujocoContacts.json: random poses, and poses square to each other, for each pair the
 // toolbox collides as MuJoCo's own functions do; mujocoConvexContacts.json: a cylinder against a capsule, a cylinder
-// or a box, which MuJoCo finds by its convex search, run to a tolerance it reaches); and the same functions written as
-// equations (lib/modelBuilder.mjs's expressionAlgebra) giving the same numbers.
+// or a box, which MuJoCo finds by its convex search, run to a tolerance it reaches; mujocoMeshContacts.json: random
+// convex meshes against the floor, a sphere and a capsule); and the same functions written as equations
+// (lib/modelBuilder.mjs's expressionAlgebra) giving the same numbers.
 
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -12,12 +13,16 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { collide, contactSlots, numbers, pairKey } from '../../packages/toolbox/lib/collision.mjs';
 import * as E from '../../packages/toolbox/lib/expressions.mjs';
+import { hullOf } from '../../packages/toolbox/lib/hull.mjs';
 import { expressionAlgebra } from '../../packages/toolbox/lib/modelBuilder.mjs';
 import { roboticsRoot } from '../../scripts/konjugatePaths.mjs';
 
 const { cases } = JSON.parse(await readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', 'mujocoContacts.json'), 'utf8'));
 const { cases: convexCases } = JSON.parse(await readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', 'mujocoConvexContacts.json'), 'utf8'));
-const convexPairs = ['capsule|cylinder', 'cylinder|box', 'cylinder|cylinder'];
+const { cases: meshRecords } = JSON.parse(await readFile(join(roboticsRoot, 'tests', 'fixtures', 'contact', 'mujocoMeshContacts.json'), 'utf8'));
+// Each mesh with its hull, from the corners MuJoCo keeps.
+const meshCases = meshRecords.map(({ first, second, contacts }) => ({ first, second: { ...second, hull: hullOf(second.points) }, contacts }));
+const convexPairs = ['capsule|cylinder', 'cylinder|box', 'cylinder|cylinder', 'plane|mesh', 'sphere|mesh', 'capsule|mesh'];
 const differ = (a, b) => Math.max(...a.map((value, index) => Math.abs(value - b[index])));
 
 test('each pair\'s contacts are MuJoCo\'s: as many, each at its distance, point and frame', () => {
@@ -96,7 +101,7 @@ test('flat on a face: a cylinder standing on a box, lying across one, under a li
 });
 
 test('written as equations, each pair\'s functions give the numbers they give', () => {
-    for (const { first, second } of [...cases.filter((_, index) => index % 3 === 0), ...convexCases.filter((_, index) => index % 6 === 0)]) {
+    for (const { first, second } of [...cases.filter((_, index) => index % 3 === 0), ...convexCases.filter((_, index) => index % 6 === 0), ...meshCases.filter((_, index) => index % 10 === 0)]) {
         const definitions = new Map();
         const algebra = expressionAlgebra((symbol, expression) => {
             if (typeof expression === 'number') return expression;
@@ -107,7 +112,7 @@ test('written as equations, each pair\'s functions give the numbers they give', 
         // Each shape's pose given as symbols, as the model's states are.
         const values = {};
         const symbolic = (shape, tag) => ({
-            kind: shape.kind, size: shape.size,
+            kind: shape.kind, size: shape.size, hull: shape.hull, centre: shape.centre,
             pos: shape.pos.map((value, i) => { values[`${tag}p${i}`] = value; return `${tag}p${i}`; }),
             mat: shape.mat.map((value, i) => { values[`${tag}m${i}`] = value; return `${tag}m${i}`; })
         });
@@ -131,6 +136,61 @@ test('written as equations, each pair\'s functions give the numbers they give', 
     }
 });
 
+// How far a mesh's corners, a sphere or a capsule reach along unit n.
+const meshReach = (shape, n) => {
+    if (shape.kind === 'sphere') return dot(shape.pos, n) + shape.size[0];
+    if (shape.kind !== 'mesh') return reach(shape, n);
+    return Math.max(...shape.hull.points.map((p) => dot(n, [0, 1, 2].map((i) => shape.pos[i] + dot([shape.mat[3 * i], shape.mat[3 * i + 1], shape.mat[3 * i + 2]], p)))));
+};
+const meshGap = (first, second, n) => -(meshReach(first, n) + meshReach(second, n.map((value) => -value)));
+
+test('a mesh against the floor: MuJoCo\'s contacts, its deepest corner and its face\'s corners within the margin', () => {
+    let several = 0;
+    for (const { first, second, contacts } of meshCases.filter(({ first }) => first.kind === 'plane')) {
+        const found = collide(numbers, first, second, 0).filter(({ active }) => active);
+        assert.equal(found.length, contacts.length, `${found.length} contacts, MuJoCo ${contacts.length}`);
+        for (const contact of contacts) {
+            const match = found.reduce((best, slot) => (differ(slot.pos, contact.pos) < differ(best.pos, contact.pos) ? slot : best));
+            // MuJoCo keeps a mesh's corners in single precision, these numbers its own.
+            const error = Math.max(differ(match.pos, contact.pos), Math.abs(match.dist - contact.dist), differ(match.frame.slice(0, 3), contact.frame.slice(0, 3)));
+            assert.ok(error < 1e-9, `differs from MuJoCo by ${error}`);
+        }
+        if (contacts.length > 1) several += 1;
+    }
+    assert.ok(several >= 15, `${several} cases with several contacts`);
+});
+
+test('a sphere or a capsule against a mesh: the deepest contact exactly, as MuJoCo\'s convex search closes on it', () => {
+    let single = 0;
+    let flat = 0;
+    for (const { first, second, contacts } of meshCases.filter(({ first }) => first.kind !== 'plane')) {
+        const touching = collide(numbers, first, second, 0).filter(({ active }) => active);
+        assert.equal(touching.length > 0, contacts.length > 0, `${first.kind}: touching as MuJoCo has it`);
+        if (!touching.length) continue;
+        const deepest = touching.reduce((best, slot) => (slot.dist < best.dist ? slot : best));
+        // The gap along the deepest contact's normal is its distance, and along MuJoCo's normals no wider.
+        assert.ok(Math.abs(meshGap(first, second, deepest.frame.slice(0, 3)) - deepest.dist) < 1e-12, `${first.kind}: the distance is the gap along the normal`);
+        for (const { frame } of contacts) assert.ok(meshGap(first, second, frame.slice(0, 3)) <= deepest.dist + 1e-12, `${first.kind}: MuJoCo found a wider gap`);
+        // Where MuJoCo gives one contact, whose distance is the gap along its normal (its search closed): the same.
+        if (contacts.length === 1 && touching.length === 1 && Math.abs(meshGap(first, second, contacts[0].frame.slice(0, 3)) - contacts[0].dist) < 1e-9) {
+            assert.ok(Math.abs(deepest.dist - contacts[0].dist) < 1e-9, `${first.kind}: distance ${deepest.dist}, MuJoCo ${contacts[0].dist}`);
+            assert.ok(differ(deepest.frame.slice(0, 3), contacts[0].frame.slice(0, 3)) < 1e-6, `${first.kind}: normal differs from MuJoCo's`);
+            assert.ok(differ(deepest.pos, contacts[0].pos) < 1e-7, `${first.kind}: point differs from MuJoCo's`);
+            single += 1;
+        }
+        // A capsule lying along a face: two contacts, each within its own depth, at the ends of what lies over the face.
+        if (first.kind === 'capsule' && touching.length === 2 && contacts.length === 2) {
+            for (const contact of contacts) {
+                const match = touching.reduce((best, slot) => (differ(slot.pos, contact.pos) < differ(best.pos, contact.pos) ? slot : best));
+                assert.ok(differ(match.pos, contact.pos) < 1e-3, 'a point lying along the face is MuJoCo\'s, to a millimetre');
+            }
+            flat += 1;
+        }
+    }
+    assert.ok(single >= 40, `${single} single contacts compared`);
+    assert.ok(flat >= 5, `${flat} capsules lying along a face`);
+});
+
 test('two equal boxes stacked, the top one turned an eighth of a turn, touch at the eight corners of their overlap', () => {
     const turned = [Math.SQRT1_2, -Math.SQRT1_2, 0, Math.SQRT1_2, Math.SQRT1_2, 0, 0, 0, 1];
     const lower = { kind: 'box', size: [0.05, 0.05, 0.05], pos: [0, 0, 0], mat: [1, 0, 0, 0, 1, 0, 0, 0, 1] };
@@ -146,4 +206,26 @@ test('two equal boxes stacked, the top one turned an eighth of a turn, touch at 
         assert.ok(Math.abs(match.pos[2] - 0.0495) < 1e-12 && Math.abs(match.dist + 0.001) < 1e-12, 'midway through the overlap, 1 mm deep');
         assert.deepEqual(match.frame.slice(0, 3).map((value) => Math.round(value * 1e12) / 1e12), [0, 0, 1]);
     }
+});
+
+test('a mesh\'s hull: its corners alone (not points on a face or an edge), faces outward, and MuJoCo\'s polygons', () => {
+    // A box's corners with points on its faces, along its edges and inside: its eight corners, six square polygons.
+    const box = [];
+    for (const x of [-1, 0, 1]) for (const y of [-1, 0.5, 1]) for (const z of [-1, 0.25, 1]) box.push([0.03 * x, 0.02 * y, 0.01 * z]);
+    const hull = hullOf(box);
+    assert.equal(hull.points.length, 8);
+    assert.equal(hull.triangles.length, 12);
+    assert.deepEqual(hull.polygons.map(({ vertices }) => vertices.length), [4, 4, 4, 4, 4, 4]);
+    // Random points: every one on or inside every face, each face outward (the centre inside), V - E + F = 2.
+    let seed = 5;
+    const random = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647 - 0.5; };
+    const points = Array.from({ length: 300 }, () => [random(), random(), random()].map((value) => value * 0.1));
+    const cloud = hullOf(points);
+    const centre = [0, 1, 2].map((axis) => cloud.points.reduce((sum, p) => sum + p[axis], 0) / cloud.points.length);
+    cloud.normals.forEach((n, t) => {
+        assert.ok(dot(n, centre) < cloud.offsets[t], 'each face faces outward');
+        for (const p of points) assert.ok(dot(n, p) <= cloud.offsets[t] + 1e-12, 'every point lies within');
+    });
+    assert.equal(cloud.points.length - cloud.edges.length + cloud.triangles.length, 2);
+    assert.throws(() => hullOf([[0, 0, 0], [1, 0, 0], [0, 1, 0], [1, 1, 0]]), /not all in one plane/);
 });

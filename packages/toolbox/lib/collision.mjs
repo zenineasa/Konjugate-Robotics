@@ -4,11 +4,12 @@
 // mju_makeFrame), for each pair of shapes the toolbox collides: a plane (the floor) with a sphere, a capsule, a
 // cylinder or a box; a sphere with a sphere, a capsule, a cylinder or a box; a capsule with a capsule or a box; a box
 // with a box. A cylinder against a capsule, a cylinder or a box, which MuJoCo finds by its iterative convex search, is
-// found here exactly (see "the largest gap" below), with points of its own where it lies flat. Each function gives a fixed
-// number of contact slots, as many as the pair can have at once, each { active, dist, pos, frame }: whether MuJoCo
-// would have that contact now (in the order its function makes them), how far apart the shapes are there (negative
-// when they overlap), the point (midway through the overlap) and the frame (the normal, from the first shape to the
-// second, then two tangents).
+// found here exactly (see "the largest gap" below), with points of its own where it lies flat; and a mesh, as its
+// convex hull, against the floor (MuJoCo's own rule) and against a sphere or a capsule (exactly, by the largest gap).
+// Each function gives a fixed number of contact slots, as many as the pair can have at once, each { active, dist, pos,
+// frame }: whether MuJoCo would have that contact now (in the order its function makes them), how far apart the
+// shapes are there (negative when they overlap), the point (midway through the overlap) and the frame (the normal,
+// from the first shape to the second, then two tangents).
 //
 // Written once over an algebra, so the model builder writes them as equations (lib/modelBuilder.mjs's contact
 // relationships) and the tests work them out in numbers, both from the same steps. An algebra has: num, add, sub, mul,
@@ -16,9 +17,9 @@
 // a, b); and name(tag, value), which an algebra of equations makes a named definition. Where MuJoCo divides only in
 // the branch it takes, the other branch here divides by something safe, so equations evaluated whole stay finite.
 //
-// A shape: { kind: 'plane' | 'sphere' | 'capsule' | 'cylinder' | 'box', pos [3], mat [9] (rows, as MuJoCo's xmat),
-// size [3] (MuJoCo's: a sphere's radius; a capsule's or a cylinder's radius and half length; a box's half sizes) }.
-// Pure, no dependencies.
+// A shape: { kind: 'plane' | 'sphere' | 'capsule' | 'cylinder' | 'box' | 'mesh', pos [3], mat [9] (rows, as MuJoCo's
+// xmat), size [3] (MuJoCo's: a sphere's radius; a capsule's or a cylinder's radius and half length; a box's half
+// sizes) }; a mesh's also hull (lib/hull.mjs's, in its frame) and centre. Pure, no dependencies.
 
 export const minimumValue = 1e-15; // MuJoCo's mjMINVAL
 
@@ -49,10 +50,11 @@ export const numbers = Object.freeze({
 
 // The pairs collided, by their kinds in MuJoCo's order (plane, sphere, capsule, cylinder, box), and how many contact
 // slots each has.
-export const geomOrder = ['plane', 'sphere', 'capsule', 'cylinder', 'box'];
+export const geomOrder = ['plane', 'sphere', 'capsule', 'cylinder', 'box', 'mesh'];
 export const contactSlots = Object.freeze({
     'plane|sphere': 1, 'plane|capsule': 2, 'plane|cylinder': 4, 'plane|box': 4,
-    'sphere|sphere': 1, 'sphere|capsule': 1, 'sphere|cylinder': 1, 'sphere|box': 1, 'capsule|capsule': 2, 'capsule|cylinder': 2, 'capsule|box': 2, 'cylinder|cylinder': 4, 'cylinder|box': 4, 'box|box': 8
+    'sphere|sphere': 1, 'sphere|capsule': 1, 'sphere|cylinder': 1, 'sphere|box': 1, 'capsule|capsule': 2, 'capsule|cylinder': 2, 'capsule|box': 2, 'cylinder|cylinder': 4, 'cylinder|box': 4, 'box|box': 8,
+    'plane|mesh': 4, 'sphere|mesh': 1, 'capsule|mesh': 2
 });
 export const pairKey = (first, second) => `${first}|${second}`;
 export const collides = (first, second) => pairKey(...[first, second].sort((a, b) => geomOrder.indexOf(a) - geomOrder.indexOf(b))) in contactSlots;
@@ -67,12 +69,13 @@ export function collide(A, first, second, margin, { reach = null } = {}) {
         'plane|sphere': planeSphere, 'plane|capsule': planeCapsule, 'plane|cylinder': planeCylinder, 'plane|box': planeBox,
         'sphere|sphere': sphereSphere, 'sphere|capsule': sphereCapsule, 'sphere|cylinder': sphereCylinder, 'sphere|box': sphereBox,
         'capsule|capsule': capsuleCapsule, 'capsule|cylinder': capsuleCylinder,
-        'capsule|box': capsuleBox, 'cylinder|cylinder': cylinderCylinder, 'cylinder|box': cylinderBox, 'box|box': boxBox
+        'capsule|box': capsuleBox, 'cylinder|cylinder': cylinderCylinder, 'cylinder|box': cylinderBox, 'box|box': boxBox,
+        'plane|mesh': planeMesh, 'sphere|mesh': sphereMesh, 'capsule|mesh': capsuleMesh
     }[key];
     if (!found) throw new Error(`MuJoCo's ${first.kind} and ${second.kind} collision is not built yet.`);
     const contacts = () => found(A, first, second, A.num(margin)).map((slot, index) => ({ ...slot, frame: makeFrame(A, slot.frame, `f${index + 1}`) }));
     if (reach === null || first.kind === 'plane') return contacts();
-    const radius = (shape) => ({ sphere: shape.size[0], capsule: shape.size[0] + shape.size[1], cylinder: Math.hypot(shape.size[0], shape.size[1]), box: Math.hypot(...shape.size) })[shape.kind];
+    const radius = (shape) => ({ sphere: shape.size[0], capsule: shape.size[0] + shape.size[1], cylinder: Math.hypot(shape.size[0], shape.size[1]), box: Math.hypot(...shape.size), mesh: shape.hull?.radius })[shape.kind];
     const apart = radius(first) + radius(second) + reach;
     const between = v3.sub(A, second.pos, first.pos);
     const near = A.name('near', A.le(v3.dot(A, between, between), apart * apart));
@@ -1355,3 +1358,320 @@ function cylinderCylinder(A, first, second, margin) {
     return flatOrDeepest(A, isCap, points, deepest, dist, margin, 'yyz');
 }
 
+
+// ---- meshes: the floor, spheres and capsules against a mesh's convex hull ----------------------------------------
+// MuJoCo collides a mesh as its convex hull (lib/hull.mjs: its corners, triangles, edges and polygons, in the mesh's
+// own frame, given with the shape as `hull`, and `centre`, the mesh's centre in that frame). These work in that frame,
+// where the hull is numbers: the other shape is brought into it, and what is found is taken back out.
+//
+// A sphere or a capsule against the hull, exactly, by the largest gap (as above): every direction where the gap is
+// largest lies where one feature of the hull (a face, an edge or a corner) meets one of the other shape's (a ball, a
+// capsule's end or its whole segment), and for each such pair the direction is found in closed form, and kept only
+// where the hull's feature is indeed what reaches furthest along it (within its normal cone: a face's normal; between
+// the normals of an edge's two faces; away from each of a corner's neighbours). A kept direction's gap is exact, so no
+// more than the largest; and the largest is among them.
+
+// The sum of picks of values, only one of whose conditions holds (or none: 0), in named partial sums of 64.
+function pickOne(A, flags, values, tag) {
+    const terms = flags.map((flag, c) => A.pick(flag, values[c], A.num(0)));
+    if (terms.length <= 64) return A.add(...terms);
+    const parts = [];
+    for (let at = 0; at < terms.length; at += 64) parts.push(A.name(`${tag}${parts.length + 1}`, A.add(...terms.slice(at, at + 64))));
+    return A.add(...parts);
+}
+
+// Of `candidates` ({ value, valid, n, pos }), the one of largest value (the first within a nanometre of it):
+// { gap, chosen, n, pos }.
+function bestOf(A, candidates, tag) {
+    let gap = A.num(-1e30);
+    const better = candidates.map(({ value, valid }, c) => {
+        const flag = A.name(`${tag}q${c + 1}`, A.and(valid, A.gt(value, A.add(gap, 1e-9))));
+        gap = A.name(`${tag}m${c + 1}`, A.pick(flag, value, gap));
+        return flag;
+    });
+    // Chosen: better than all before it, and none after it better.
+    const later = [];
+    let none = A.always;
+    for (let c = candidates.length - 1; c >= 0; c--) {
+        later[c] = none;
+        none = c > 0 && (c % 64 === 0) ? A.name(`${tag}l${c}`, A.and(none, A.not(better[c]))) : A.and(none, A.not(better[c]));
+    }
+    const chosen = better.map((flag, c) => A.name(`${tag}k${c + 1}`, A.and(flag, later[c])));
+    return {
+        gap, chosen,
+        n: v3.name(A, `${tag}n`, [0, 1, 2].map((axis) => pickOne(A, chosen, candidates.map(({ n }) => n[axis]), `${tag}n${axis + 1}x`))),
+        pos: v3.name(A, `${tag}p`, [0, 1, 2].map((axis) => pickOne(A, chosen, candidates.map(({ pos }) => pos[axis]), `${tag}p${axis + 1}x`)))
+    };
+}
+
+const numberCross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const numberDot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const numberSub = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const numberUnit = (a) => { const l = Math.hypot(...a); return a.map((x) => x / l); };
+// A constant vector times an expression vector, and the like, kept short where a constant is 0.
+const cdot = (A, c, v) => {
+    const terms = [0, 1, 2].filter((i) => c[i] !== 0).map((i) => A.mul(c[i], v[i]));
+    return terms.length === 0 ? A.num(0) : terms.length === 1 ? terms[0] : A.add(...terms);
+};
+
+// What the collisions need of a hull, worked out once: each edge's direction, length and the two vectors whose dot
+// products with (x - its first corner) are both at least 0 where x is beyond it (within its normal cone); the edges
+// whose faces are not flat to each other; and, for each corner and each polygon about it, the polygon's other corners
+// MuJoCo adds against the floor (up to three, its largest quadrilateral from that corner).
+const prepared = new WeakMap();
+function prepare(hull) {
+    if (prepared.has(hull)) return prepared.get(hull);
+    const { points, normals } = hull;
+    const edges = hull.edges.filter(({ left, right }) => 1 - numberDot(normals[left], normals[right]) > 1e-12).map(({ a, b, left, right }) => {
+        const along = numberSub(points[b], points[a]);
+        const u = numberUnit(along);
+        const [nL, nR] = [normals[left], normals[right]];
+        // x - p_a, square to u, is α nL + β nR with α, β ≥ 0: β's sign is its dot with nL × u (over nR's), α's with nR × u.
+        const kL = numberCross(nL, u);
+        const kR = numberCross(nR, u);
+        const KL = kL.map((x) => x * Math.sign(numberDot(nR, kL)));
+        const KR = kR.map((x) => x * Math.sign(numberDot(nL, kR)));
+        return { a, b, u, KL, KR };
+    });
+    const area4 = (a, b, c, d) => Math.hypot(...numberCross(numberSub(points[a], points[c]), numberSub(points[b], points[d]))) / 2;
+    // MuJoCo's hull4f: from the anchor, the quadrilateral of largest area along the polygon's corners.
+    const quad = (polygon, anchor) => {
+        const n = polygon.length;
+        const at = polygon.indexOf(anchor);
+        let [b, c, d] = [(at + 1) % n, (at + 2) % n, (at + 3) % n];
+        if (n <= 4) return polygon.filter((_, i) => i !== at);
+        let best = area4(polygon[at], polygon[b], polygon[c], polygon[d]);
+        for (;;) {
+            const dn = (d + 1) % n;
+            let next = area4(polygon[at], polygon[b], polygon[c], polygon[dn]);
+            if (next <= best) break;
+            d = dn; best = next;
+            for (;;) { const cn = (c + 1) % n; next = area4(polygon[at], polygon[b], polygon[cn], polygon[d]); if (next <= best) break; c = cn; best = next; }
+            for (;;) { const bn = (b + 1) % n; next = area4(polygon[at], polygon[bn], polygon[c], polygon[d]); if (next <= best) break; b = bn; best = next; }
+        }
+        return [polygon[b], polygon[c], polygon[d]];
+    };
+    const floorSets = points.map((_, v) => hull.polygonsAround[v].map((p) => ({ polygon: p, others: quad(hull.polygons[p].vertices, v) })));
+    // Each polygon's edges as planes square to it (m · x ≤ o inside), for clipping a segment to it.
+    const polygonOf = hull.triangles.map(() => -1);
+    hull.polygons.forEach(({ vertices, normal }, p) => {
+        const set = new Set(vertices);
+        hull.triangles.forEach((triangle, t) => { if (polygonOf[t] < 0 && triangle.every((v) => set.has(v)) && 1 - numberDot(normals[t], normal) < 1e-6) polygonOf[t] = p; });
+    });
+    const sides = hull.polygons.map(({ vertices, normal }) => vertices.map((v, i) => {
+        const w = vertices[(i + 1) % vertices.length];
+        const m = numberUnit(numberCross(numberSub(points[w], points[v]), normal));
+        return { m, o: numberDot(m, points[v]) };
+    }));
+    const result = { edges, floorSets, polygonOf, sides };
+    prepared.set(hull, result);
+    return result;
+}
+
+// A local point or direction of the mesh, in the world.
+const meshPoint = (A, mesh, p) => v3.add(A, mesh.pos, v3.mat(A, mesh.mat, p));
+const meshDirection = (A, mesh, n) => v3.mat(A, mesh.mat, n);
+const constVector = (A, c) => c.map((x) => A.num(x));
+
+// mjc_PlaneConvex (MuJoCo 3.16): the hull's corner deepest below the plane, the first contact; then, of the polygons
+// about it, the one turned most against the plane's normal, cut to its largest quadrilateral from that corner, and each
+// of its other corners within the margin and below the mesh's centre (along the normal), in that order.
+function planeMesh(A, plane, mesh, margin) {
+    const { hull } = mesh;
+    const { floorSets } = prepare(hull);
+    const normal = column(plane.mat, 2);
+    const local = v3.name(A, 'mpl', v3.matT(A, mesh.mat, normal));
+    const height = A.name('mph', v3.dot(A, v3.sub(A, mesh.pos, plane.pos), normal));
+    const heights = hull.points.map((p, v) => A.name(`mpd${v + 1}`, A.add(height, cdot(A, p, local))));
+    // The deepest corner: the first of the lowest.
+    let low = A.num(1e30);
+    const lower = heights.map((h, v) => { const flag = A.name(`mpq${v + 1}`, A.lt(h, low)); low = A.name(`mpm${v + 1}`, A.pick(flag, h, low)); return flag; });
+    let none = A.always;
+    const deepest = [];
+    for (let v = hull.points.length - 1; v >= 0; v--) {
+        deepest[v] = A.name(`mpk${v + 1}`, A.and(lower[v], none));
+        none = (v % 64 === 0) ? A.name(`mpn${v}`, A.and(none, A.not(lower[v]))) : A.and(none, A.not(lower[v]));
+    }
+    const dist = low;
+    const corner = v3.name(A, 'mpc', [0, 1, 2].map((axis) => pickOne(A, deepest, hull.points.map((p) => p[axis]), `mpc${axis + 1}x`)));
+    const first = { active: A.le(dist, margin), dist, pos: v3.name(A, 'mpp', v3.sub(A, meshPoint(A, mesh, corner), v3.scale(A, normal, A.mul(0.5, dist)))) };
+    // Each polygon's turn against the normal; about each corner, the first most turned.
+    const turns = hull.polygons.map(({ normal: pn }, p) => A.name(`mpt${p + 1}`, cdot(A, pn, local)));
+    const pairs = [];
+    floorSets.forEach((sets, v) => {
+        let most = A.num(1);
+        const flags = sets.map(({ polygon }, j) => {
+            const flag = A.name(`mpf${v + 1}x${j + 1}`, A.lt(turns[polygon], most));
+            most = A.name(`mpw${v + 1}x${j + 1}`, A.pick(flag, turns[polygon], most));
+            return flag;
+        });
+        sets.forEach(({ others }, j) => pairs.push({ flag: A.name(`mps${v + 1}x${j + 1}`, A.and(deepest[v], flags[j], ...flags.slice(j + 1).map((later) => A.not(later)))), others }));
+    });
+    const centreHeight = cdot(A, mesh.centre, local);
+    const extra = [0, 1, 2].map((k) => {
+        const holders = pairs.filter(({ others }) => others.length > k);
+        const has = holders.length ? A.name(`mpe${k + 1}h`, A.or(...holders.map(({ flag }) => flag))) : A.never;
+        const p = v3.name(A, `mpe${k + 1}v`, [0, 1, 2].map((axis) => pickOne(A, holders.map(({ flag }) => flag), holders.map(({ others }) => hull.points[others[k]][axis]), `mpe${k + 1}v${axis + 1}x`)));
+        const along = A.name(`mpe${k + 1}l`, v3.dot(A, p, local));
+        const d = A.name(`mpe${k + 1}d`, A.add(height, along));
+        return { active: A.name(`mpe${k + 1}a`, A.and(has, first.active, A.le(d, margin), A.le(A.sub(along, centreHeight), 0))), dist: d, pos: v3.sub(A, meshPoint(A, mesh, p), v3.scale(A, normal, A.mul(0.5, d))) };
+    });
+    // Packed after the first, in order.
+    const before = [A.num(0)];
+    extra.forEach(({ active }, k) => before.push(A.name(`mpb${k + 1}`, A.add(before[k], A.pick(active, 1, 0)))));
+    const slots = [0, 1, 2].map((s) => {
+        const takers = extra.map(({ active }, k) => A.name(`mpg${s + 1}x${k + 1}`, A.and(active, A.gt(before[k], s - 0.5), A.lt(before[k], s + 0.5))));
+        return {
+            active: A.or(...takers),
+            dist: A.name(`mpg${s + 1}d`, pickOne(A, takers, extra.map(({ dist: d }) => d), `mpg${s + 1}dx`)),
+            pos: [0, 1, 2].map((axis) => A.name(`mpg${s + 1}p${axis + 1}`, pickOne(A, takers, extra.map(({ pos }) => pos[axis]), `mpg${s + 1}p${axis + 1}x`))),
+            frame: [...normal, ...noTangent(A)]
+        };
+    });
+    return [{ ...first, frame: [...normal, ...noTangent(A)] }, ...slots];
+}
+
+// The hull's candidates against a point `c` (local, an expression) of a shape reaching `r` beyond it, each { value
+// (the gap), valid, n (local, from the hull toward c), pos (local, midway) }: faces, edges and corners. `extra(n)`, a
+// further condition on a direction (a capsule's end reaching furthest along -n), `tag`, and whether to give faces.
+function pointCandidates(A, hull, edges, c, r, extra, tag, faces = true) {
+    const candidates = [];
+    if (faces) hull.normals.forEach((n, t) => {
+        const g = A.name(`${tag}f${t + 1}`, A.sub(cdot(A, n, c), hull.offsets[t]));
+        const nv = constVector(A, n);
+        candidates.push({ value: A.sub(g, r), valid: extra(nv), n: nv, pos: v3.sub(A, c, v3.scale(A, nv, A.mul(0.5, A.add(g, r)))) });
+    });
+    edges.forEach(({ a, u, KL, KR }, e) => {
+        const w = v3.name(A, `${tag}e${e + 1}w`, v3.sub(A, c, constVector(A, hull.points[a])));
+        const t = A.name(`${tag}e${e + 1}t`, cdot(A, u, w));
+        const across = v3.sub(A, w, v3.scale(A, constVector(A, u), t));
+        const length = A.name(`${tag}e${e + 1}l`, A.sqrt(A.max(A.sub(v3.dot(A, w, w), A.mul(t, t)), 0)));
+        const safe = A.max(length, 1e-300);
+        const n = v3.name(A, `${tag}e${e + 1}n`, across.map((x) => A.div(x, safe)));
+        const cone = A.and(A.ge(cdot(A, KL, w), 0), A.ge(cdot(A, KR, w), 0), A.gt(length, 1e-15));
+        candidates.push({ value: A.sub(length, r), valid: A.and(cone, extra(n)), n, pos: v3.add(A, v3.add(A, constVector(A, hull.points[a]), v3.scale(A, constVector(A, u), t)), v3.scale(A, n, A.mul(0.5, A.sub(length, r)))) });
+    });
+    hull.points.forEach((p, v) => {
+        const w = v3.name(A, `${tag}v${v + 1}w`, v3.sub(A, c, constVector(A, p)));
+        const length = A.name(`${tag}v${v + 1}l`, A.sqrt(v3.dot(A, w, w)));
+        const safe = A.max(length, 1e-300);
+        const n = v3.name(A, `${tag}v${v + 1}n`, w.map((x) => A.div(x, safe)));
+        const cone = A.and(A.gt(length, 1e-15), ...hull.neighbours[v].map((q) => A.le(cdot(A, numberSub(hull.points[q], p), w), 0)));
+        candidates.push({ value: A.sub(length, r), valid: A.and(cone, extra(n)), n, pos: v3.add(A, constVector(A, p), v3.scale(A, n, A.mul(0.5, A.sub(length, r)))) });
+    });
+    return candidates;
+}
+
+// A sphere against a mesh: one contact, exactly (MuJoCo's convex search, to its tolerance).
+function sphereMesh(A, sphere, mesh, margin) {
+    const { hull } = mesh;
+    const c = v3.name(A, 'msc', v3.matT(A, mesh.mat, v3.sub(A, sphere.pos, mesh.pos)));
+    const best = bestOf(A, pointCandidates(A, hull, prepare(hull).edges, c, sphere.size[0], () => A.always, 'ms'), 'msb');
+    const dist = A.name('msdist', best.gap);
+    return [{ active: A.le(dist, margin), dist, pos: meshPoint(A, mesh, best.pos), frame: [...v3.scale(A, meshDirection(A, mesh, best.n), -1), ...noTangent(A)] }];
+}
+
+// A capsule against a mesh: the deepest contact, exactly; and where it lies along a face of the hull (its axis within
+// 2.6 degrees of the face's plane), its segment cut to the face's polygon, a contact at each end of what remains, as
+// MuJoCo gives two contacts there (where it gives two).
+function capsuleMesh(A, capsule, mesh, margin) {
+    const { hull } = mesh;
+    const { edges, polygonOf, sides } = prepare(hull);
+    const r = capsule.size[0];
+    const L = capsule.size[1];
+    const c = v3.name(A, 'mcc', v3.matT(A, mesh.mat, v3.sub(A, capsule.pos, mesh.pos)));
+    const a = v3.name(A, 'mca', v3.matT(A, mesh.mat, column(capsule.mat, 2)));
+    const ends = [-1, 1].map((sign, k) => v3.name(A, `mce${k}`, v3.add(A, c, v3.scale(A, a, sign * L))));
+    const candidates = [];
+    // Faces: the end reaching further along -n.
+    hull.normals.forEach((n, t) => {
+        const heights = ends.map((end) => cdot(A, n, end));
+        const nearer = A.name(`mcf${t + 1}k`, A.le(heights[0], heights[1]));
+        const g = A.name(`mcf${t + 1}`, A.sub(A.min(heights[0], heights[1]), hull.offsets[t]));
+        const nv = constVector(A, n);
+        const end = v3.pick(A, nearer, ends[0], ends[1]);
+        candidates.push({ value: A.sub(g, r), valid: A.always, n: nv, pos: v3.sub(A, end, v3.scale(A, nv, A.mul(0.5, A.add(g, r)))) });
+    });
+    const faceCount = candidates.length;
+    // Each end against the edges and corners, where it is the end reaching further along -n.
+    ends.forEach((end, k) => {
+        const toward = v3.sub(A, ends[1 - k], end);
+        candidates.push(...pointCandidates(A, hull, edges, end, r, (n) => A.ge(v3.dot(A, n, toward), 0), `mc${k}`, false));
+    });
+    // The segment square to n against a corner: n from the corner to the axis's line.
+    hull.points.forEach((p, v) => {
+        const w0 = v3.sub(A, c, constVector(A, p));
+        const t = v3.dot(A, w0, a);
+        const w = v3.name(A, `mcs${v + 1}w`, v3.sub(A, w0, v3.scale(A, a, t)));
+        const length = A.name(`mcs${v + 1}l`, A.sqrt(v3.dot(A, w, w)));
+        const safe = A.max(length, 1e-300);
+        const n = v3.name(A, `mcs${v + 1}n`, w.map((x) => A.div(x, safe)));
+        const cone = A.and(A.gt(length, 1e-15), ...hull.neighbours[v].map((q) => A.le(cdot(A, numberSub(hull.points[q], p), w), 0)));
+        const within = A.le(A.abs(t), L);
+        candidates.push({ value: A.sub(length, r), valid: A.and(cone, within), n, pos: v3.add(A, constVector(A, p), v3.scale(A, n, A.mul(0.5, A.sub(length, r)))) });
+    });
+    // The segment against an edge: n square to both, the way that lies within the edge's normal cone.
+    edges.forEach(({ a: start, u, KL, KR }, e) => {
+        const m = v3.name(A, `mcx${e + 1}m`, v3.cross(A, a, constVector(A, u)));
+        const size = A.name(`mcx${e + 1}s`, A.sqrt(v3.dot(A, m, m)));
+        const plus = A.and(A.ge(cdot(A, KL, m), 0), A.ge(cdot(A, KR, m), 0));
+        const minus = A.and(A.le(cdot(A, KL, m), 0), A.le(cdot(A, KR, m), 0));
+        const sign = A.pick(plus, A.num(1), A.num(-1));
+        const safe = A.max(size, 1e-300);
+        const n = v3.name(A, `mcx${e + 1}n`, m.map((x) => A.div(A.mul(sign, x), safe)));
+        const d0 = v3.sub(A, c, constVector(A, hull.points[start]));
+        const gap = A.name(`mcx${e + 1}g`, v3.dot(A, n, d0));
+        // The lines' nearest points: c + s a on the capsule's, p + t u on the edge's.
+        const b = cdot(A, u, a);
+        const du = cdot(A, u, d0);
+        const da = v3.dot(A, d0, a);
+        const den = A.max(A.sub(1, A.mul(b, b)), 1e-300);
+        const s = A.div(A.sub(A.mul(b, du), da), den);
+        const t = A.div(A.sub(du, A.mul(b, da)), den);
+        const onEdge = v3.add(A, constVector(A, hull.points[start]), v3.scale(A, constVector(A, u), t));
+        const onCapsule = v3.sub(A, v3.add(A, c, v3.scale(A, a, s)), v3.scale(A, n, r));
+        candidates.push({ value: A.sub(gap, r), valid: A.and(A.or(plus, minus), A.gt(size, 1e-9), A.le(A.abs(s), L)), n, pos: v3.scale(A, v3.add(A, onEdge, onCapsule), 0.5) });
+    });
+    const best = bestOf(A, candidates, 'mcb');
+    const dist = A.name('mcdist', best.gap);
+    const normal = v3.name(A, 'mcn', v3.scale(A, meshDirection(A, mesh, best.n), -1));
+    const deepest = { active: A.le(dist, margin), dist, pos: meshPoint(A, mesh, best.pos), frame: [...normal, ...noTangent(A)] };
+    // Lying along a face: the face's polygon, and the segment (along the capsule's surface toward it) cut to it.
+    const isFace = A.name('mcif', A.or(...best.chosen.slice(0, faceCount)));
+    const flat = A.name('mcfl', A.and(isFace, A.lt(A.abs(v3.dot(A, best.n, a)), 0.045)));
+    const polygonFlags = hull.polygons.map((_, p) => {
+        const members = best.chosen.slice(0, faceCount).filter((_, t) => polygonOf[t] === p);
+        return members.length ? A.name(`mcg${p + 1}`, A.or(...members)) : A.never;
+    });
+    const start = v3.name(A, 'mcl0', v3.sub(A, ends[0], v3.scale(A, best.n, r)));
+    const run = v3.name(A, 'mcl1', v3.sub(A, ends[1], ends[0]));
+    // Each polygon's interval of the run inside it, [low, high] within [0, 1].
+    const intervals = sides.map((list, p) => {
+        let low = A.num(0);
+        let high = A.num(1);
+        list.forEach(({ m, o }) => {
+            const at = A.sub(cdot(A, m, start), o);
+            const rate = cdot(A, m, run);
+            const t = A.div(A.neg(at), A.pick(A.gt(A.abs(rate), 1e-300), rate, A.num(1)));
+            low = A.pick(A.lt(rate, 0), A.max(low, t), low);
+            high = A.pick(A.gt(rate, 0), A.min(high, t), high);
+            // Parallel to the side and outside it: nothing inside.
+            high = A.pick(A.and(A.le(A.abs(rate), 1e-300), A.gt(at, 0)), A.num(-1), high);
+        });
+        return [A.name(`mci${p + 1}a`, low), A.name(`mci${p + 1}b`, high)];
+    });
+    const low = A.name('mcia', pickOne(A, polygonFlags, intervals.map(([l]) => l), 'mciax'));
+    const high = A.name('mcib', pickOne(A, polygonFlags, intervals.map(([, h]) => h), 'mcibx'));
+    const offset = A.name('mco', pickOne(A, best.chosen.slice(0, faceCount), hull.offsets, 'mcox'));
+    const along = (t, k) => {
+        const x = v3.name(A, `mcz${k}x`, v3.add(A, start, v3.scale(A, run, t)));
+        const d = A.name(`mcz${k}d`, A.sub(v3.dot(A, best.n, x), offset));
+        return { dist: d, pos: meshPoint(A, mesh, v3.sub(A, x, v3.scale(A, best.n, A.mul(0.5, d)))) };
+    };
+    const lying = A.name('mcly', A.and(flat, A.le(low, high)));
+    const [p0, p1] = [along(low, 0), along(high, 1)];
+    return [
+        { active: A.pick(lying, A.le(p0.dist, margin), deepest.active), dist: A.pick(lying, p0.dist, dist), pos: v3.pick(A, lying, p0.pos, deepest.pos), frame: deepest.frame },
+        { active: A.and(lying, A.le(p1.dist, margin), A.gt(A.sub(high, low), 1e-12)), dist: p1.dist, pos: p1.pos, frame: deepest.frame }
+    ];
+}
