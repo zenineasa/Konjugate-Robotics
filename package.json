@@ -1,7 +1,7 @@
 {
   "name": "konjugate-robotics",
-  "version": "1.0.9",
-  "minimumKonjugateVersion": "1.2.11",
+  "version": "1.0.10",
+  "minimumKonjugateVersion": "1.3.5",
   "private": true,
   "type": "module",
   "description": "Robotics toolbox for Konjugate.",
