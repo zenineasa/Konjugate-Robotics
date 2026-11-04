@@ -95,7 +95,9 @@ test('a drawn equation reads as LaTeX and evaluates as the engine would', () => 
     const acceleration = pivot.equationModel.outputs.find(({ stateId }) => document.nodes[2].states.find(({ id }) => id === stateId)?.symbol === 'jointAcceleration');
     assert.equal(acceleration.mathJson, 'qdd');
     const qdd = pivot.equationModel.definitions.find(({ symbol }) => symbol === 'qdd');
-    assert.match(qdd.latex, /\\frac\{/);
+    // Kept as MathJSON alone; the canvas writes its LaTeX when the relationship is opened (tests/engine/drawn.test.mjs).
+    assert.deepEqual(Object.keys(qdd).sort(), ['mathJson', 'symbol']);
+    assert.equal(qdd.mathJson[0], 'Divide');
     // Every definition and output is built from operations the engine knows.
     const known = new Set(['Add', 'Multiply', 'Negate', 'Divide', 'Sin', 'Cos', 'Tanh', 'Arcsin', 'Arctan2', 'Min', 'Max', 'Which', 'Greater', 'Less']);
     const operators = (expression, found = new Set()) => {

@@ -22,6 +22,8 @@
 // sizes) }; a mesh's also hull (lib/hull.mjs's, in its frame) and centre. Pure, no dependencies.
 
 export const minimumValue = 1e-15; // MuJoCo's mjMINVAL
+// Newton's steps each search on a circle or the sphere takes (fewer miss the largest gap by more than a nanometre).
+const SEARCH_STEPS = 14;
 
 // Numbers: conditions are booleans.
 export const numbers = Object.freeze({
@@ -998,7 +1000,7 @@ function capsuleCylinder(A, capsule, cylinder, margin) {
     const rimward = startOf(b, 'ycwb');
     const starts = [startOf(d, 'ycw0'), rimward, v3.scale(A, rimward, -1), ...besideCrease(A, a, b, fallback, 'ycwk')];
     {
-        const n = circleSearch(A, a, terms, starts, 14, 'ycc');
+        const n = circleSearch(A, a, terms, starts, SEARCH_STEPS, 'ycc');
         const q = cylinderFacing(A, cylinder, n, 'yccf');
         const p = along(n, clip(A, dot3(A, v3.sub(A, q, capsule.pos), a), A.neg(L), L));
         candidates.push({ n, valid: A.always, pos: midway(p, q) });
@@ -1186,7 +1188,7 @@ function cylinderBox(A, cylinder, box, margin) {
         // And the circle's directions nearest the cylinder's axis, where a cap is nearly face on and the gap is steep.
         const rimward = startOf(b, `ybeb${k}`);
         const starts = [...diagonals, rimward, v3.scale(A, rimward, -1), ...besideCrease(A, axis, b, fallback, `ybek${k}`)];
-        const n = circleSearch(A, axis, terms, starts, 14, `ybe${k}c`);
+        const n = circleSearch(A, axis, terms, starts, SEARCH_STEPS, `ybe${k}c`);
         const p = reaching(n, `ybep${k}`);
         const signs = signsAlong(n).map((value, j) => (j === k ? A.num(0) : value));
         const edge = cornerOf(signs);
@@ -1297,12 +1299,12 @@ function cylinderCylinder(A, first, second, margin) {
         return [startOf(d, 'd'), rimward, v3.scale(A, rimward, -1), ...besideCrease(A, axis, other, fallback, `${tag}k`)];
     };
     {
-        const n = circleSearch(A, a, terms, startsFor(a, 'yysa'), 14, 'yyca');
+        const n = circleSearch(A, a, terms, startsFor(a, 'yysa'), SEARCH_STEPS, 'yyca');
         const q = facing(n, 'yycaq');
         candidates.push({ n, valid: A.always, pos: midway(v3.add(A, v3.add(A, first.pos, v3.scale(A, n, R1)), v3.scale(A, a, clip(A, dot3(A, v3.sub(A, q, first.pos), a), A.neg(H1), H1))), q) });
     }
     {
-        const n = circleSearch(A, b, terms, startsFor(b, 'yysb'), 14, 'yycb');
+        const n = circleSearch(A, b, terms, startsFor(b, 'yysb'), SEARCH_STEPS, 'yycb');
         const p = reaching(n, 'yycbp');
         candidates.push({ n, valid: A.always, pos: midway(p, v3.add(A, v3.sub(A, second.pos, v3.scale(A, n, R2)), v3.scale(A, b, clip(A, dot3(A, v3.sub(A, p, second.pos), b), A.neg(H2), H2)))) });
     }
@@ -1328,7 +1330,7 @@ function cylinderCylinder(A, first, second, margin) {
         start: normalize(A, `yyss${m}`, v3.sub(A, v3.sub(A, d, v3.scale(A, a, A.mul(sa, H1))), v3.scale(A, b, A.mul(sb, H2)))).unit, signs: [sa, sb]
     }))];
     {
-        const n = sphereSearch(A, terms, starts, 14, 'yyr');
+        const n = sphereSearch(A, terms, starts, SEARCH_STEPS, 'yyr');
         candidates.push({ n, valid: A.always, pos: midway(reaching(n, 'yyrp'), facing(n, 'yyrq')) });
     }
     const deepest = largestGap(A, candidates, terms, 'yyl');

@@ -1158,14 +1158,16 @@ function equations() {
     };
     const define = (symbol, expression) => {
         if (typeof expression === 'number' || typeof expression === 'string') return expression;
-        definitions.push({ symbol, mathJson: expression, latex: E.toLatex(expression) });
+        // Its MathJSON alone: the canvas writes its LaTeX from that when the relationship is opened (core 1.2), and a
+        // model with contact keeps tens of thousands of definitions.
+        definitions.push({ symbol, mathJson: expression });
         return symbol;
     };
     const defineAll = (prefix, values) => values.map((value, index) => define(`${prefix}${index + 1}`, value));
     const defineMatrix = (prefix, matrix) => matrix.map((row, rowIndex) => row.map((value, column) => define(`${prefix}${rowIndex + 1}${column + 1}`, value)));
     const output = (node, role, symbol, expression) => {
         const state = node.bySymbol.get(symbol);
-        outputs.push({ role, stateId: state.id, mathJson: expression, latex: E.toLatex(expression), setsValue: true });
+        outputs.push({ role, stateId: state.id, mathJson: expression, setsValue: true });
     };
     // Only the definitions an equation needs, directly or through others.
     const pruned = () => {

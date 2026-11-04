@@ -654,10 +654,12 @@ test('MuJoCo on its own moves ball joints (their friction and limits too) and a 
     }
 });
 
-// Every equation Build writes can be edited by a user in the canvas: its LaTeX reads back, in Konjugate's own parser, as
-// an expression giving the same value as the MathJSON the engine runs.
+// Every equation Build writes can be edited by a user in the canvas: the LaTeX the canvas shows for it (its own, or
+// written by the canvas from its MathJSON) reads back, in Konjugate's own parser, as an expression giving the same
+// value as the MathJSON the engine runs.
 test('every equation a build writes reads back in the canvas as the same expression', async () => {
     const { validateEquationLatex } = await import(pathToFileURL(konjugateModule('src/equationModel.mjs')));
+    const { equationLatex } = await import(pathToFileURL(konjugateModule('src/relationshipEquations.mjs')));
     const evaluate = (expression, values) => {
         if (typeof expression === 'number') return expression;
         if (typeof expression === 'string') return expression === 'True' ? 1 : values.get(expression);
@@ -695,13 +697,14 @@ test('every equation a build writes reads back in the canvas as the same express
             const readable = bindings.map(({ symbol }) => ({ symbol }));
             const values = new Map(bindings.map(({ symbol }) => [symbol, random()]));
             for (const item of [...definitions, ...outputs]) {
-                const validation = validateEquationLatex(item.latex, readable);
-                assert.equal(validation.valid, true, `${id}, ${edge.name}: ${item.latex} ${validation.errors.join(' ')}`);
+                const latex = equationLatex(item);
+                const validation = validateEquationLatex(latex, readable);
+                assert.equal(validation.valid, true, `${id}, ${edge.name}: ${latex} ${validation.errors.join(' ')}`);
                 const expected = evaluate(item.mathJson, values);
                 const actual = evaluate(validation.mathJson, values);
                 // A root of a negative random value is NaN either way, which reads back as the same expression.
                 const same = (Number.isNaN(expected) && Number.isNaN(actual)) || Math.abs(expected - actual) <= 1e-9 * Math.max(1, Math.abs(expected));
-                assert.ok(same, `${id}, ${edge.name}: ${item.latex} gives ${actual}, not ${expected}.`);
+                assert.ok(same, `${id}, ${edge.name}: ${latex} gives ${actual}, not ${expected}.`);
                 if (item.symbol) { readable.push({ symbol: item.symbol }); values.set(item.symbol, expected); }
             }
         }
